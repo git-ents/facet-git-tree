@@ -12,8 +12,10 @@ The invariants and functionality described here will be upheld (and expanded) wh
 
 The following requirements define the expected behavior of the Git tree serialization and deserialization targets.
 
-[caution]
+[CAUTION]
+====
 This set of requirements is not yet stable, and will grow (and change) over time.
+====
 
 === Compatibility
 
@@ -47,13 +49,26 @@ The `facet-git-tree` crate MUST provide a struct which can be serialized into Gi
 [role="requirement", id="serialization.design.leaves"]
 .Serialization Design
 --
-Data which is not a collection, and which is not represented by another schema object, MUST be stored in Git blobs.
+Data which is not a collection, and which is not represented by another schema object, MUST be stored in UTF-8 encoded Git blobs.
 --
 
 [role="requirement", id="serialization.design.trees.schemas"]
 .Schema Object Encoding
 --
 Schema objects MUST be encoded as Git trees with a `.schema` sentinel entry which holds a tree that represents the `facet` type's `SHAPE`.
+--
+
+[role="requirement", id="serialization.design.trees.shape"]
+.Assumed Schema Shape
+--
+The identity of a type encoded by `.schema` is always recorded as an identifier (unique to the particular `.schema` tree) in an `id` tree entry that resolves to a blob.
+Definitions are recorded in a flattened `defs` subtree which references identifiers, and never a full schema tree.
+
+[IMPORTANT]
+====
+This is required to avoid cycles in type definitions.
+Values are inherently cycle-free due to Git's DAG data model.
+====
 --
 
 [role="requirement", id="serialization.design.trees.collections"]
@@ -64,6 +79,15 @@ The following standard collections in Rust MUST be provided as built-in `facet` 
 . Array
 . Vec
 . Map
+--
+
+[role="requirement", id="serialization.design.normalization.leaves"]
+.Normalizing Leaves
+--
+The following leaf representations MUST be normalized on-write.
+
+. Negative zero MUST be normalized to positive zero.
+. The _not a number_ (`nan`) value MUST be normalized to the unquoted string `nan`.
 --
 
 === Deserialization
@@ -87,7 +111,9 @@ If two data instances serialize to the same Git tree, they MUST be considered eq
 --
 A Git diff driver MUST be provided which supports comparing `facet` data structurally, assuming the `facet-git-tree` shape.
 
-[note]
+[NOTE]
+====
 Due to limitations in the `git` CLI's `diff` algorithm selection, `git show` and `git diff` will ALWAYS use a user's configured `diff` driver and not the driver provided by `facet-git-tree`.
 Regardless, tooling which specifically targets `facet-git-tree` will benefit from the structural differencing driver.
+====
 --
