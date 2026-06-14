@@ -38,6 +38,17 @@ The `facet-git-tree` crate MUST strictly adhere to semantic versioning.
 The `facet-git-tree` crate MUST be compatible with Git's v2 object format.
 --
 
+[role="requirement", id="compatibility.git.hash"]
+.Object Identity Hash
+--
+Object identities MUST be computed as 20-byte SHA-1 digests over Git's canonical object encoding, matching Git's default (non-`objectFormat`) repositories.
+
+[NOTE]
+====
+SHA-256 repositories are currently out of scope, but support SHOULD be added in the future as the project matures.
+====
+--
+
 === Serialization
 
 [role="requirement", id="serialization.mechanism"]
@@ -50,6 +61,12 @@ The `facet-git-tree` crate MUST provide a struct which can be serialized into Gi
 .Serialization Design
 --
 Data which is not a collection, and which is not represented by another schema object, MUST be stored in UTF-8 encoded Git blobs.
+--
+
+[role="requirement", id="serialization.design.booleans"]
+.Boolean Serialization
+--
+Booleans MUST be serialized as `true` or `false` strings.
 --
 
 [role="requirement", id="serialization.design.trees.schemas"]
@@ -71,6 +88,14 @@ Values are inherently cycle-free due to Git's DAG data model.
 ====
 --
 
+[role="requirement", id="serialization.design.trees.variants"]
+.Variant Encoding
+--
+Enum values MUST be encoded as schema objects.
+The active variant MUST be recorded in a `.variant` sentinel entry that resolves to a UTF-8 blob holding the variant's name.
+The variant's fields, if any, MUST be encoded as sibling entries following the leaf and schema-object rules: struct-variant fields are named by their field name, and tuple-variant fields are named by their zero-based positional index, encoded as a link:#serialization.design.trees.ordinals[zero-padded ordinal name].
+--
+
 [role="requirement", id="serialization.design.trees.collections"]
 .Provided Collection Types
 --
@@ -79,6 +104,31 @@ The following standard collections in Rust MUST be provided as built-in `facet` 
 . Array
 . Vec
 . Map
+--
+
+[role="requirement", id="serialization.design.trees.ordering"]
+.Entry Name Ordering
+--
+Entries addressed by a positional index — tuple-variant fields and the elements of sequence collections (`Array`, `Vec`) — MUST be named by their zero-based index encoded as zero-padded decimal at least four digits wide (`0000`, `0001`, …, `0010`, …).
+
+[NOTE]
+====
+The zero-padding aligns Git's  tree-entry ordering with numeric index ordering, which keeps sequentially-accessed entries adjacent for better cache-line locality during tree iteration.
+This is purely a performance optimization: correctness MUST NOT depend on tree-entry ordering, and indices MUST be parsed numerically on read.
+A collection with more than `9999` elements simply loses the locality benefit beyond that point; it remains correct.
+====
+--
+
+[role="requirement", id="serialization.design.leaves.encoding"]
+.Leaf Byte Encoding
+--
+A leaf's blob content MUST be the value's raw representation, with no delimiters, quoting, or trailing newline.
+A `String` is stored as its UTF-8 bytes verbatim; a scalar is stored as the bytes of its textual form.
+
+[NOTE]
+====
+This is the representation that link:#serialization.design.normalization.leaves[leaf normalization] operates on, and the content that Git wraps in its canonical `blob <len>\0…` encoding to compute link:#compatibility.git.hash[the object identity], just as the `git` CLI would.
+====
 --
 
 [role="requirement", id="serialization.design.normalization.leaves"]
@@ -104,16 +154,4 @@ Deserialization of a data which was serialized via `facet-git-tree` MUST result 
 .Structural Equality
 --
 If two data instances serialize to the same Git tree, they MUST be considered equal for purposes of data retention.
---
-
-[role="requirement", id="structural.comparison.diff"]
-.Structural Differencing
---
-A Git diff driver MUST be provided which supports comparing `facet` data structurally, assuming the `facet-git-tree` shape.
-
-[NOTE]
-====
-Due to limitations in the `git` CLI's `diff` algorithm selection, `git show` and `git diff` will ALWAYS use a user's configured `diff` driver and not the driver provided by `facet-git-tree`.
-Regardless, tooling which specifically targets `facet-git-tree` will benefit from the structural differencing driver.
-====
 --
