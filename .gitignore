@@ -1,3 +1,4 @@
 /target/
 /.claude/
 /.rumdl_cache/
+*.html
