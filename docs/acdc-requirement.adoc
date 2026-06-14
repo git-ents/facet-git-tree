@@ -1,0 +1,276 @@
+= acdc-requirement: Requirements Authoring Extension for AsciiDoc
+Joey Carpinelli <joseph.carpinelli@icloud.com>
+:req-prefix: REQ
+:req-numbering: section
+
+[abstract]
+****
+.ABSTRACT
+`acdc-requirement` is an `acdc` extension that adds first-class requirements
+authoring to AsciiDoc: typed requirement blocks with rich statements,
+rationales, acceptance criteria, stable identifiers, lifecycle status, and
+bidirectional traceability.
+
+This document specifies the *authoring surface only* — how the extension reads
+and writes in `.adoc`. Implementation, AST, and converter internals are out of
+scope.
+****
+
+== Design Principles
+
+. *Idiomatic AsciiDoc first.* A requirement is a delimited block with a style,
+not a bespoke mini-language. Everything reuses existing attribute, role, id, and
+title mechanics so a plain processor degrades gracefully.
+. *Simple stays one line; rich scales smoothly.* The common case is a title plus
+one normative sentence. Rationale, criteria, and traceability are additive and
+never required.
+. *Every part is typed and machine-extractable.* Prose a human reads maps 1:1 to
+fields a matrix, ReqIF, or JSON export can query. No metadata trapped in free
+text.
+. *Atomic and normative by construction.* The model nudges toward one
+requirement, one BCP-14 keyword, one verification path — and lints when that is
+violated.
+. *Footguns designed out.* Dotted identifiers, caption noise, and misleading
+block classes are eliminated by design, not worked around.
+
+== The Requirement Block
+
+[requirement, requirement.anatomy, priority=must, status=stable]
+.Requirement Block Anatomy
+====
+A requirement MUST be authored as a delimited block whose first positional
+attribute is the style `requirement`.
+
+[rationale]
+Binding to a registered block style keeps the construct native to AsciiDoc and
+lets unaware processors fall back to a plain example block.
+
+[example]
+[source,asciidoc]
+----
+[requirement, compatibility.facet, priority=must, status=stable]
+.Compatibility with the Facet Ecosystem
+====
+The {req-subject} crate MUST satisfy all requirements of general `facet`
+adapter crates.
+
+[rationale]
+This crate is first and foremost an adapter of the `facet` project; diverging
+from facet's adapter contract would defeat its purpose.
+
+[criteria]
+--
+* `cargo test --features compliance` passes.
+* The shared `facet-adapter-acceptance` conformance suite reports zero failures.
+--
+
+[note]
+Compatibility is pinned to the `facet` MSRV, not the crate's own.
+====
+----
+====
+
+The block has the following anatomy.
+
+Style:: The first positional attribute `requirement` selects the block
+processor.
+Key:: The second positional attribute is the requirement identifier, e.g.
+`compatibility.facet`. Dots are legal in attribute _values_, so the `#id.role`
+shorthand collision is impossible here. The `#dotless-id` shorthand still works
+when desired; `id=` and `key=` longhand are also accepted. The processor derives
+the sanitized HTML anchor from the key.
+Title:: The `.Title` line is the human-readable name. It is REQUIRED; an
+untitled requirement is a lint error.
+Statement:: The first body paragraph is the normative statement.
+Sub-parts:: `[rationale]`, `[criteria]`, `[note]`, `[exception]`, and
+`[example]` are typed sub-parts. A single paragraph needs no delimiter;
+multi-block content wraps in an open block (`--`).
+
+== Metadata Attributes
+
+[cols="1,2,3", options="header"]
+|===
+| Attribute | Values | Purpose
+
+| _(2nd positional)_ / `key=`
+| `domain.name` or `REQ-NNN`
+| Stable unique identifier.
+
+| `priority=`
+| `must` \| `should` \| `may` (aliases `shall`, `recommended`, `optional`)
+| BCP-14 strength; cross-checked against the keyword in the body.
+
+| `status=`
+| `draft` \| `proposed` \| `stable` \| `deprecated` \| `removed`
+| Lifecycle; renders as a status pill.
+
+| `kind=`
+| `ubiquitous` \| `event` \| `state` \| `option` \| `unwanted` \| `complex`
+| EARS pattern; shapes validation.
+
+| `subject=`
+| text
+| System element under requirement; available as `{req-subject}` in the body.
+
+| `tags=`
+| comma list
+| Filtering for roll-ups.
+
+| `owner=`
+| text
+| Responsible party.
+
+| `since=`
+| version or date
+| Introduced in.
+
+| `vmethod=`
+| `test` \| `analysis` \| `inspection` \| `demonstration`
+| V&V classification, distinct from the prose `[criteria]`.
+|===
+
+== Traceability Links
+
+Link attributes take comma-separated keys; quote values containing spaces. Every
+link is *bidirectional* in the model — declaring one direction synthesizes the
+inverse for matrices, so only the natural direction is authored.
+
+[cols="1,1,2", options="header"]
+|===
+| Attribute | Synthesized Inverse | Meaning
+
+| `refines=` | `refined-by` | Decomposes a higher-level requirement.
+| `derived-from=` | `derives` | Traces to a stakeholder need or source.
+| `depends=` | `required-by` | Ordering or prerequisite.
+| `conflicts=` | `conflicts` | Mutually tense (symmetric).
+| `supersedes=` | `superseded-by` | Replaces an older requirement.
+| `satisfied-by=` | — | Implementation artifact (code anchor, module).
+| `verified-by=` | — | Test or proof artifact.
+|===
+
+[requirement, serialization.deterministic, priority=must, refines=compatibility.facet, verified-by=test.det-roundtrip]
+.Deterministic Tree Output
+====
+Serializing identical input twice MUST produce byte-identical Git trees.
+
+[rationale]
+Deterministic output is a precondition for content-addressed storage and for
+meaningful structural comparison between serializations.
+====
+
+== Cross-References and Inline Text
+
+The inline macro `req:KEY[]` renders a formatted reference; an optional argument
+selects the form.
+
+[source,asciidoc]
+----
+See req:compatibility.facet[] for the umbrella constraint.
+req:compatibility.facet[title]   // title only
+req:compatibility.facet[id]      // key only, as a badge
+req:serialization.deterministic[status]   // key plus status pill
+----
+
+Plain `\<<compatibility.facet>>` also resolves to the auto-formatted reference
+text, so cross-references work without the inline macro.
+
+== Roll-Up Macros
+
+[source,asciidoc]
+----
+// Filtered list or table of requirements
+req-list::[tags=core, status=stable, sort=key, fields="key,title,priority,status"]
+
+// Traceability matrix between two link layers
+trace-matrix::[from=requirement, to=verified-by, group=status]
+
+// Gap report: requirements lacking coverage
+req-coverage::[missing="verified-by,satisfied-by"]
+----
+
+These read the document's requirement registry, assembled from every
+requirement block, and render at the macro's location.
+
+== Document-Header Configuration
+
+[source,asciidoc]
+----
+:req-prefix: REQ                 // default key namespace
+:req-numbering: section          // section | global | none
+:req-default-status: draft
+:req-strict:                     // fail build on: duplicate keys, dangling links,
+                                 //   missing/zero/multiple BCP-14 keywords, untitled reqs
+:req-lint-weasel:                // warn on "etc.", "and/or", "as appropriate", "fast"
+:req-keyword-policy: bcp14       // require exactly one normative keyword per requirement
+----
+
+== EARS Patterns (the `kind=` Contract)
+
+[cols="1,3", options="header"]
+|===
+| `kind` | Template the body should follow
+
+| `ubiquitous` | "The `<subject>` MUST `<response>`."
+| `event` | "WHEN `<trigger>`, the `<subject>` MUST `<response>`."
+| `state` | "WHILE `<state>`, the `<subject>` MUST `<response>`."
+| `option` | "WHERE `<feature>`, the `<subject>` MUST `<response>`."
+| `unwanted` | "IF `<condition>`, THEN the `<subject>` MUST `<response>`."
+| `complex` | Composition of the above.
+|===
+
+`kind` is advisory metadata. Under `:req-strict:` the linter checks that the
+body's leading clause matches the declared pattern.
+
+== Validation
+
+Under `:req-strict:` the extension enforces the following.
+
+* Duplicate keys, and dangling inbound or outbound link targets.
+* Exactly one BCP-14 keyword per requirement (zero is non-normative; many is
+non-atomic).
+* Priority attribute versus body keyword agreement (`priority=must` with a body
+that says SHOULD is an error).
+* Orphan detection: no trace in or out.
+* Optional ambiguity and weasel-word warnings (`:req-lint-weasel:`).
+
+== Output Model
+
+A requirement renders as a purpose-named `<section>` with a controlled class set
+and `data-*` mirrors of every field, so it is queryable and exportable and never
+reuses a misleading built-in block class.
+
+[source,html]
+----
+<section id="compatibility.facet"
+         class="requirement requirement--must requirement--stable"
+         data-key="compatibility.facet" data-priority="must"
+         data-status="stable" data-verified-by="test.det-roundtrip">
+  <header class="requirement__head">
+    <span class="requirement__key">COMPAT.FACET</span>
+    <h4 class="requirement__title">Compatibility with the Facet Ecosystem</h4>
+    <span class="requirement__pill">stable</span>
+  </header>
+  <div class="requirement__statement">...</div>
+  <div class="requirement__rationale">...</div>
+  <div class="requirement__criteria">...</div>
+</section>
+----
+
+A sidecar `requirements.json` and a ReqIF export fall out of the same registry.
+
+== Open Questions
+
+. *Key namespace.* Human-hierarchical keys (`serialization.deterministic`) read
+better but resist reorganization; opaque-stable keys (`REQ-0007`) survive
+restructuring but carry no meaning. A mixed scheme (stable key plus a mutable
+hierarchical label) is a third option.
+. *Acceptance criteria granularity.* `[criteria]` may remain free prose, become a
+structured checklist with per-item identifiers so individual criteria are
+independently traceable, or support both.
+
+== Non-Goals
+
+* Project management workflow (assignment, sprints, burndown).
+* Live editing or a GUI.
+* Enforcing a particular requirements methodology beyond optional EARS and
+BCP-14 checks.

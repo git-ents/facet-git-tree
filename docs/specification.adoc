@@ -1,0 +1,93 @@
+= Specification for Git Tree Serialization Target
+Joey Carpinelli <joseph.carpinelli@icloud.com>
+
+[abstract]
+****
+New reflection primitives, e.g. the `Facet` trait provided by https://facet.rs[`facet`], allow for simpler runtime inspection of deserialized data.
+This project uses `facet` to encode data of arbitrary shapes into Git trees.
+The invariants and functionality described here will be upheld (and expanded) while the project is developed.
+****
+
+== Requirements
+
+The following requirements define the expected behavior of the Git tree serialization and deserialization targets.
+
+[caution]
+This set of requirements is not yet stable, and will grow (and change) over time.
+
+=== Compatibility
+
+[role="requirement", id="compatibility.facet"]
+.Compatibility with the Facet Ecosystem
+--
+The `facet-git-tree` crate MUST satisfy all requirements of general `facet` adapter crates.
+--
+
+[role="requirement", id="compatibility.update"]
+.Compatibility with Prior Releases
+--
+The `facet-git-tree` crate MUST strictly adhere to semantic versioning.
+--
+
+
+[role="requirement", id="compatibility.git"]
+.Compatibility with Git
+--
+The `facet-git-tree` crate MUST be compatible with Git's v2 object format.
+--
+
+=== Serialization
+
+[role="requirement", id="serialization.mechanism"]
+.Serialization Mechanism
+--
+The `facet-git-tree` crate MUST provide a struct which can be serialized into Git trees using only the `Facet` trait.
+--
+
+[role="requirement", id="serialization.design.leaves"]
+.Serialization Design
+--
+Data which is not a collection, and which is not represented by another schema object, MUST be stored in Git blobs.
+--
+
+[role="requirement", id="serialization.design.trees.schemas"]
+.Schema Object Encoding
+--
+Schema objects MUST be encoded as Git trees with a `.schema` sentinel entry which holds a tree that represents the `facet` type's `SHAPE`.
+--
+
+[role="requirement", id="serialization.design.trees.collections"]
+.Provided Collection Types
+--
+The following standard collections in Rust MUST be provided as built-in `facet` types, each with their own `.schema` entry value.
+
+. Array
+. Vec
+. Map
+--
+
+=== Deserialization
+
+[role="requirement", id="deserialization.roundtrip"]
+.Support for Serialization and Deserialization
+--
+Deserialization of a data which was serialized via `facet-git-tree` MUST result in the original data.
+--
+
+=== Structural Comparison
+
+[role="requirement", id="structural.comparison.equality"]
+.Structural Equality
+--
+If two data instances serialize to the same Git tree, they MUST be considered equal for purposes of data retention.
+--
+
+[role="requirement", id="structural.comparison.diff"]
+.Structural Differencing
+--
+A Git diff driver MUST be provided which supports comparing `facet` data structurally, assuming the `facet-git-tree` shape.
+
+[note]
+Due to limitations in the `git` CLI's `diff` algorithm selection, `git show` and `git diff` will ALWAYS use a user's configured `diff` driver and not the driver provided by `facet-git-tree`.
+Regardless, tooling which specifically targets `facet-git-tree` will benefit from the structural differencing driver.
+--
