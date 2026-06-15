@@ -16,7 +16,6 @@ use common::{WithArray, WithVec, get_tree_entry_mode, roundtrip, tree_entries};
 
 /// Vec elements are named by their zero-padded, zero-based index.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn vec_elements_named_by_zero_padded_ordinal() {
     let (root_id, store) = serialize(&WithVec {
         items: vec![10, 20, 30],
@@ -45,7 +44,6 @@ fn vec_elements_named_by_zero_padded_ordinal() {
 
 /// Array elements are named by their zero-padded, zero-based index.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn array_elements_named_by_zero_padded_ordinal() {
     let (root_id, store) = serialize(&WithArray {
         values: [10, 20, 30, 40],
@@ -67,7 +65,6 @@ fn array_elements_named_by_zero_padded_ordinal() {
 
 /// Ordinal names are at least four digits wide and parse as their numeric index.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn ordinal_names_are_at_least_four_digits() {
     let (root_id, store) = serialize(&WithVec {
         items: vec![10, 20, 30],
@@ -90,7 +87,6 @@ fn ordinal_names_are_at_least_four_digits() {
 /// name (`10000`), which sorts *before* `9999` lexically, so a correct roundtrip
 /// proves indices are parsed numerically rather than by tree-entry order.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn large_vec_roundtrips_with_wide_ordinals() {
     let items: Vec<i64> = (0..=10_000).map(|i| i * 2).collect();
 

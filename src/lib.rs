@@ -433,12 +433,9 @@ fn serialize_sequence<W: Write + ?Sized>(
         }
     } else if matches!(shape.def, Def::Array(_)) {
         let pa = peek
-            .into_ndarray()
+            .into_list_like()
             .map_err(|e| Error::Message(e.to_string()))?;
-        for i in 0..pa.count() {
-            let item = pa
-                .get(i)
-                .ok_or_else(|| Error::Message(format!("array index {i} missing")))?;
+        for (i, item) in pa.iter().enumerate() {
             let (oid, kind) = serialize_peek(item, store)?;
             entries.push(TreeEntry {
                 mode: EntryMode::from(kind),
