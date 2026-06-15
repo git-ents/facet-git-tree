@@ -158,7 +158,6 @@ fn nested_vec_roundtrip() {
 
 /// Option::Some roundtrips as Some.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn option_some_roundtrip() {
     assert_eq!(
         roundtrip(WithOptional { maybe: Some(99) }),
@@ -168,7 +167,6 @@ fn option_some_roundtrip() {
 
 /// Option::None roundtrips as None.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn option_none_roundtrip() {
     assert_eq!(
         roundtrip(WithOptional { maybe: None }),
