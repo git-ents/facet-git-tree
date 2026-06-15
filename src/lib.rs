@@ -137,12 +137,6 @@ pub enum Error {
     /// path separator `/`.
     #[error("invalid key {0:?}: must not contain '/'")]
     InvalidKey(String),
-    /// A facet key collides with a reserved sentinel name (`.schema`, `.variant`).
-    ///
-    /// These names carry facet-git-tree's own bookkeeping, so user data may not
-    /// use them as keys; [`check_key`] enforces this on the write side.
-    #[error("reserved key {0:?}: collides with a sentinel name")]
-    ReservedKey(String),
     /// A tree entry name (path segment) is not valid UTF-8.
     ///
     /// Holds the lossily-decoded name for diagnostics. Write-side names are
@@ -166,26 +160,15 @@ pub enum Error {
     Message(String),
 }
 
-/// Tree entry names reserved by the encoding for its own bookkeeping.
-///
-/// `.schema` carries the type definition attached to every schema object and
-/// `.variant` the selected enum variant. User data may not use these as keys;
-/// [`check_key`] rejects them.
-const RESERVED_NAMES: [&str; 2] = [".schema", ".variant"];
-
 /// Validate a user-supplied key for use as a Git tree entry name.
 ///
-/// Keys become tree entry names, which double as path segments, so a key may
-/// neither contain the path separator `/` ([`Error::InvalidKey`]) nor collide
-/// with a reserved sentinel name — `.schema` or `.variant` ([`Error::ReservedKey`]).
-/// Serialization is required to apply this to every dynamic key (such as map
-/// keys) before emitting its entry, so reserved names can never be written as data.
+/// Keys become tree entry names, which double as path segments, so a key may not
+/// contain the path separator `/` ([`Error::InvalidKey`]). Serialization is
+/// required to apply this to every dynamic key (such as map keys) before emitting
+/// its entry, so a `/`-bearing name can never be written as data.
 pub fn check_key(key: &str) -> Result<(), Error> {
     if key.contains('/') {
         return Err(Error::InvalidKey(key.to_owned()));
-    }
-    if RESERVED_NAMES.contains(&key) {
-        return Err(Error::ReservedKey(key.to_owned()));
     }
     Ok(())
 }
@@ -207,9 +190,9 @@ where
     W: Write + ?Sized,
 {
     // The implementation MUST validate every dynamic key (e.g. map keys) with
-    // [`check_key`] before emitting its tree entry, so that reserved sentinel
-    // names (`.schema`, `.variant`) and `/`-bearing names can never be written
-    // as data. Static field names come from Rust identifiers and are safe.
+    // [`check_key`] before emitting its tree entry, so a `/`-bearing name can
+    // never be written as data. Static field names come from Rust identifiers
+    // and are safe.
     let _ = (value, store);
     todo!("serialization not yet implemented")
 }

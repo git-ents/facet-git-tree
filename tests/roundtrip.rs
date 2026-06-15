@@ -140,7 +140,7 @@ fn map_roundtrip() {
     assert_eq!(roundtrip(WithMap { table }), WithMap { table: expected });
 }
 
-/// A Vec of schema objects (structs) roundtrips, exercising element-as-tree nesting.
+/// A Vec of structs roundtrips, exercising element-as-tree nesting.
 #[test]
 #[ignore = "serialization not yet implemented"]
 fn vec_of_structs_roundtrip() {

@@ -3,13 +3,12 @@
 //! Covers spec requirements:
 //!   serialization.mechanism — a serialize function exists and accepts Facet types
 //!   serialization.design.leaves — scalar fields serialize to UTF-8 blobs
-//!   serialization.design.trees.schemas — schema objects carry a `.schema` sentinel tree
-//!   serialization.design.trees.shape — `.schema` contains an `id` blob and a flat `defs` tree
+//!   serialization.design.trees.composites — composites are trees with no sentinel
 
 use facet_git_tree::{EntryKind, serialize};
 
 mod common;
-use common::{Nested, Person, Point, find_entry};
+use common::{Nested, Person, Point, find_entry, tree_entries};
 
 // --- serialization.mechanism ---
 
@@ -85,33 +84,36 @@ fn string_field_blob_content() {
     );
 }
 
-// --- serialization.design.trees.schemas ---
+// --- serialization.design.trees.composites ---
 
-/// Every serialized schema object has a `.schema` sentinel entry whose mode is Tree.
+/// A composite is a plain tree of its fields, carrying no sentinel entry.
 #[test]
 #[ignore = "serialization not yet implemented"]
-fn schema_sentinel_is_present_and_is_tree() {
-    let (root_id, store) = serialize(&Point { x: 0.0, y: 0.0 }).expect("serialize should succeed");
+fn struct_is_plain_tree_of_fields() {
+    let (root_id, store) = serialize(&Point { x: 1.0, y: 2.0 }).expect("serialize should succeed");
 
-    let schema_entry = find_entry(&store, &root_id, ".schema");
+    let names: Vec<String> = tree_entries(&store, &root_id)
+        .iter()
+        .map(|e| e.filename.to_string())
+        .collect();
     assert_eq!(
-        schema_entry.mode.kind(),
-        EntryKind::Tree,
-        "`.schema` sentinel must be a tree"
+        names,
+        vec!["x".to_string(), "y".to_string()],
+        "struct tree must hold only its fields, with no sentinel entry"
     );
 }
 
-/// Nested schema objects each carry their own `.schema` tree.
+/// A nested struct field is itself a plain tree; the inner structure is recovered
+/// from the Facet type on read, not from any embedded schema.
 #[test]
 #[ignore = "serialization not yet implemented"]
-fn nested_struct_has_schema_sentinel() {
+fn nested_struct_field_is_tree() {
     let (root_id, store) = serialize(&Nested {
         location: Point { x: 1.0, y: 2.0 },
         label: "origin".to_string(),
     })
     .expect("serialize should succeed");
 
-    // The nested `location` field should itself be a tree (schema object).
     let location_entry = find_entry(&store, &root_id, "location");
     assert_eq!(
         location_entry.mode.kind(),
@@ -119,127 +121,13 @@ fn nested_struct_has_schema_sentinel() {
         "nested struct field must be encoded as a tree"
     );
 
-    // That sub-tree must also have a `.schema` sentinel.
-    let _inner_schema = find_entry(&store, &location_entry.oid, ".schema");
-}
-
-// --- serialization.design.trees.shape ---
-
-/// The `.schema` tree contains an `id` entry that resolves to a blob.
-#[test]
-#[ignore = "serialization not yet implemented"]
-fn schema_contains_id_blob() {
-    let (root_id, store) = serialize(&Point { x: 0.0, y: 0.0 }).expect("serialize should succeed");
-
-    let schema_entry = find_entry(&store, &root_id, ".schema");
-    let id_entry = find_entry(&store, &schema_entry.oid, "id");
+    let inner: Vec<String> = tree_entries(&store, &location_entry.oid)
+        .iter()
+        .map(|e| e.filename.to_string())
+        .collect();
     assert_eq!(
-        id_entry.mode.kind(),
-        EntryKind::Blob,
-        "`.schema/id` must be a blob"
+        inner,
+        vec!["x".to_string(), "y".to_string()],
+        "nested struct tree must hold only its fields"
     );
-
-    // The type identifier must be non-empty UTF-8.
-    let id_bytes = store
-        .get_blob(&id_entry.oid)
-        .expect("`.schema/id` blob must be in store");
-    assert!(!id_bytes.is_empty(), "type identifier must be non-empty");
-    std::str::from_utf8(&id_bytes).expect("type identifier must be valid UTF-8");
-}
-
-/// The `.schema/defs` subtree is flat — it contains only blob entries, never nested trees.
-///
-/// This flatness is required by the spec to prevent cycles in type definitions.
-#[test]
-#[ignore = "serialization not yet implemented"]
-fn schema_defs_is_flat() {
-    let (root_id, store) = serialize(&Point { x: 0.0, y: 0.0 }).expect("serialize should succeed");
-
-    assert_defs_flat(&store, &root_id);
-}
-
-/// `defs` flatness must hold even for a type that *references another named type*:
-/// `Nested` embeds a `Point`, and the spec requires the inner type to be recorded
-/// by identifier in a flat `defs`, never inlined as a full schema tree. With `Point`
-/// inlined, `defs` would contain a nested tree and this assertion would fail.
-#[test]
-#[ignore = "serialization not yet implemented"]
-fn nested_type_schema_defs_is_flat() {
-    let (root_id, store) = serialize(&Nested {
-        location: Point { x: 1.0, y: 2.0 },
-        label: "origin".to_string(),
-    })
-    .expect("serialize should succeed");
-
-    assert_defs_flat(&store, &root_id);
-}
-
-/// Two distinct schema objects for the same type have the same `id` blob content.
-#[test]
-#[ignore = "serialization not yet implemented"]
-fn same_type_has_same_schema_id() {
-    let (root1, store1) = serialize(&Point { x: 1.0, y: 2.0 }).expect("serialize should succeed");
-    let (root2, store2) = serialize(&Point { x: 9.0, y: -3.0 }).expect("serialize should succeed");
-
-    assert_eq!(
-        schema_id_bytes(&store1, &root1),
-        schema_id_bytes(&store2, &root2),
-        "same Facet type must have identical schema id regardless of value"
-    );
-}
-
-/// Distinct types have distinct `.schema/id` content, so a schema id actually
-/// identifies the type (and never collides across types).
-#[test]
-#[ignore = "serialization not yet implemented"]
-fn different_types_have_different_schema_ids() {
-    let (point_root, point_store) =
-        serialize(&Point { x: 0.0, y: 0.0 }).expect("serialize should succeed");
-    let (person_root, person_store) = serialize(&Person {
-        name: "Alice".to_string(),
-        age: 1,
-        active: true,
-    })
-    .expect("serialize should succeed");
-
-    assert_ne!(
-        schema_id_bytes(&point_store, &point_root),
-        schema_id_bytes(&person_store, &person_root),
-        "different Facet types must have different schema ids"
-    );
-}
-
-// --- helpers local to schema-shape assertions ---
-
-/// The bytes of a root object's `.schema/id` blob.
-fn schema_id_bytes(
-    store: &facet_git_tree::ObjectStore,
-    root: &facet_git_tree::ObjectId,
-) -> Vec<u8> {
-    let schema = find_entry(store, root, ".schema");
-    let id = find_entry(store, &schema.oid, "id");
-    store.get_blob(&id.oid).expect("`.schema/id` blob in store")
-}
-
-/// Assert a root object's `.schema/defs` is a tree of only blobs (no nested trees).
-fn assert_defs_flat(store: &facet_git_tree::ObjectStore, root: &facet_git_tree::ObjectId) {
-    let schema_entry = find_entry(store, root, ".schema");
-    let defs_entry = find_entry(store, &schema_entry.oid, "defs");
-    assert_eq!(
-        defs_entry.mode.kind(),
-        EntryKind::Tree,
-        "`.schema/defs` must be a tree"
-    );
-
-    let defs_entries = store
-        .get_tree(&defs_entry.oid)
-        .expect("`.schema/defs` must be in store");
-    for entry in defs_entries {
-        assert_eq!(
-            entry.mode.kind(),
-            EntryKind::Blob,
-            "`.schema/defs` entry `{}` must be a blob (flat — no nested trees)",
-            entry.filename
-        );
-    }
 }
