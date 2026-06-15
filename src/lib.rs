@@ -243,8 +243,14 @@ fn serialize_peek<W: Write + ?Sized>(
         return Ok((oid, EntryKind::Blob));
     }
 
-    // Struct → tree keyed by field names
+    // Struct or tuple → tree. A named struct keys entries by field name; a tuple
+    // or tuple struct keys them by zero-padded positional ordinal (facet models
+    // all of these as `UserType::Struct`, distinguished by `StructKind`).
     if let facet::Type::User(facet::UserType::Struct(st)) = shape.ty {
+        let positional = matches!(
+            st.kind,
+            facet::StructKind::Tuple | facet::StructKind::TupleStruct
+        );
         let ps = peek
             .into_struct()
             .map_err(|e| Error::Message(e.to_string()))?;
@@ -252,35 +258,14 @@ fn serialize_peek<W: Write + ?Sized>(
         for (i, field) in st.fields.iter().enumerate() {
             let child = ps.field(i).map_err(|e| Error::Message(e.to_string()))?;
             let (oid, kind) = serialize_peek(child, store)?;
+            let filename: gix_object::bstr::BString = if positional {
+                format!("{i:04}").into()
+            } else {
+                field.name.into()
+            };
             entries.push(TreeEntry {
                 mode: EntryMode::from(kind),
-                filename: field.name.into(),
-                oid,
-            });
-        }
-        entries.sort();
-        let oid = store
-            .write(&gix_object::Tree { entries })
-            .map_err(Error::Backend)?;
-        return Ok((oid, EntryKind::Tree));
-    }
-
-    // Tuple → tree keyed by zero-padded ordinal
-    if let facet::Type::User(facet::UserType::Struct(_)) = shape.ty {
-        // handled above; tuples use Type::Sequence or similar — fall through
-    }
-
-    if let Ok(pt) = peek.into_tuple() {
-        let count = pt.len();
-        let mut entries: Vec<TreeEntry> = Vec::with_capacity(count);
-        for i in 0..count {
-            let child = pt
-                .field(i)
-                .ok_or_else(|| Error::Message(format!("tuple field {i} missing")))?;
-            let (oid, kind) = serialize_peek(child, store)?;
-            entries.push(TreeEntry {
-                mode: EntryMode::from(kind),
-                filename: format!("{i:04}").into(),
+                filename,
                 oid,
             });
         }
@@ -361,31 +346,36 @@ fn serialize_peek<W: Write + ?Sized>(
             .variant_name_active()
             .map_err(|e| Error::Message(e.to_string()))?;
 
-        // Collect variant fields (unit → empty tree, tuple → ordinals, struct → names)
-        let inner_oid = if variant.data.fields.is_empty() {
-            store
+        // Encode the variant's payload (unit → empty tree, newtype → the field's
+        // own encoding directly, tuple → ordinal-keyed tree, struct → name-keyed
+        // tree). A tuple variant is `StructKind::TupleStruct`; a struct variant is
+        // `StructKind::Struct`.
+        let positional = matches!(variant.data.kind, facet::StructKind::TupleStruct);
+        let newtype = positional && variant.data.fields.len() == 1;
+        let (inner_oid, inner_kind) = if variant.data.fields.is_empty() {
+            let oid = store
                 .write(&gix_object::Tree { entries: vec![] })
-                .map_err(Error::Backend)?
+                .map_err(Error::Backend)?;
+            (oid, EntryKind::Tree)
+        } else if newtype {
+            // Newtype variant: resolves directly to the encoding of its one field.
+            let child = pe
+                .field(0)
+                .map_err(|e| Error::Message(e.to_string()))?
+                .ok_or_else(|| Error::Message("variant field 0 missing".into()))?;
+            serialize_peek(child, store)?
         } else {
             let mut inner_entries: Vec<TreeEntry> = Vec::new();
-            // Check if fields have names (struct variant) or not (tuple variant).
-            // Facet names tuple-variant fields as plain digits ("0", "1", …); struct
-            // variant fields are always non-numeric identifiers.
-            let named = variant
-                .data
-                .fields
-                .iter()
-                .any(|f| f.name.parse::<usize>().is_err());
             for (i, field) in variant.data.fields.iter().enumerate() {
                 let child = pe
                     .field(i)
                     .map_err(|e| Error::Message(e.to_string()))?
                     .ok_or_else(|| Error::Message(format!("variant field {i} missing")))?;
                 let (oid, kind) = serialize_peek(child, store)?;
-                let name: gix_object::bstr::BString = if named {
-                    field.name.into()
-                } else {
+                let name: gix_object::bstr::BString = if positional {
                     format!("{i:04}").into()
+                } else {
+                    field.name.into()
                 };
                 inner_entries.push(TreeEntry {
                     mode: EntryMode::from(kind),
@@ -394,15 +384,16 @@ fn serialize_peek<W: Write + ?Sized>(
                 });
             }
             inner_entries.sort();
-            store
+            let oid = store
                 .write(&gix_object::Tree {
                     entries: inner_entries,
                 })
-                .map_err(Error::Backend)?
+                .map_err(Error::Backend)?;
+            (oid, EntryKind::Tree)
         };
 
         let entries = vec![TreeEntry {
-            mode: EntryMode::from(EntryKind::Tree),
+            mode: EntryMode::from(inner_kind),
             filename: variant_name.into(),
             oid: inner_oid,
         }];
@@ -668,14 +659,23 @@ fn deser_into<'facet, F: Find + ?Sized>(
             .map_err(|e| Error::Message(format!("parse failed: {e}")));
     }
 
-    // Struct: read tree, fill fields by name
+    // Struct: read tree, fill fields by name. Tuples and tuple structs key their
+    // entries by zero-padded positional ordinal (mirroring serialization).
     if let facet::Type::User(facet::UserType::Struct(st)) = shape.ty {
-        // Must check for Option encoded as tree first (but Option has Def::Option, handled below)
+        let positional = matches!(
+            st.kind,
+            facet::StructKind::Tuple | facet::StructKind::TupleStruct
+        );
         let entries = find_tree_entries(oid, store)?;
         let mut partial = partial;
-        for field in st.fields {
+        for (i, field) in st.fields.iter().enumerate() {
             // Find this field's entry in the tree
-            let entry = entries.iter().find(|(name, _, _)| name == field.name);
+            let entry_name = if positional {
+                format!("{i:04}")
+            } else {
+                field.name.to_string()
+            };
+            let entry = entries.iter().find(|(name, _, _)| *name == entry_name);
             if let Some((_, child_oid, _)) = entry {
                 let child_oid = *child_oid;
                 partial = partial
@@ -765,37 +765,49 @@ fn deser_into<'facet, F: Find + ?Sized>(
     }
 
     // Enum: single-entry tree → variant name → variant contents
-    if let facet::Type::User(facet::UserType::Enum(_)) = shape.ty {
+    if let facet::Type::User(facet::UserType::Enum(et)) = shape.ty {
         let entries = find_tree_entries(oid, store)?;
         let (variant_name, inner_oid, _) = entries
             .into_iter()
             .next()
             .ok_or_else(|| Error::Message("enum tree must have exactly one entry".into()))?;
 
+        // The variant's field layout comes from the type, not the tree: a tuple
+        // variant (`TupleStruct`) keys by ordinal, a struct variant by name, and a
+        // newtype (single-field tuple) variant resolves directly to its field.
+        let variant = et.variants.iter().find(|v| v.name == variant_name);
+        let positional =
+            variant.is_some_and(|v| matches!(v.data.kind, facet::StructKind::TupleStruct));
+        let newtype = positional && variant.is_some_and(|v| v.data.fields.len() == 1);
+
         let mut partial = partial
             .select_variant_named(&variant_name)
             .map_err(|e| Error::Message(format!("select variant {variant_name}: {e}")))?;
 
+        if newtype {
+            partial = partial
+                .begin_nth_field(0)
+                .map_err(|e| Error::Message(e.to_string()))?;
+            partial = deser_into(partial, &inner_oid, store)?;
+            return partial.end().map_err(|e| Error::Message(e.to_string()));
+        }
+
         let inner_entries = find_tree_entries(&inner_oid, store)?;
-        if !inner_entries.is_empty() {
-            // Check if named or ordinal fields
-            let named = inner_entries[0].0.parse::<usize>().is_err();
-            for (name, child_oid, _) in inner_entries {
-                if named {
-                    partial = partial
-                        .begin_field(&name)
-                        .map_err(|e| Error::Message(e.to_string()))?;
-                } else {
-                    let idx = name
-                        .parse::<usize>()
-                        .map_err(|_| Error::Message(format!("invalid ordinal: {name}")))?;
-                    partial = partial
-                        .begin_nth_field(idx)
-                        .map_err(|e| Error::Message(e.to_string()))?;
-                }
-                partial = deser_into(partial, &child_oid, store)?;
-                partial = partial.end().map_err(|e| Error::Message(e.to_string()))?;
+        for (name, child_oid, _) in inner_entries {
+            if positional {
+                let idx = name
+                    .parse::<usize>()
+                    .map_err(|_| Error::Message(format!("invalid ordinal: {name}")))?;
+                partial = partial
+                    .begin_nth_field(idx)
+                    .map_err(|e| Error::Message(e.to_string()))?;
+            } else {
+                partial = partial
+                    .begin_field(&name)
+                    .map_err(|e| Error::Message(e.to_string()))?;
             }
+            partial = deser_into(partial, &child_oid, store)?;
+            partial = partial.end().map_err(|e| Error::Message(e.to_string()))?;
         }
         return Ok(partial);
     }
