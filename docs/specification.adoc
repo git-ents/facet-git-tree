@@ -60,7 +60,7 @@ The `facet-git-tree` crate MUST provide a struct which can be serialized into Gi
 [role="requirement", id="serialization.design.leaves"]
 .Serialization Design
 --
-Data which is not a collection, and which is not represented by another schema object, MUST be stored in UTF-8 encoded Git blobs.
+A scalar value — one that is neither a composite nor a collection — MUST be stored in a UTF-8 encoded Git blob.
 --
 
 [role="requirement", id="serialization.design.booleans"]
@@ -69,47 +69,57 @@ Data which is not a collection, and which is not represented by another schema o
 Booleans MUST be serialized as `true` or `false` strings.
 --
 
-[role="requirement", id="serialization.design.trees.schemas"]
-.Schema Object Encoding
+[role="requirement", id="serialization.design.schemaless"]
+.Schemaless Encoding
 --
-Schema objects MUST be encoded as Git trees with a `.schema` sentinel entry which holds a tree that represents the `facet` type's `SHAPE`.
+A serialized tree MUST record values only.
+The encoding MUST NOT embed any representation of a type's `SHAPE` — no schema object, type identifier, or definition table.
+
+Both serialization and deserialization are driven entirely by the `Facet` type supplied at the call site, exactly as `facet-toml` and `facet-json` rely on the target type rather than embedding a schema in their output.
+The structure of every tree and blob is recovered from that type on read.
+
+[NOTE]
+====
+Because no schema is stored, type definitions cannot introduce cycles into the encoding; values are inherently cycle-free under Git's DAG data model.
+Self-describing reads — recovering a value without its `Facet` type — are therefore out of scope.
+====
 --
 
-[role="requirement", id="serialization.design.trees.shape"]
-.Assumed Schema Shape
+[role="requirement", id="serialization.design.trees.composites"]
+.Composite Encoding
 --
-The identity of a type encoded by `.schema` is always recorded as an identifier (unique to the particular `.schema` tree) in an `id` tree entry that resolves to a blob.
-Definitions are recorded in a flattened `defs` subtree which references identifiers, and never a full schema tree.
-
-[IMPORTANT]
-====
-This is required to avoid cycles in type definitions.
-Values are inherently cycle-free due to Git's DAG data model.
-====
+A composite value — a struct or tuple — MUST be encoded as a Git tree, with each field recorded as an entry whose value follows the leaf, composite, collection, and variant rules recursively.
+A struct's fields are named by their field name; a tuple's fields are named by their zero-based positional index, encoded as a link:#serialization.design.trees.ordering[zero-padded ordinal name].
 --
 
 [role="requirement", id="serialization.design.trees.variants"]
 .Variant Encoding
 --
-Enum values MUST be encoded as schema objects.
-The active variant MUST be recorded in a `.variant` sentinel entry that resolves to a UTF-8 blob holding the variant's name.
-The variant's fields, if any, MUST be encoded as sibling entries following the leaf and schema-object rules: struct-variant fields are named by their field name, and tuple-variant fields are named by their zero-based positional index, encoded as a link:#serialization.design.trees.ordinals[zero-padded ordinal name].
+An enum value MUST be encoded as a Git tree holding exactly one entry, externally tagged: the entry name is the active variant's name, and the entry's value encodes the variant's payload as follows.
+
+. A unit variant resolves to an empty tree.
+. A newtype variant (one field) resolves directly to the encoding of that field.
+. A struct variant resolves to a tree whose entries are named by field name.
+. A tuple variant resolves to a tree whose entries are named by zero-based positional index, encoded as a link:#serialization.design.trees.ordering[zero-padded ordinal name].
+
+The variant name is a value, not schema: it records which variant is live, information not present in the type's `SHAPE`.
 --
 
 [role="requirement", id="serialization.design.trees.collections"]
-.Provided Collection Types
+.Collection Encoding
 --
-The following standard collections in Rust MUST be provided as built-in `facet` types, each with their own `.schema` entry value.
+The following standard Rust collections MUST be supported, each encoded as a Git tree.
 
-. Array
-. Vec
-. Map
+. `Array` and `Vec` — sequence elements are recorded as entries named by their zero-based index, encoded as a link:#serialization.design.trees.ordering[zero-padded ordinal name].
+. `Map` — each entry is named by the textual form of its key and resolves to the encoded value.
+
+No type marker is recorded; element and key types are recovered from the target `Facet` type on read.
 --
 
 [role="requirement", id="serialization.design.trees.ordering"]
 .Entry Name Ordering
 --
-Entries addressed by a positional index — tuple-variant fields and the elements of sequence collections (`Array`, `Vec`) — MUST be named by their zero-based index encoded as zero-padded decimal at least four digits wide (`0000`, `0001`, …, `0010`, …).
+Entries addressed by a positional index — tuple fields, tuple-variant fields, and the elements of sequence collections (`Array`, `Vec`) — MUST be named by their zero-based index encoded as zero-padded decimal at least four digits wide (`0000`, `0001`, …, `0010`, …).
 
 [NOTE]
 ====

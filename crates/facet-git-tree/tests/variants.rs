@@ -2,15 +2,16 @@
 //!
 //! Covers spec requirement:
 //!   serialization.design.trees.variants
-//!     — enums are schema objects with a `.variant` sentinel naming the active variant
-//!     — struct-variant fields are named by field name
-//!     — tuple-variant fields are named by zero-padded zero-based index (0000, 0001, …)
+//!     — an enum is a tree with exactly one entry, externally tagged: the entry
+//!       name is the active variant, its value encodes the payload
+//!     — unit variant → empty tree; struct variant → fields named by field name;
+//!       tuple variant → fields named by zero-padded zero-based index (0000, …)
 
 use facet::Facet;
 use facet_git_tree::{EntryKind, serialize};
 
 mod common;
-use common::{find_entry, non_sentinel_entries, roundtrip};
+use common::{find_entry, roundtrip, tree_entries};
 
 // --- test types ---
 
@@ -24,69 +25,56 @@ enum Shape {
 
 // --- structure ---
 
-/// An enum value is a schema object: its root is a tree with a `.schema` sentinel.
+/// An enum value is a tree with exactly one entry, named after the active variant.
 #[test]
 #[ignore = "serialization not yet implemented"]
-fn enum_is_schema_object() {
+fn enum_is_single_entry_tree() {
     let (root_id, store) = serialize(&Shape::Circle { radius: 1.0 }).expect("serialize ok");
-    let schema = find_entry(&store, &root_id, ".schema");
+    let entries = tree_entries(&store, &root_id);
     assert_eq!(
-        schema.mode.kind(),
-        EntryKind::Tree,
-        "`.schema` must be a tree"
+        entries.len(),
+        1,
+        "enum must be a tree with exactly one (variant-named) entry, got {entries:?}"
+    );
+    assert_eq!(
+        entries[0].filename, "Circle",
+        "the single entry must be named after the active variant"
     );
 }
 
-/// The active variant's name is recorded in a `.variant` blob.
+/// The active variant for a unit variant is recorded the same way: a sole entry
+/// named after it, resolving to an empty tree (no payload).
 #[test]
 #[ignore = "serialization not yet implemented"]
-fn variant_name_recorded_in_sentinel() {
-    let (root_id, store) = serialize(&Shape::Circle { radius: 1.0 }).expect("serialize ok");
-    let variant = find_entry(&store, &root_id, ".variant");
-    assert_eq!(
-        variant.mode.kind(),
-        EntryKind::Blob,
-        "`.variant` sentinel must be a blob"
-    );
-    let bytes = store
-        .get_blob(&variant.oid)
-        .expect("`.variant` blob must be in store");
-    assert_eq!(
-        bytes, b"Circle",
-        "`.variant` must hold the active variant name"
-    );
-}
-
-/// The `.variant` name is recorded for a unit variant too (no fields to imply it).
-#[test]
-#[ignore = "serialization not yet implemented"]
-fn unit_variant_name_recorded() {
+fn unit_variant_is_named_empty_tree() {
     let (root_id, store) = serialize(&Shape::Unit).expect("serialize ok");
-    let variant = find_entry(&store, &root_id, ".variant");
-    let bytes = store
-        .get_blob(&variant.oid)
-        .expect("`.variant` blob in store");
-    assert_eq!(bytes, b"Unit", "`.variant` must name the unit variant");
+    let entry = find_entry(&store, &root_id, "Unit");
+    assert_eq!(
+        entry.mode.kind(),
+        EntryKind::Tree,
+        "a unit variant's payload must be a tree"
+    );
+    assert!(
+        tree_entries(&store, &entry.oid).is_empty(),
+        "a unit variant's payload tree must be empty"
+    );
 }
 
-/// The `.variant` name is recorded for a tuple variant too.
+/// A tuple variant's sole entry is named after it.
 #[test]
 #[ignore = "serialization not yet implemented"]
-fn tuple_variant_name_recorded() {
+fn tuple_variant_is_named() {
     let (root_id, store) = serialize(&Shape::Pair(1, 2)).expect("serialize ok");
-    let variant = find_entry(&store, &root_id, ".variant");
-    let bytes = store
-        .get_blob(&variant.oid)
-        .expect("`.variant` blob in store");
-    assert_eq!(bytes, b"Pair", "`.variant` must name the tuple variant");
+    let _ = find_entry(&store, &root_id, "Pair");
 }
 
-/// Struct-variant fields are encoded as entries named by their field name.
+/// Struct-variant fields are encoded under the variant entry, named by field name.
 #[test]
 #[ignore = "serialization not yet implemented"]
 fn struct_variant_fields_named_by_field() {
     let (root_id, store) = serialize(&Shape::Circle { radius: 2.5 }).expect("serialize ok");
-    let radius = find_entry(&store, &root_id, "radius");
+    let circle = find_entry(&store, &root_id, "Circle");
+    let radius = find_entry(&store, &circle.oid, "radius");
     assert_eq!(
         radius.mode.kind(),
         EntryKind::Blob,
@@ -94,26 +82,15 @@ fn struct_variant_fields_named_by_field() {
     );
 }
 
-/// Tuple-variant fields are encoded as entries named by their zero-padded,
-/// zero-based index (`0000`, `0001`, …).
+/// Tuple-variant fields are encoded under the variant entry, named by their
+/// zero-padded, zero-based index (`0000`, `0001`, …).
 #[test]
 #[ignore = "serialization not yet implemented"]
 fn tuple_variant_fields_named_by_index() {
     let (root_id, store) = serialize(&Shape::Pair(7, 13)).expect("serialize ok");
-    let _ = find_entry(&store, &root_id, "0000");
-    let _ = find_entry(&store, &root_id, "0001");
-}
-
-/// A unit variant carries only sentinels — no field entries.
-#[test]
-#[ignore = "serialization not yet implemented"]
-fn unit_variant_has_no_fields() {
-    let (root_id, store) = serialize(&Shape::Unit).expect("serialize ok");
-    let fields = non_sentinel_entries(&store, &root_id);
-    assert!(
-        fields.is_empty(),
-        "unit variant must have no field entries, got {fields:?}"
-    );
+    let pair = find_entry(&store, &root_id, "Pair");
+    let _ = find_entry(&store, &pair.oid, "0000");
+    let _ = find_entry(&store, &pair.oid, "0001");
 }
 
 // --- equality ---

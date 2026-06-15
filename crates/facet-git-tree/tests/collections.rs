@@ -2,8 +2,8 @@
 //!
 //! Covers spec requirement:
 //!   serialization.design.trees.collections
-//!     — Array, Vec, and Map must be provided as built-in Facet types
-//!     — each collection must carry its own `.schema` sentinel entry
+//!     — Array, Vec, and Map are encoded as Git trees
+//!     — no type marker is recorded; element and key types come from the Facet type
 //!
 //! Ordinal entry naming for sequence collections is covered in `ordinals.rs`.
 
@@ -12,16 +12,14 @@ use std::collections::HashMap;
 use facet_git_tree::{EntryKind, serialize};
 
 mod common;
-use common::{
-    WithArray, WithMap, WithVec, assert_schema_sentinel, get_tree_entry_mode, non_sentinel_entries,
-};
+use common::{WithArray, WithMap, WithVec, get_tree_entry_mode, tree_entries};
 
 // --- Vec ---
 
-/// A Vec field is encoded as a tree (not a blob), with its own `.schema` sentinel.
+/// A Vec field is encoded as a tree (not a blob) holding only its elements.
 #[test]
 #[ignore = "serialization not yet implemented"]
-fn vec_field_is_tree_with_schema() {
+fn vec_field_is_tree() {
     let (root_id, store) = serialize(&WithVec {
         items: vec![1, 2, 3],
     })
@@ -29,44 +27,33 @@ fn vec_field_is_tree_with_schema() {
 
     let (mode, items_id) = get_tree_entry_mode(&store, &root_id, "items");
     assert_eq!(mode, EntryKind::Tree, "Vec field must be a tree");
-
-    assert_schema_sentinel(&store, &items_id, "Vec field");
+    assert_eq!(
+        tree_entries(&store, &items_id).len(),
+        3,
+        "Vec with 3 elements should have 3 entries"
+    );
 }
 
-/// An empty Vec also serializes to a tree with a `.schema` sentinel.
+/// An empty Vec serializes to an empty tree.
 #[test]
 #[ignore = "serialization not yet implemented"]
-fn empty_vec_has_schema() {
+fn empty_vec_is_empty_tree() {
     let (root_id, store) = serialize(&WithVec { items: vec![] }).expect("serialize should succeed");
 
     let (mode, items_id) = get_tree_entry_mode(&store, &root_id, "items");
     assert_eq!(mode, EntryKind::Tree, "empty Vec field must be a tree");
-    assert_schema_sentinel(&store, &items_id, "empty Vec field");
-}
-
-/// Vec elements are accessible as individual entries within the collection tree.
-#[test]
-#[ignore = "serialization not yet implemented"]
-fn vec_elements_accessible() {
-    let (root_id, store) = serialize(&WithVec {
-        items: vec![10, 20],
-    })
-    .expect("serialize should succeed");
-
-    let (_, items_id) = get_tree_entry_mode(&store, &root_id, "items");
-    assert_eq!(
-        non_sentinel_entries(&store, &items_id).len(),
-        2,
-        "Vec with 2 elements should have 2 non-sentinel entries"
+    assert!(
+        tree_entries(&store, &items_id).is_empty(),
+        "empty Vec must have no entries"
     );
 }
 
 // --- Array ---
 
-/// A fixed-size array field is encoded as a tree with its own `.schema` sentinel.
+/// A fixed-size array field is encoded as a tree holding only its elements.
 #[test]
 #[ignore = "serialization not yet implemented"]
-fn array_field_is_tree_with_schema() {
+fn array_field_is_tree() {
     let (root_id, store) = serialize(&WithArray {
         values: [1, 2, 3, 4],
     })
@@ -74,32 +61,19 @@ fn array_field_is_tree_with_schema() {
 
     let (mode, arr_id) = get_tree_entry_mode(&store, &root_id, "values");
     assert_eq!(mode, EntryKind::Tree, "array field must be a tree");
-    assert_schema_sentinel(&store, &arr_id, "array field");
-}
-
-/// Array elements are accessible within the collection tree.
-#[test]
-#[ignore = "serialization not yet implemented"]
-fn array_elements_accessible() {
-    let (root_id, store) = serialize(&WithArray {
-        values: [10, 20, 30, 40],
-    })
-    .expect("serialize should succeed");
-
-    let (_, arr_id) = get_tree_entry_mode(&store, &root_id, "values");
     assert_eq!(
-        non_sentinel_entries(&store, &arr_id).len(),
+        tree_entries(&store, &arr_id).len(),
         4,
-        "array of length 4 should have 4 non-sentinel entries"
+        "array of length 4 should have 4 entries"
     );
 }
 
 // --- Map ---
 
-/// A HashMap field is encoded as a tree with its own `.schema` sentinel.
+/// A HashMap field is encoded as a tree holding only its entries.
 #[test]
 #[ignore = "serialization not yet implemented"]
-fn map_field_is_tree_with_schema() {
+fn map_field_is_tree() {
     let mut table = HashMap::new();
     table.insert("a".to_string(), "1".to_string());
     table.insert("b".to_string(), "2".to_string());
@@ -108,13 +82,17 @@ fn map_field_is_tree_with_schema() {
 
     let (mode, map_id) = get_tree_entry_mode(&store, &root_id, "table");
     assert_eq!(mode, EntryKind::Tree, "Map field must be a tree");
-    assert_schema_sentinel(&store, &map_id, "Map field");
+    assert_eq!(
+        tree_entries(&store, &map_id).len(),
+        2,
+        "map with 2 entries should have 2 entries"
+    );
 }
 
-/// An empty map serializes to a tree with a `.schema` sentinel.
+/// An empty map serializes to an empty tree.
 #[test]
 #[ignore = "serialization not yet implemented"]
-fn empty_map_has_schema() {
+fn empty_map_is_empty_tree() {
     let (root_id, store) = serialize(&WithMap {
         table: HashMap::new(),
     })
@@ -122,7 +100,29 @@ fn empty_map_has_schema() {
 
     let (mode, map_id) = get_tree_entry_mode(&store, &root_id, "table");
     assert_eq!(mode, EntryKind::Tree, "empty Map field must be a tree");
-    assert_schema_sentinel(&store, &map_id, "empty Map field");
+    assert!(
+        tree_entries(&store, &map_id).is_empty(),
+        "empty Map must have no entries"
+    );
+}
+
+/// A map entry is named by the textual form of its key and resolves to its value.
+#[test]
+#[ignore = "serialization not yet implemented"]
+fn map_entry_named_by_key() {
+    let mut table = HashMap::new();
+    table.insert("a".to_string(), "1".to_string());
+
+    let (root_id, store) = serialize(&WithMap { table }).expect("serialize should succeed");
+
+    let (_, map_id) = get_tree_entry_mode(&store, &root_id, "table");
+    let (mode, value_id) = get_tree_entry_mode(&store, &map_id, "a");
+    assert_eq!(mode, EntryKind::Blob, "map value must be a leaf blob");
+    assert_eq!(
+        store.get_blob(&value_id).expect("value blob in store"),
+        b"1",
+        "map entry named by key must resolve to the value"
+    );
 }
 
 /// Map insertion order does not affect the serialized tree: git sorts tree entries
@@ -145,23 +145,5 @@ fn map_insertion_order_is_irrelevant() {
     assert_eq!(
         id_a, id_b,
         "maps with identical pairs must serialize identically regardless of insertion order"
-    );
-}
-
-/// Map entries are accessible as individual entries within the collection tree.
-#[test]
-#[ignore = "serialization not yet implemented"]
-fn map_entries_accessible() {
-    let mut table = HashMap::new();
-    table.insert("key1".to_string(), "100".to_string());
-    table.insert("key2".to_string(), "200".to_string());
-
-    let (root_id, store) = serialize(&WithMap { table }).expect("serialize should succeed");
-
-    let (_, map_id) = get_tree_entry_mode(&store, &root_id, "table");
-    assert_eq!(
-        non_sentinel_entries(&store, &map_id).len(),
-        2,
-        "map with 2 entries should have 2 non-sentinel entries"
     );
 }

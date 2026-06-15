@@ -89,24 +89,12 @@ pub fn get_tree_entry_mode(
     (entry.mode.kind(), entry.oid)
 }
 
-/// The entries of a tree that are not facet-git-tree sentinels (`.schema`, `.variant`).
-pub fn non_sentinel_entries(store: &ObjectStore, tree_id: &ObjectId) -> Vec<TreeEntry> {
+/// The entries of a tree. The encoding writes no sentinel entries, so every entry
+/// is data — a struct field, a collection element, a map entry, or a variant tag.
+pub fn tree_entries(store: &ObjectStore, tree_id: &ObjectId) -> Vec<TreeEntry> {
     store
         .get_tree(tree_id)
         .unwrap_or_else(|| panic!("expected tree at {tree_id:?}"))
-        .into_iter()
-        .filter(|e| !e.filename.starts_with(b"."))
-        .collect()
-}
-
-/// Assert that the tree at `tree_id` carries a `.schema` sentinel that is itself a tree.
-pub fn assert_schema_sentinel(store: &ObjectStore, tree_id: &ObjectId, context: &str) {
-    let (mode, _) = get_tree_entry_mode(store, tree_id, ".schema");
-    assert_eq!(
-        mode,
-        EntryKind::Tree,
-        "{context}: `.schema` entry must be a tree"
-    );
 }
 
 // --- roundtrip ---

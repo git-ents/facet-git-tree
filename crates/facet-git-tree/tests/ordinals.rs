@@ -1,7 +1,7 @@
 //! Integration tests for ordinal entry naming.
 //!
 //! Covers spec requirement:
-//!   serialization.design.trees.ordinals
+//!   serialization.design.trees.ordering
 //!     — sequence elements (Array, Vec) are named by their zero-based index as
 //!       zero-padded decimal, at least four digits wide (0000, 0001, …, 0010, …)
 //!     — correctness MUST NOT depend on tree-entry ordering; indices are parsed
@@ -12,7 +12,7 @@
 use facet_git_tree::serialize;
 
 mod common;
-use common::{WithArray, WithVec, get_tree_entry_mode, non_sentinel_entries, roundtrip};
+use common::{WithArray, WithVec, get_tree_entry_mode, roundtrip, tree_entries};
 
 /// Vec elements are named by their zero-padded, zero-based index.
 #[test]
@@ -24,7 +24,7 @@ fn vec_elements_named_by_zero_padded_ordinal() {
     .expect("serialize ok");
 
     let (_, items_id) = get_tree_entry_mode(&store, &root_id, "items");
-    let names: Vec<String> = non_sentinel_entries(&store, &items_id)
+    let names: Vec<String> = tree_entries(&store, &items_id)
         .iter()
         .map(|e| e.filename.to_string())
         .collect();
@@ -53,7 +53,7 @@ fn array_elements_named_by_zero_padded_ordinal() {
     .expect("serialize ok");
 
     let (_, arr_id) = get_tree_entry_mode(&store, &root_id, "values");
-    let names: Vec<String> = non_sentinel_entries(&store, &arr_id)
+    let names: Vec<String> = tree_entries(&store, &arr_id)
         .iter()
         .map(|e| e.filename.to_string())
         .collect();
@@ -75,7 +75,7 @@ fn ordinal_names_are_at_least_four_digits() {
     .expect("serialize ok");
 
     let (_, items_id) = get_tree_entry_mode(&store, &root_id, "items");
-    for entry in non_sentinel_entries(&store, &items_id) {
+    for entry in tree_entries(&store, &items_id) {
         let name = entry.filename.to_string();
         assert!(
             name.len() >= 4,
@@ -100,7 +100,7 @@ fn large_vec_roundtrips_with_wide_ordinals() {
     })
     .expect("serialize ok");
     let (_, items_id) = get_tree_entry_mode(&store, &root_id, "items");
-    let names: Vec<String> = non_sentinel_entries(&store, &items_id)
+    let names: Vec<String> = tree_entries(&store, &items_id)
         .iter()
         .map(|e| e.filename.to_string())
         .collect();
