@@ -544,99 +544,12 @@ fn scalar_bytes(peek: Peek<'_, '_>) -> Result<Vec<u8>, Error> {
                     return Ok(v.to_string().into_bytes());
                 }
             }
-            PrimitiveType::Numeric(NumericType::Integer { signed }) => {
-                let layout_size = shape.layout.sized_layout().map(|l| l.size()).unwrap_or(8);
-                if signed {
-                    match layout_size {
-                        1 => {
-                            return Ok(peek
-                                .get::<i8>()
-                                .map_err(|e| Error::Message(e.to_string()))?
-                                .to_string()
-                                .into_bytes());
-                        }
-                        2 => {
-                            return Ok(peek
-                                .get::<i16>()
-                                .map_err(|e| Error::Message(e.to_string()))?
-                                .to_string()
-                                .into_bytes());
-                        }
-                        4 => {
-                            return Ok(peek
-                                .get::<i32>()
-                                .map_err(|e| Error::Message(e.to_string()))?
-                                .to_string()
-                                .into_bytes());
-                        }
-                        8 => {
-                            return Ok(peek
-                                .get::<i64>()
-                                .map_err(|e| Error::Message(e.to_string()))?
-                                .to_string()
-                                .into_bytes());
-                        }
-                        16 => {
-                            return Ok(peek
-                                .get::<i128>()
-                                .map_err(|e| Error::Message(e.to_string()))?
-                                .to_string()
-                                .into_bytes());
-                        }
-                        _ => {
-                            return Ok(peek
-                                .get::<isize>()
-                                .map_err(|e| Error::Message(e.to_string()))?
-                                .to_string()
-                                .into_bytes());
-                        }
-                    }
-                } else {
-                    match layout_size {
-                        1 => {
-                            return Ok(peek
-                                .get::<u8>()
-                                .map_err(|e| Error::Message(e.to_string()))?
-                                .to_string()
-                                .into_bytes());
-                        }
-                        2 => {
-                            return Ok(peek
-                                .get::<u16>()
-                                .map_err(|e| Error::Message(e.to_string()))?
-                                .to_string()
-                                .into_bytes());
-                        }
-                        4 => {
-                            return Ok(peek
-                                .get::<u32>()
-                                .map_err(|e| Error::Message(e.to_string()))?
-                                .to_string()
-                                .into_bytes());
-                        }
-                        8 => {
-                            return Ok(peek
-                                .get::<u64>()
-                                .map_err(|e| Error::Message(e.to_string()))?
-                                .to_string()
-                                .into_bytes());
-                        }
-                        16 => {
-                            return Ok(peek
-                                .get::<u128>()
-                                .map_err(|e| Error::Message(e.to_string()))?
-                                .to_string()
-                                .into_bytes());
-                        }
-                        _ => {
-                            return Ok(peek
-                                .get::<usize>()
-                                .map_err(|e| Error::Message(e.to_string()))?
-                                .to_string()
-                                .into_bytes());
-                        }
-                    }
-                }
+            PrimitiveType::Numeric(NumericType::Integer { .. }) => {
+                // Every integer width is its `Display` form, which `Peek` forwards
+                // to the underlying value. Dispatching on layout size and calling
+                // `get::<iN>()` would reject `isize`/`usize`, which share a size
+                // with `i64`/`u64` but are a distinct type to `Peek::get`.
+                return Ok(peek.to_string().into_bytes());
             }
             _ => {}
         }
