@@ -40,7 +40,6 @@ fn sample() -> TreeNode {
 /// A recursive type serializes without infinite recursion: only the finite value
 /// is encoded, never the (self-referential) type definition.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn recursive_type_serializes() {
     let (root_id, store) = serialize(&sample()).expect("recursive type must serialize");
     assert!(
@@ -51,7 +50,6 @@ fn recursive_type_serializes() {
 
 /// A recursive value roundtrips, preserving the whole tree of nodes.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn recursive_type_roundtrips() {
     assert_eq!(roundtrip(sample()), sample());
 }

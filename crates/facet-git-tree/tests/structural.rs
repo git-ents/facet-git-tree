@@ -73,7 +73,6 @@ fn nested_identical_values_have_same_id() {
 
 /// Structural equality for Vec: same elements in same order → same ID.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn vec_equality() {
     let (id1, _) = serialize(&WithVec {
         items: vec![1, 2, 3],
@@ -88,7 +87,6 @@ fn vec_equality() {
 
 /// Structural inequality for Vec: different order → different ID.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn vec_order_matters() {
     let (id1, _) = serialize(&WithVec {
         items: vec![1, 2, 3],

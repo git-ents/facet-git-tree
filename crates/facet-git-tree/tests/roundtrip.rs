@@ -85,7 +85,6 @@ fn nested_struct_roundtrip() {
 
 /// Vec fields roundtrip with all elements in the same order.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn vec_roundtrip() {
     assert_eq!(
         roundtrip(WithVec {
@@ -99,7 +98,6 @@ fn vec_roundtrip() {
 
 /// An empty Vec roundtrips as an empty Vec, not None.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn empty_vec_roundtrip() {
     assert_eq!(
         roundtrip(WithVec { items: vec![] }),
@@ -109,7 +107,6 @@ fn empty_vec_roundtrip() {
 
 /// Fixed-size array fields roundtrip with all elements preserved.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn array_roundtrip() {
     assert_eq!(
         roundtrip(WithArray {
@@ -123,7 +120,6 @@ fn array_roundtrip() {
 
 /// HashMap fields roundtrip with all key-value pairs preserved.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn map_roundtrip() {
     let mut table = HashMap::new();
     table.insert("alpha".to_string(), "one".to_string());
@@ -138,7 +134,6 @@ fn map_roundtrip() {
 
 /// A Vec of structs roundtrips, exercising element-as-tree nesting.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn vec_of_structs_roundtrip() {
     let value = VecOfPoints {
         pts: vec![Point { x: 1.0, y: 2.0 }, Point { x: -3.0, y: 4.5 }],
@@ -151,7 +146,6 @@ fn vec_of_structs_roundtrip() {
 
 /// A Vec of Vecs roundtrips, exercising nested collection trees.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn nested_vec_roundtrip() {
     let value = Matrix {
         rows: vec![vec![1, 2, 3], vec![], vec![4, 5]],
