@@ -111,7 +111,10 @@ The variant name is a value, not schema: it records which variant is live, infor
 The following standard Rust collections MUST be supported, each encoded as a Git tree.
 
 . `Array` and `Vec` — sequence elements are recorded as entries named by their zero-based index, encoded as a link:#serialization.design.trees.ordering[zero-padded ordinal name].
-. `Map` — each entry is named by the textual form of its key and resolves to the encoded value.
+. `Map` — the entry layout is selected by the static shape of the key type, with no on-disk marker, since that shape is known to both writer and reader:
++
+.. *Scalar keys* (those whose `Def` is `Scalar` — integers, floats, `bool`, `char`, `String`, and other types stored as a single leaf): each entry is named by the textual form of its key and resolves to the encoded value, exactly as a leaf would be encoded. This is the readable, JSON-like form.
+.. *Composite keys* (structs, tuples, enums, sequences, and any other key that does not encode to a single leaf): the textual-name form cannot faithfully represent them, so each pair is recorded as a two-entry sub-tree with children named `k` and `v` holding the independently-encoded key and value. The map's entries point at these pair sub-trees and are named by a link:#serialization.design.trees.ordering[zero-padded ordinal name]; the ordinals are assigned in ascending order of each pair sub-tree's object id so that the map remains content-addressed independent of iteration order.
 
 No type marker is recorded; element and key types are recovered from the target `Facet` type on read.
 --
