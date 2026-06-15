@@ -152,6 +152,9 @@ pub enum Error {
     /// An object was expected to be a tree but was of another kind.
     #[error("object {0} is not a tree")]
     NotATree(ObjectId),
+    /// An object was expected to be a blob (a scalar leaf) but was of another kind.
+    #[error("object {0} is not a blob")]
+    NotABlob(ObjectId),
     /// An error from the underlying `gix` object backend.
     ///
     /// Wraps the backend's own error (from [`Find`]/[`Write`]) as the source
@@ -639,6 +642,9 @@ fn find_tree_entries<F: Find + ?Sized>(
 fn find_blob_bytes<F: Find + ?Sized>(id: &ObjectId, store: &F) -> Result<Vec<u8>, Error> {
     let mut buf = Vec::new();
     let data = find_object(id, &mut buf, store)?;
+    if data.kind != Kind::Blob {
+        return Err(Error::NotABlob(*id));
+    }
     Ok(data.data.to_owned())
 }
 
