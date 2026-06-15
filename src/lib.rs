@@ -161,10 +161,39 @@ pub enum Error {
     /// rather than flattening it into a string.
     #[error("git object backend error")]
     Backend(#[source] gix_object::write::Error),
+    /// Deserialization exceeded the maximum supported nesting depth.
+    ///
+    /// A guard against unbounded recursion — and thus stack overflow — when
+    /// reading a deeply nested, possibly externally-produced tree. The bundled
+    /// encoder never approaches this depth for ordinary values.
+    #[error("maximum nesting depth ({0}) exceeded while deserializing")]
+    MaxDepth(usize),
+    /// A sequence entry name is not a valid decimal ordinal.
+    ///
+    /// Sequence (`Vec`/array) entries are named by their zero-based decimal index
+    /// on write, so a non-numeric name can only arise from an externally-produced
+    /// tree.
+    #[error("invalid sequence ordinal {0:?}")]
+    InvalidOrdinal(String),
     /// A general serialization or deserialization failure.
     #[error("{0}")]
     Message(String),
 }
+
+/// Wrap any displayable backend or reflection error as [`Error::Message`].
+///
+/// `facet`'s `Partial`/`Peek` operations and `gix`'s tree decoding each return
+/// their own error types; this collapses them to the catch-all variant at the
+/// call site without a bespoke closure every time.
+fn msg(e: impl std::fmt::Display) -> Error {
+    Error::Message(e.to_string())
+}
+
+/// Maximum tree nesting depth accepted on deserialization.
+///
+/// Bounds recursion in [`deser_into`] so a hostile or corrupt tree cannot
+/// overflow the stack. Far deeper than any practically-encoded value.
+const MAX_DEPTH: usize = 64;
 
 /// Validate a user-supplied key for use as a Git tree entry name.
 ///
@@ -221,7 +250,7 @@ pub fn deserialize<T: for<'a> facet::Facet<'a>>(
 ) -> Result<T, Error> {
     let partial =
         Partial::alloc::<T>().map_err(|e| Error::Message(format!("alloc failed: {e}")))?;
-    let partial = deser_into(partial, root, store)?;
+    let partial = deser_into(partial, root, store, 0)?;
     let heap = partial
         .build()
         .map_err(|e| Error::Message(format!("build failed: {e}")))?;
@@ -254,12 +283,10 @@ fn serialize_peek<W: Write + ?Sized>(
             st.kind,
             facet::StructKind::Tuple | facet::StructKind::TupleStruct
         );
-        let ps = peek
-            .into_struct()
-            .map_err(|e| Error::Message(e.to_string()))?;
+        let ps = peek.into_struct().map_err(msg)?;
         let mut entries: Vec<TreeEntry> = Vec::with_capacity(st.fields.len());
         for (i, field) in st.fields.iter().enumerate() {
-            let child = ps.field(i).map_err(|e| Error::Message(e.to_string()))?;
+            let child = ps.field(i).map_err(msg)?;
             let (oid, kind) = serialize_peek(child, store)?;
             let filename: gix_object::bstr::BString = if positional {
                 format!("{i:04}").into()
@@ -295,7 +322,7 @@ fn serialize_peek<W: Write + ?Sized>(
     // recursing through the normal encoding. The two layouts are distinguished by
     // the static key shape, so no on-disk marker is needed.
     if let Def::Map(md) = shape.def {
-        let pm = peek.into_map().map_err(|e| Error::Message(e.to_string()))?;
+        let pm = peek.into_map().map_err(msg)?;
         let scalar_keys = matches!(md.k.def, Def::Scalar);
         let mut entries: Vec<TreeEntry> = Vec::new();
         if scalar_keys {
@@ -356,9 +383,7 @@ fn serialize_peek<W: Write + ?Sized>(
 
     // Option
     if matches!(shape.def, Def::Option(_)) {
-        let po = peek
-            .into_option()
-            .map_err(|e| Error::Message(e.to_string()))?;
+        let po = peek.into_option().map_err(msg)?;
         if let Some(inner) = po.value() {
             let (oid, kind) = serialize_peek(inner, store)?;
             // Some: wrap in a tree with a single "some" entry
@@ -382,15 +407,9 @@ fn serialize_peek<W: Write + ?Sized>(
 
     // Enum → single-entry tree: variant name → variant contents
     if let facet::Type::User(facet::UserType::Enum(_)) = shape.ty {
-        let pe = peek
-            .into_enum()
-            .map_err(|e| Error::Message(e.to_string()))?;
-        let variant = pe
-            .active_variant()
-            .map_err(|e| Error::Message(e.to_string()))?;
-        let variant_name = pe
-            .variant_name_active()
-            .map_err(|e| Error::Message(e.to_string()))?;
+        let pe = peek.into_enum().map_err(msg)?;
+        let variant = pe.active_variant().map_err(msg)?;
+        let variant_name = pe.variant_name_active().map_err(msg)?;
 
         // Encode the variant's payload (unit → empty tree, newtype → the field's
         // own encoding directly, tuple → ordinal-keyed tree, struct → name-keyed
@@ -407,7 +426,7 @@ fn serialize_peek<W: Write + ?Sized>(
             // Newtype variant: resolves directly to the encoding of its one field.
             let child = pe
                 .field(0)
-                .map_err(|e| Error::Message(e.to_string()))?
+                .map_err(msg)?
                 .ok_or_else(|| Error::Message("variant field 0 missing".into()))?;
             serialize_peek(child, store)?
         } else {
@@ -415,7 +434,7 @@ fn serialize_peek<W: Write + ?Sized>(
             for (i, field) in variant.data.fields.iter().enumerate() {
                 let child = pe
                     .field(i)
-                    .map_err(|e| Error::Message(e.to_string()))?
+                    .map_err(msg)?
                     .ok_or_else(|| Error::Message(format!("variant field {i} missing")))?;
                 let (oid, kind) = serialize_peek(child, store)?;
                 let name: gix_object::bstr::BString = if positional {
@@ -463,9 +482,7 @@ fn serialize_sequence<W: Write + ?Sized>(
     let mut entries: Vec<TreeEntry> = Vec::new();
 
     if matches!(shape.def, Def::List(_)) {
-        let pl = peek
-            .into_list()
-            .map_err(|e| Error::Message(e.to_string()))?;
+        let pl = peek.into_list().map_err(msg)?;
         for (i, item) in pl.iter().enumerate() {
             let (oid, kind) = serialize_peek(item, store)?;
             entries.push(TreeEntry {
@@ -475,9 +492,7 @@ fn serialize_sequence<W: Write + ?Sized>(
             });
         }
     } else if matches!(shape.def, Def::Array(_)) {
-        let pa = peek
-            .into_list_like()
-            .map_err(|e| Error::Message(e.to_string()))?;
+        let pa = peek.into_list_like().map_err(msg)?;
         for (i, item) in pa.iter().enumerate() {
             let (oid, kind) = serialize_peek(item, store)?;
             entries.push(TreeEntry {
@@ -504,15 +519,11 @@ fn scalar_bytes(peek: Peek<'_, '_>) -> Result<Vec<u8>, Error> {
         use facet::{NumericType, PrimitiveType, TextualType};
         match pt {
             PrimitiveType::Boolean => {
-                let v = *peek
-                    .get::<bool>()
-                    .map_err(|e| Error::Message(e.to_string()))?;
+                let v = *peek.get::<bool>().map_err(msg)?;
                 return Ok(v.to_string().into_bytes());
             }
             PrimitiveType::Textual(TextualType::Char) => {
-                let v = *peek
-                    .get::<char>()
-                    .map_err(|e| Error::Message(e.to_string()))?;
+                let v = *peek.get::<char>().map_err(msg)?;
                 let mut buf = [0u8; 4];
                 return Ok(v.encode_utf8(&mut buf).as_bytes().to_vec());
             }
@@ -525,18 +536,14 @@ fn scalar_bytes(peek: Peek<'_, '_>) -> Result<Vec<u8>, Error> {
             PrimitiveType::Numeric(NumericType::Float) => {
                 let layout_size = shape.layout.sized_layout().map(|l| l.size()).unwrap_or(8);
                 if layout_size == 4 {
-                    let v = *peek
-                        .get::<f32>()
-                        .map_err(|e| Error::Message(e.to_string()))?;
+                    let v = *peek.get::<f32>().map_err(msg)?;
                     if v.is_nan() {
                         return Ok(b"nan".to_vec());
                     }
                     let v = if v == 0.0f32 { 0.0f32 } else { v };
                     return Ok(v.to_string().into_bytes());
                 } else {
-                    let v = *peek
-                        .get::<f64>()
-                        .map_err(|e| Error::Message(e.to_string()))?;
+                    let v = *peek.get::<f64>().map_err(msg)?;
                     if v.is_nan() {
                         return Ok(b"nan".to_vec());
                     }
@@ -570,7 +577,7 @@ fn find_object<'a, F: Find + ?Sized>(
 ) -> Result<Data<'a>, Error> {
     store
         .try_find(id, buf)
-        .map_err(|e| Error::Message(e.to_string()))?
+        .map_err(msg)?
         .ok_or_else(|| Error::NotFound(*id))
 }
 
@@ -583,8 +590,7 @@ fn find_tree_entries<F: Find + ?Sized>(
     if data.kind != Kind::Tree {
         return Err(Error::NotATree(*id));
     }
-    let tree_ref = gix_object::TreeRef::from_bytes(data.data, HashKind::Sha1)
-        .map_err(|e| Error::Message(e.to_string()))?;
+    let tree_ref = gix_object::TreeRef::from_bytes(data.data, HashKind::Sha1).map_err(msg)?;
     let mut result = Vec::new();
     for entry in &tree_ref.entries {
         let name = std::str::from_utf8(entry.filename).map_err(|_| {
@@ -604,11 +610,32 @@ fn find_blob_bytes<F: Find + ?Sized>(id: &ObjectId, store: &F) -> Result<Vec<u8>
     Ok(data.data.to_owned())
 }
 
+/// Sort sequence entries into ascending ordinal order, rejecting any entry whose
+/// name is not a decimal index.
+///
+/// Sequence elements are named by zero-based decimal index, so the order must be
+/// recovered numerically rather than lexically (`10000` sorts before `9999`). A
+/// non-numeric name can only come from a foreign tree and is reported as
+/// [`Error::InvalidOrdinal`].
+fn sort_by_ordinal(entries: &mut [(String, ObjectId, EntryKind)]) -> Result<(), Error> {
+    // Validate up front so the infallible sort key below cannot misorder entries.
+    for (name, _, _) in entries.iter() {
+        name.parse::<usize>()
+            .map_err(|_| Error::InvalidOrdinal(name.clone()))?;
+    }
+    entries.sort_by_key(|(name, _, _)| name.parse::<usize>().expect("ordinal validated above"));
+    Ok(())
+}
+
 fn deser_into<'facet, F: Find + ?Sized>(
     partial: Partial<'facet, true>,
     oid: &ObjectId,
     store: &F,
+    depth: usize,
 ) -> Result<Partial<'facet, true>, Error> {
+    if depth > MAX_DEPTH {
+        return Err(Error::MaxDepth(MAX_DEPTH));
+    }
     let shape = partial.shape();
 
     // Scalar leaf: read blob, parse from str
@@ -643,7 +670,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
                 partial = partial
                     .begin_field(field.name)
                     .map_err(|e| Error::Message(format!("begin_field {}: {e}", field.name)))?;
-                partial = deser_into(partial, &child_oid, store)?;
+                partial = deser_into(partial, &child_oid, store, depth + 1)?;
                 partial = partial
                     .end()
                     .map_err(|e| Error::Message(format!("end field {}: {e}", field.name)))?;
@@ -655,16 +682,12 @@ fn deser_into<'facet, F: Find + ?Sized>(
     // List (Vec): read tree with ordinal keys, sort numerically, push items
     if matches!(shape.def, Def::List(_)) {
         let mut entries = find_tree_entries(oid, store)?;
-        entries.sort_by_key(|(name, _, _)| name.parse::<usize>().unwrap_or(0));
-        let mut partial = partial
-            .init_list()
-            .map_err(|e| Error::Message(e.to_string()))?;
+        sort_by_ordinal(&mut entries)?;
+        let mut partial = partial.init_list().map_err(msg)?;
         for (_, child_oid, _) in entries {
-            partial = partial
-                .begin_list_item()
-                .map_err(|e| Error::Message(e.to_string()))?;
-            partial = deser_into(partial, &child_oid, store)?;
-            partial = partial.end().map_err(|e| Error::Message(e.to_string()))?;
+            partial = partial.begin_list_item().map_err(msg)?;
+            partial = deser_into(partial, &child_oid, store, depth + 1)?;
+            partial = partial.end().map_err(msg)?;
         }
         return Ok(partial);
     }
@@ -672,16 +695,12 @@ fn deser_into<'facet, F: Find + ?Sized>(
     // Array: same as List but init_array
     if matches!(shape.def, Def::Array(_)) {
         let mut entries = find_tree_entries(oid, store)?;
-        entries.sort_by_key(|(name, _, _)| name.parse::<usize>().unwrap_or(0));
-        let mut partial = partial
-            .init_array()
-            .map_err(|e| Error::Message(e.to_string()))?;
+        sort_by_ordinal(&mut entries)?;
+        let mut partial = partial.init_array().map_err(msg)?;
         for (i, (_, child_oid, _)) in entries.into_iter().enumerate() {
-            partial = partial
-                .begin_nth_field(i)
-                .map_err(|e| Error::Message(e.to_string()))?;
-            partial = deser_into(partial, &child_oid, store)?;
-            partial = partial.end().map_err(|e| Error::Message(e.to_string()))?;
+            partial = partial.begin_nth_field(i).map_err(msg)?;
+            partial = deser_into(partial, &child_oid, store, depth + 1)?;
+            partial = partial.end().map_err(msg)?;
         }
         return Ok(partial);
     }
@@ -692,23 +711,15 @@ fn deser_into<'facet, F: Find + ?Sized>(
     if let Def::Map(md) = shape.def {
         let entries = find_tree_entries(oid, store)?;
         let scalar_keys = matches!(md.k.def, Def::Scalar);
-        let mut partial = partial
-            .init_map()
-            .map_err(|e| Error::Message(e.to_string()))?;
+        let mut partial = partial.init_map().map_err(msg)?;
         if scalar_keys {
             for (key, child_oid, _) in entries {
-                partial = partial
-                    .begin_key()
-                    .map_err(|e| Error::Message(e.to_string()))?;
-                partial = partial
-                    .parse_from_str(&key)
-                    .map_err(|e| Error::Message(e.to_string()))?;
-                partial = partial.end().map_err(|e| Error::Message(e.to_string()))?;
-                partial = partial
-                    .begin_value()
-                    .map_err(|e| Error::Message(e.to_string()))?;
-                partial = deser_into(partial, &child_oid, store)?;
-                partial = partial.end().map_err(|e| Error::Message(e.to_string()))?;
+                partial = partial.begin_key().map_err(msg)?;
+                partial = partial.parse_from_str(&key).map_err(msg)?;
+                partial = partial.end().map_err(msg)?;
+                partial = partial.begin_value().map_err(msg)?;
+                partial = deser_into(partial, &child_oid, store, depth + 1)?;
+                partial = partial.end().map_err(msg)?;
             }
         } else {
             for (_, pair_oid, _) in entries {
@@ -723,36 +734,41 @@ fn deser_into<'facet, F: Find + ?Sized>(
                 };
                 let k_oid = find("k")?;
                 let v_oid = find("v")?;
-                partial = partial
-                    .begin_key()
-                    .map_err(|e| Error::Message(e.to_string()))?;
-                partial = deser_into(partial, &k_oid, store)?;
-                partial = partial.end().map_err(|e| Error::Message(e.to_string()))?;
-                partial = partial
-                    .begin_value()
-                    .map_err(|e| Error::Message(e.to_string()))?;
-                partial = deser_into(partial, &v_oid, store)?;
-                partial = partial.end().map_err(|e| Error::Message(e.to_string()))?;
+                partial = partial.begin_key().map_err(msg)?;
+                partial = deser_into(partial, &k_oid, store, depth + 1)?;
+                partial = partial.end().map_err(msg)?;
+                partial = partial.begin_value().map_err(msg)?;
+                partial = deser_into(partial, &v_oid, store, depth + 1)?;
+                partial = partial.end().map_err(msg)?;
             }
         }
         return Ok(partial);
     }
 
-    // Option: empty tree → None, single-entry "some" tree → Some(inner)
+    // Option: empty tree → None, single "some"-named entry → Some(inner).
     if matches!(shape.def, Def::Option(_)) {
         let entries = find_tree_entries(oid, store)?;
         if entries.is_empty() {
-            // None — partial is already default None, just return
+            // None — the partial already holds the default None.
             return Ok(partial);
-        } else {
-            let (_, inner_oid, _) = &entries[0];
-            let inner_oid = *inner_oid;
-            let partial = partial
-                .begin_some()
-                .map_err(|e| Error::Message(e.to_string()))?;
-            let partial = deser_into(partial, &inner_oid, store)?;
-            return partial.end().map_err(|e| Error::Message(e.to_string()));
         }
+        // Some is written as exactly one entry named "some"; anything else is a
+        // malformed (necessarily foreign) tree rather than a value to guess at.
+        let [(name, inner_oid, _)] = entries.as_slice() else {
+            return Err(Error::Message(format!(
+                "malformed Option tree: expected a single \"some\" entry, found {}",
+                entries.len()
+            )));
+        };
+        if name != "some" {
+            return Err(Error::Message(format!(
+                "malformed Option tree: entry must be named \"some\", found {name:?}"
+            )));
+        }
+        let inner_oid = *inner_oid;
+        let partial = partial.begin_some().map_err(msg)?;
+        let partial = deser_into(partial, &inner_oid, store, depth + 1)?;
+        return partial.end().map_err(msg);
     }
 
     // Enum: single-entry tree → variant name → variant contents
@@ -776,11 +792,9 @@ fn deser_into<'facet, F: Find + ?Sized>(
             .map_err(|e| Error::Message(format!("select variant {variant_name}: {e}")))?;
 
         if newtype {
-            partial = partial
-                .begin_nth_field(0)
-                .map_err(|e| Error::Message(e.to_string()))?;
-            partial = deser_into(partial, &inner_oid, store)?;
-            return partial.end().map_err(|e| Error::Message(e.to_string()));
+            partial = partial.begin_nth_field(0).map_err(msg)?;
+            partial = deser_into(partial, &inner_oid, store, depth + 1)?;
+            return partial.end().map_err(msg);
         }
 
         let inner_entries = find_tree_entries(&inner_oid, store)?;
@@ -788,17 +802,13 @@ fn deser_into<'facet, F: Find + ?Sized>(
             if positional {
                 let idx = name
                     .parse::<usize>()
-                    .map_err(|_| Error::Message(format!("invalid ordinal: {name}")))?;
-                partial = partial
-                    .begin_nth_field(idx)
-                    .map_err(|e| Error::Message(e.to_string()))?;
+                    .map_err(|_| Error::InvalidOrdinal(name.clone()))?;
+                partial = partial.begin_nth_field(idx).map_err(msg)?;
             } else {
-                partial = partial
-                    .begin_field(&name)
-                    .map_err(|e| Error::Message(e.to_string()))?;
+                partial = partial.begin_field(&name).map_err(msg)?;
             }
-            partial = deser_into(partial, &child_oid, store)?;
-            partial = partial.end().map_err(|e| Error::Message(e.to_string()))?;
+            partial = deser_into(partial, &child_oid, store, depth + 1)?;
+            partial = partial.end().map_err(msg)?;
         }
         return Ok(partial);
     }
