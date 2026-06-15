@@ -160,6 +160,7 @@ dependencies = [
  "autocfg",
  "facet-core",
  "facet-macros",
+ "facet-reflect",
 ]
 
 [[package]]
@@ -230,6 +231,28 @@ dependencies = [
  "quote",
  "strsim",
  "unsynn",
+]
+
+[[package]]
+name = "facet-path"
+version = "0.50.0-rc.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4f0aeceb55a22d6ddb1d9d2af4a6223114ce6869821c0ae1091a3c955d1492a7"
+dependencies = [
+ "facet-core",
+]
+
+[[package]]
+name = "facet-reflect"
+version = "0.50.0-rc.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8287a68023eec4152a4d4cb88814e10d38ff6f116cbb70acb4eb58a304f624c6"
+dependencies = [
+ "facet-core",
+ "facet-path",
+ "hashbrown 0.17.1",
+ "regex",
+ "smallvec 2.0.0-alpha.12",
 ]
 
 [[package]]
@@ -453,7 +476,7 @@ dependencies = [
  "gix-utils",
  "gix-validate",
  "itoa",
- "smallvec",
+ "smallvec 1.15.2",
  "thiserror",
 ]
 
@@ -491,7 +514,7 @@ dependencies = [
  "gix-object",
  "gix-path",
  "memmap2",
- "smallvec",
+ "smallvec 1.15.2",
  "thiserror",
 ]
 
@@ -581,6 +604,11 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "allocator-api2",
+ "equivalent",
+ "foldhash 0.2.0",
+]
 
 [[package]]
 name = "heapless"
@@ -769,7 +797,7 @@ dependencies = [
  "cfg-if",
  "libc",
  "redox_syscall",
- "smallvec",
+ "smallvec 1.15.2",
  "windows-link",
 ]
 
@@ -1138,6 +1166,12 @@ name = "smallvec"
 version = "1.15.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+
+[[package]]
+name = "smallvec"
+version = "2.0.0-alpha.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef784004ca8777809dcdad6ac37629f0a97caee4c685fcea805278d81dd8b857"
 
 [[package]]
 name = "stable_deref_trait"

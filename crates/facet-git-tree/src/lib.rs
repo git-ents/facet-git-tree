@@ -18,6 +18,9 @@ pub use gix_object::tree::{Entry as TreeEntry, EntryKind, EntryMode};
 use gix_hash::Kind as HashKind;
 use gix_object::{Data, Find, Kind, ObjectRef, Write};
 
+use facet::Def;
+use facet::{Partial, Peek};
+
 /// A content-addressed store of Git objects produced by [`serialize`].
 ///
 /// This is a thin wrapper around [`gix_odb::memory::Proxy`], gitoxide's own
@@ -189,12 +192,9 @@ where
     T: for<'a> facet::Facet<'a>,
     W: Write + ?Sized,
 {
-    // The implementation MUST validate every dynamic key (e.g. map keys) with
-    // [`check_key`] before emitting its tree entry, so a `/`-bearing name can
-    // never be written as data. Static field names come from Rust identifiers
-    // and are safe.
-    let _ = (value, store);
-    todo!("serialization not yet implemented")
+    let peek = Peek::new(value);
+    let (oid, _kind) = serialize_peek(peek, store)?;
+    Ok(oid)
 }
 
 /// Serialize a [`facet::Facet`] value into a set of Git objects.
@@ -216,6 +216,589 @@ pub fn deserialize<T: for<'a> facet::Facet<'a>>(
     root: &ObjectId,
     store: &(impl Find + ?Sized),
 ) -> Result<T, Error> {
-    let _ = (root, store);
-    todo!("deserialization not yet implemented")
+    let partial =
+        Partial::alloc::<T>().map_err(|e| Error::Message(format!("alloc failed: {e}")))?;
+    let partial = deser_into(partial, root, store)?;
+    let heap = partial
+        .build()
+        .map_err(|e| Error::Message(format!("build failed: {e}")))?;
+    heap.materialize::<T>()
+        .map_err(|e| Error::Message(format!("materialize failed: {e}")))
+}
+
+// --- serialization internals ---
+
+fn serialize_peek<W: Write + ?Sized>(
+    peek: Peek<'_, '_>,
+    store: &W,
+) -> Result<(ObjectId, EntryKind), Error> {
+    let shape = peek.shape();
+
+    // Scalar leaf → blob
+    if matches!(shape.def, Def::Scalar) {
+        let bytes = scalar_bytes(peek)?;
+        let oid = store
+            .write_buf(Kind::Blob, &bytes)
+            .map_err(Error::Backend)?;
+        return Ok((oid, EntryKind::Blob));
+    }
+
+    // Struct → tree keyed by field names
+    if let facet::Type::User(facet::UserType::Struct(st)) = shape.ty {
+        let ps = peek
+            .into_struct()
+            .map_err(|e| Error::Message(e.to_string()))?;
+        let mut entries: Vec<TreeEntry> = Vec::with_capacity(st.fields.len());
+        for (i, field) in st.fields.iter().enumerate() {
+            let child = ps.field(i).map_err(|e| Error::Message(e.to_string()))?;
+            let (oid, kind) = serialize_peek(child, store)?;
+            entries.push(TreeEntry {
+                mode: EntryMode::from(kind),
+                filename: field.name.into(),
+                oid,
+            });
+        }
+        entries.sort();
+        let oid = store
+            .write(&gix_object::Tree { entries })
+            .map_err(Error::Backend)?;
+        return Ok((oid, EntryKind::Tree));
+    }
+
+    // Tuple → tree keyed by zero-padded ordinal
+    if let facet::Type::User(facet::UserType::Struct(_)) = shape.ty {
+        // handled above; tuples use Type::Sequence or similar — fall through
+    }
+
+    if let Ok(pt) = peek.into_tuple() {
+        let count = pt.len();
+        let mut entries: Vec<TreeEntry> = Vec::with_capacity(count);
+        for i in 0..count {
+            let child = pt
+                .field(i)
+                .ok_or_else(|| Error::Message(format!("tuple field {i} missing")))?;
+            let (oid, kind) = serialize_peek(child, store)?;
+            entries.push(TreeEntry {
+                mode: EntryMode::from(kind),
+                filename: format!("{i:04}").into(),
+                oid,
+            });
+        }
+        entries.sort();
+        let oid = store
+            .write(&gix_object::Tree { entries })
+            .map_err(Error::Backend)?;
+        return Ok((oid, EntryKind::Tree));
+    }
+
+    // Vec / Array / slice → tree with ordinal keys
+    if matches!(shape.def, Def::List(_) | Def::Array(_)) {
+        let entries = serialize_sequence(peek, store)?;
+        let oid = store
+            .write(&gix_object::Tree { entries })
+            .map_err(Error::Backend)?;
+        return Ok((oid, EntryKind::Tree));
+    }
+
+    // Map → tree keyed by map keys
+    if matches!(shape.def, Def::Map(_)) {
+        let pm = peek.into_map().map_err(|e| Error::Message(e.to_string()))?;
+        let mut entries: Vec<TreeEntry> = Vec::new();
+        for (k, v) in pm.iter() {
+            let key_str = k
+                .as_str()
+                .ok_or_else(|| Error::Message("map key must be a string".into()))?;
+            check_key(key_str)?;
+            let (oid, kind) = serialize_peek(v, store)?;
+            entries.push(TreeEntry {
+                mode: EntryMode::from(kind),
+                filename: key_str.into(),
+                oid,
+            });
+        }
+        entries.sort();
+        let oid = store
+            .write(&gix_object::Tree { entries })
+            .map_err(Error::Backend)?;
+        return Ok((oid, EntryKind::Tree));
+    }
+
+    // Option
+    if matches!(shape.def, Def::Option(_)) {
+        let po = peek
+            .into_option()
+            .map_err(|e| Error::Message(e.to_string()))?;
+        if let Some(inner) = po.value() {
+            let (oid, kind) = serialize_peek(inner, store)?;
+            // Some: wrap in a tree with a single "some" entry
+            let entries = vec![TreeEntry {
+                mode: EntryMode::from(kind),
+                filename: "some".into(),
+                oid,
+            }];
+            let oid = store
+                .write(&gix_object::Tree { entries })
+                .map_err(Error::Backend)?;
+            return Ok((oid, EntryKind::Tree));
+        } else {
+            // None: empty tree
+            let oid = store
+                .write(&gix_object::Tree { entries: vec![] })
+                .map_err(Error::Backend)?;
+            return Ok((oid, EntryKind::Tree));
+        }
+    }
+
+    // Enum → single-entry tree: variant name → variant contents
+    if let facet::Type::User(facet::UserType::Enum(_)) = shape.ty {
+        let pe = peek
+            .into_enum()
+            .map_err(|e| Error::Message(e.to_string()))?;
+        let variant = pe
+            .active_variant()
+            .map_err(|e| Error::Message(e.to_string()))?;
+        let variant_name = pe
+            .variant_name_active()
+            .map_err(|e| Error::Message(e.to_string()))?;
+
+        // Collect variant fields (unit → empty tree, tuple → ordinals, struct → names)
+        let inner_oid = if variant.data.fields.is_empty() {
+            store
+                .write(&gix_object::Tree { entries: vec![] })
+                .map_err(Error::Backend)?
+        } else {
+            let mut inner_entries: Vec<TreeEntry> = Vec::new();
+            // Check if fields have names (struct variant) or not (tuple variant)
+            let named = variant.data.fields.iter().any(|f| !f.name.starts_with('_'));
+            for (i, field) in variant.data.fields.iter().enumerate() {
+                let child = pe
+                    .field(i)
+                    .map_err(|e| Error::Message(e.to_string()))?
+                    .ok_or_else(|| Error::Message(format!("variant field {i} missing")))?;
+                let (oid, kind) = serialize_peek(child, store)?;
+                let name: gix_object::bstr::BString = if named {
+                    field.name.into()
+                } else {
+                    format!("{i:04}").into()
+                };
+                inner_entries.push(TreeEntry {
+                    mode: EntryMode::from(kind),
+                    filename: name,
+                    oid,
+                });
+            }
+            inner_entries.sort();
+            store
+                .write(&gix_object::Tree {
+                    entries: inner_entries,
+                })
+                .map_err(Error::Backend)?
+        };
+
+        let entries = vec![TreeEntry {
+            mode: EntryMode::from(EntryKind::Tree),
+            filename: variant_name.into(),
+            oid: inner_oid,
+        }];
+        let oid = store
+            .write(&gix_object::Tree { entries })
+            .map_err(Error::Backend)?;
+        return Ok((oid, EntryKind::Tree));
+    }
+
+    Err(Error::Message(format!(
+        "unsupported type for serialization: {}",
+        shape.type_identifier
+    )))
+}
+
+fn serialize_sequence<W: Write + ?Sized>(
+    peek: Peek<'_, '_>,
+    store: &W,
+) -> Result<Vec<TreeEntry>, Error> {
+    let shape = peek.shape();
+    let mut entries: Vec<TreeEntry> = Vec::new();
+
+    if matches!(shape.def, Def::List(_)) {
+        let pl = peek
+            .into_list()
+            .map_err(|e| Error::Message(e.to_string()))?;
+        for (i, item) in pl.iter().enumerate() {
+            let (oid, kind) = serialize_peek(item, store)?;
+            entries.push(TreeEntry {
+                mode: EntryMode::from(kind),
+                filename: format!("{i:04}").into(),
+                oid,
+            });
+        }
+    } else if matches!(shape.def, Def::Array(_)) {
+        let pa = peek
+            .into_ndarray()
+            .map_err(|e| Error::Message(e.to_string()))?;
+        for i in 0..pa.count() {
+            let item = pa
+                .get(i)
+                .ok_or_else(|| Error::Message(format!("array index {i} missing")))?;
+            let (oid, kind) = serialize_peek(item, store)?;
+            entries.push(TreeEntry {
+                mode: EntryMode::from(kind),
+                filename: format!("{i:04}").into(),
+                oid,
+            });
+        }
+    }
+
+    entries.sort();
+    Ok(entries)
+}
+
+fn scalar_bytes(peek: Peek<'_, '_>) -> Result<Vec<u8>, Error> {
+    // Strings: verbatim UTF-8 bytes
+    if let Some(s) = peek.as_str() {
+        return Ok(s.as_bytes().to_vec());
+    }
+
+    // Use Display for everything else, with special float/bool/char handling
+    let shape = peek.shape();
+    if let facet::Type::Primitive(pt) = shape.ty {
+        use facet::{NumericType, PrimitiveType, TextualType};
+        match pt {
+            PrimitiveType::Boolean => {
+                let v = *peek
+                    .get::<bool>()
+                    .map_err(|e| Error::Message(e.to_string()))?;
+                return Ok(v.to_string().into_bytes());
+            }
+            PrimitiveType::Textual(TextualType::Char) => {
+                let v = *peek
+                    .get::<char>()
+                    .map_err(|e| Error::Message(e.to_string()))?;
+                let mut buf = [0u8; 4];
+                return Ok(v.encode_utf8(&mut buf).as_bytes().to_vec());
+            }
+            PrimitiveType::Textual(TextualType::Str) => {
+                // handled above by as_str(); shouldn't reach here
+                if let Some(s) = peek.as_str() {
+                    return Ok(s.as_bytes().to_vec());
+                }
+            }
+            PrimitiveType::Numeric(NumericType::Float) => {
+                let layout_size = shape.layout.sized_layout().map(|l| l.size()).unwrap_or(8);
+                if layout_size == 4 {
+                    let v = *peek
+                        .get::<f32>()
+                        .map_err(|e| Error::Message(e.to_string()))?;
+                    if v.is_nan() {
+                        return Ok(b"nan".to_vec());
+                    }
+                    let v = if v == 0.0f32 { 0.0f32 } else { v };
+                    return Ok(v.to_string().into_bytes());
+                } else {
+                    let v = *peek
+                        .get::<f64>()
+                        .map_err(|e| Error::Message(e.to_string()))?;
+                    if v.is_nan() {
+                        return Ok(b"nan".to_vec());
+                    }
+                    let v = if v == 0.0f64 { 0.0f64 } else { v };
+                    return Ok(v.to_string().into_bytes());
+                }
+            }
+            PrimitiveType::Numeric(NumericType::Integer { signed }) => {
+                let layout_size = shape.layout.sized_layout().map(|l| l.size()).unwrap_or(8);
+                if signed {
+                    match layout_size {
+                        1 => {
+                            return Ok(peek
+                                .get::<i8>()
+                                .map_err(|e| Error::Message(e.to_string()))?
+                                .to_string()
+                                .into_bytes());
+                        }
+                        2 => {
+                            return Ok(peek
+                                .get::<i16>()
+                                .map_err(|e| Error::Message(e.to_string()))?
+                                .to_string()
+                                .into_bytes());
+                        }
+                        4 => {
+                            return Ok(peek
+                                .get::<i32>()
+                                .map_err(|e| Error::Message(e.to_string()))?
+                                .to_string()
+                                .into_bytes());
+                        }
+                        8 => {
+                            return Ok(peek
+                                .get::<i64>()
+                                .map_err(|e| Error::Message(e.to_string()))?
+                                .to_string()
+                                .into_bytes());
+                        }
+                        16 => {
+                            return Ok(peek
+                                .get::<i128>()
+                                .map_err(|e| Error::Message(e.to_string()))?
+                                .to_string()
+                                .into_bytes());
+                        }
+                        _ => {
+                            return Ok(peek
+                                .get::<isize>()
+                                .map_err(|e| Error::Message(e.to_string()))?
+                                .to_string()
+                                .into_bytes());
+                        }
+                    }
+                } else {
+                    match layout_size {
+                        1 => {
+                            return Ok(peek
+                                .get::<u8>()
+                                .map_err(|e| Error::Message(e.to_string()))?
+                                .to_string()
+                                .into_bytes());
+                        }
+                        2 => {
+                            return Ok(peek
+                                .get::<u16>()
+                                .map_err(|e| Error::Message(e.to_string()))?
+                                .to_string()
+                                .into_bytes());
+                        }
+                        4 => {
+                            return Ok(peek
+                                .get::<u32>()
+                                .map_err(|e| Error::Message(e.to_string()))?
+                                .to_string()
+                                .into_bytes());
+                        }
+                        8 => {
+                            return Ok(peek
+                                .get::<u64>()
+                                .map_err(|e| Error::Message(e.to_string()))?
+                                .to_string()
+                                .into_bytes());
+                        }
+                        16 => {
+                            return Ok(peek
+                                .get::<u128>()
+                                .map_err(|e| Error::Message(e.to_string()))?
+                                .to_string()
+                                .into_bytes());
+                        }
+                        _ => {
+                            return Ok(peek
+                                .get::<usize>()
+                                .map_err(|e| Error::Message(e.to_string()))?
+                                .to_string()
+                                .into_bytes());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Err(Error::Message(format!(
+        "unsupported scalar type: {}",
+        shape.type_identifier
+    )))
+}
+
+// --- deserialization internals ---
+
+fn find_object<'a, F: Find + ?Sized>(
+    id: &ObjectId,
+    buf: &'a mut Vec<u8>,
+    store: &F,
+) -> Result<Data<'a>, Error> {
+    store
+        .try_find(id, buf)
+        .map_err(|e| Error::Message(e.to_string()))?
+        .ok_or_else(|| Error::NotFound(*id))
+}
+
+fn find_tree_entries<F: Find + ?Sized>(
+    id: &ObjectId,
+    store: &F,
+) -> Result<Vec<(String, ObjectId, EntryKind)>, Error> {
+    let mut buf = Vec::new();
+    let data = find_object(id, &mut buf, store)?;
+    if data.kind != Kind::Tree {
+        return Err(Error::NotATree(*id));
+    }
+    let tree_ref = gix_object::TreeRef::from_bytes(data.data, HashKind::Sha1)
+        .map_err(|e| Error::Message(e.to_string()))?;
+    let mut result = Vec::new();
+    for entry in &tree_ref.entries {
+        let name = std::str::from_utf8(entry.filename).map_err(|_| {
+            Error::NonUtf8Name(String::from_utf8_lossy(entry.filename).into_owned())
+        })?;
+        result.push((name.to_owned(), entry.oid.to_owned(), entry.mode.kind()));
+    }
+    Ok(result)
+}
+
+fn find_blob_bytes<F: Find + ?Sized>(id: &ObjectId, store: &F) -> Result<Vec<u8>, Error> {
+    let mut buf = Vec::new();
+    let data = find_object(id, &mut buf, store)?;
+    Ok(data.data.to_owned())
+}
+
+fn deser_into<'facet, F: Find + ?Sized>(
+    partial: Partial<'facet, true>,
+    oid: &ObjectId,
+    store: &F,
+) -> Result<Partial<'facet, true>, Error> {
+    let shape = partial.shape();
+
+    // Scalar leaf: read blob, parse from str
+    if matches!(shape.def, Def::Scalar) {
+        let bytes = find_blob_bytes(oid, store)?;
+        let s = std::str::from_utf8(&bytes)
+            .map_err(|_| Error::Message("blob is not valid UTF-8".into()))?;
+        return partial
+            .parse_from_str(s)
+            .map_err(|e| Error::Message(format!("parse failed: {e}")));
+    }
+
+    // Struct: read tree, fill fields by name
+    if let facet::Type::User(facet::UserType::Struct(st)) = shape.ty {
+        // Must check for Option encoded as tree first (but Option has Def::Option, handled below)
+        let entries = find_tree_entries(oid, store)?;
+        let mut partial = partial;
+        for field in st.fields {
+            // Find this field's entry in the tree
+            let entry = entries.iter().find(|(name, _, _)| name == field.name);
+            if let Some((_, child_oid, _)) = entry {
+                let child_oid = *child_oid;
+                partial = partial
+                    .begin_field(field.name)
+                    .map_err(|e| Error::Message(format!("begin_field {}: {e}", field.name)))?;
+                partial = deser_into(partial, &child_oid, store)?;
+                partial = partial
+                    .end()
+                    .map_err(|e| Error::Message(format!("end field {}: {e}", field.name)))?;
+            }
+        }
+        return Ok(partial);
+    }
+
+    // List (Vec): read tree with ordinal keys, sort numerically, push items
+    if matches!(shape.def, Def::List(_)) {
+        let mut entries = find_tree_entries(oid, store)?;
+        entries.sort_by_key(|(name, _, _)| name.parse::<usize>().unwrap_or(0));
+        let mut partial = partial
+            .init_list()
+            .map_err(|e| Error::Message(e.to_string()))?;
+        for (_, child_oid, _) in entries {
+            partial = partial
+                .begin_list_item()
+                .map_err(|e| Error::Message(e.to_string()))?;
+            partial = deser_into(partial, &child_oid, store)?;
+            partial = partial.end().map_err(|e| Error::Message(e.to_string()))?;
+        }
+        return Ok(partial);
+    }
+
+    // Array: same as List but init_array
+    if matches!(shape.def, Def::Array(_)) {
+        let mut entries = find_tree_entries(oid, store)?;
+        entries.sort_by_key(|(name, _, _)| name.parse::<usize>().unwrap_or(0));
+        let mut partial = partial
+            .init_array()
+            .map_err(|e| Error::Message(e.to_string()))?;
+        for (i, (_, child_oid, _)) in entries.into_iter().enumerate() {
+            partial = partial
+                .begin_nth_field(i)
+                .map_err(|e| Error::Message(e.to_string()))?;
+            partial = deser_into(partial, &child_oid, store)?;
+            partial = partial.end().map_err(|e| Error::Message(e.to_string()))?;
+        }
+        return Ok(partial);
+    }
+
+    // Map
+    if matches!(shape.def, Def::Map(_)) {
+        let entries = find_tree_entries(oid, store)?;
+        let mut partial = partial
+            .init_map()
+            .map_err(|e| Error::Message(e.to_string()))?;
+        for (key, child_oid, _) in entries {
+            partial = partial
+                .begin_key()
+                .map_err(|e| Error::Message(e.to_string()))?;
+            partial = partial
+                .parse_from_str(&key)
+                .map_err(|e| Error::Message(e.to_string()))?;
+            partial = partial.end().map_err(|e| Error::Message(e.to_string()))?;
+            partial = partial
+                .begin_value()
+                .map_err(|e| Error::Message(e.to_string()))?;
+            partial = deser_into(partial, &child_oid, store)?;
+            partial = partial.end().map_err(|e| Error::Message(e.to_string()))?;
+        }
+        return Ok(partial);
+    }
+
+    // Option: empty tree → None, single-entry "some" tree → Some(inner)
+    if matches!(shape.def, Def::Option(_)) {
+        let entries = find_tree_entries(oid, store)?;
+        if entries.is_empty() {
+            // None — partial is already default None, just return
+            return Ok(partial);
+        } else {
+            let (_, inner_oid, _) = &entries[0];
+            let inner_oid = *inner_oid;
+            let partial = partial
+                .begin_some()
+                .map_err(|e| Error::Message(e.to_string()))?;
+            let partial = deser_into(partial, &inner_oid, store)?;
+            return partial.end().map_err(|e| Error::Message(e.to_string()));
+        }
+    }
+
+    // Enum: single-entry tree → variant name → variant contents
+    if let facet::Type::User(facet::UserType::Enum(_)) = shape.ty {
+        let entries = find_tree_entries(oid, store)?;
+        let (variant_name, inner_oid, _) = entries
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::Message("enum tree must have exactly one entry".into()))?;
+
+        let mut partial = partial
+            .select_variant_named(&variant_name)
+            .map_err(|e| Error::Message(format!("select variant {variant_name}: {e}")))?;
+
+        let inner_entries = find_tree_entries(&inner_oid, store)?;
+        if !inner_entries.is_empty() {
+            // Check if named or ordinal fields
+            let named = inner_entries[0].0.parse::<usize>().is_err();
+            for (name, child_oid, _) in inner_entries {
+                if named {
+                    partial = partial
+                        .begin_field(&name)
+                        .map_err(|e| Error::Message(e.to_string()))?;
+                } else {
+                    let idx = name
+                        .parse::<usize>()
+                        .map_err(|_| Error::Message(format!("invalid ordinal: {name}")))?;
+                    partial = partial
+                        .begin_nth_field(idx)
+                        .map_err(|e| Error::Message(e.to_string()))?;
+                }
+                partial = deser_into(partial, &child_oid, store)?;
+                partial = partial.end().map_err(|e| Error::Message(e.to_string()))?;
+            }
+        }
+        return Ok(partial);
+    }
+
+    Err(Error::Message(format!(
+        "unsupported type for deserialization: {}",
+        shape.type_identifier
+    )))
 }

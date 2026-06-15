@@ -54,7 +54,7 @@ fn serialize_scalar_f32(value: f32) -> Vec<u8> {
 
 /// f64 negative zero and positive zero produce identical blob content.
 #[test]
-#[ignore = "serialization not yet implemented"]
+
 fn f64_negative_zero_normalized_to_positive_zero() {
     let pos_zero = serialize_scalar_f64(0.0_f64);
     let neg_zero = serialize_scalar_f64(-0.0_f64);
@@ -66,7 +66,7 @@ fn f64_negative_zero_normalized_to_positive_zero() {
 
 /// f32 negative zero and positive zero produce identical blob content.
 #[test]
-#[ignore = "serialization not yet implemented"]
+
 fn f32_negative_zero_normalized_to_positive_zero() {
     let pos_zero = serialize_scalar_f32(0.0_f32);
     let neg_zero = serialize_scalar_f32(-0.0_f32);
@@ -81,7 +81,7 @@ fn f32_negative_zero_normalized_to_positive_zero() {
 /// This verifies that normalization happens before hashing, ensuring that
 /// positive and negative zero are structurally equal.
 #[test]
-#[ignore = "serialization not yet implemented"]
+
 fn negative_zero_structural_equality() {
     let (id_pos, _) = serialize(&WithF64 { v: 0.0_f64 }).expect("serialize should succeed");
     let (id_neg, _) = serialize(&WithF64 { v: -0.0_f64 }).expect("serialize should succeed");
@@ -95,7 +95,7 @@ fn negative_zero_structural_equality() {
 
 /// f64 NaN serializes to the unquoted string literal "nan".
 #[test]
-#[ignore = "serialization not yet implemented"]
+
 fn f64_nan_normalized_to_string_nan() {
     let bytes = serialize_scalar_f64(f64::NAN);
     assert_eq!(
@@ -106,7 +106,7 @@ fn f64_nan_normalized_to_string_nan() {
 
 /// f32 NaN serializes to the unquoted string literal "nan".
 #[test]
-#[ignore = "serialization not yet implemented"]
+
 fn f32_nan_normalized_to_string_nan() {
     let bytes = serialize_scalar_f32(f32::NAN);
     assert_eq!(
@@ -117,7 +117,7 @@ fn f32_nan_normalized_to_string_nan() {
 
 /// All NaN bit patterns serialize to the same "nan" blob, not to distinct values.
 #[test]
-#[ignore = "serialization not yet implemented"]
+
 fn different_nan_payloads_normalize_identically() {
     // Construct two different NaN payloads via bit manipulation.
     let nan1 = f64::from_bits(0x7FF8_0000_0000_0001);

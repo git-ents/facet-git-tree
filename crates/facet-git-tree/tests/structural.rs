@@ -13,7 +13,6 @@ use common::{Config, HELLO_BLOB_OID, Point, WithVec};
 
 /// Two identical values produce the same root object ID.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn identical_values_have_same_root_id() {
     let (id1, _) = serialize(&Point { x: 1.0, y: 2.0 }).expect("serialize ok");
     let (id2, _) = serialize(&Point { x: 1.0, y: 2.0 }).expect("serialize ok");
@@ -25,7 +24,6 @@ fn identical_values_have_same_root_id() {
 
 /// Values that differ in even one field produce distinct root object IDs.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn different_values_have_different_root_ids() {
     let (id1, _) = serialize(&Point { x: 1.0, y: 2.0 }).expect("serialize ok");
     let (id2, _) = serialize(&Point { x: 1.0, y: 3.0 }).expect("serialize ok");
@@ -37,7 +35,6 @@ fn different_values_have_different_root_ids() {
 
 /// The root object ID is deterministic across separate serialize calls.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn serialization_is_deterministic() {
     let value = Config {
         name: "test".to_string(),
@@ -54,7 +51,6 @@ fn serialization_is_deterministic() {
 
 /// Structural equality holds for nested structs.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn nested_identical_values_have_same_id() {
     #[derive(Debug, Facet)]
     struct Outer {
@@ -112,7 +108,6 @@ fn vec_order_matters() {
 /// `printf 'hello' | git hash-object --stdin`. (Tree-level git compatibility is
 /// pinned by `object_store::tree_oid_matches_git`.)
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn leaf_blob_id_matches_git() {
     let (root_id, store) = serialize(&Config {
         name: "hello".to_string(),

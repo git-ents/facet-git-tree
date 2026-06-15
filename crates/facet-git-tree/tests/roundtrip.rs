@@ -27,7 +27,6 @@ struct Matrix {
 
 /// Primitive-field structs roundtrip exactly.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn point_roundtrip() {
     assert_eq!(
         roundtrip(Point { x: 1.5, y: -2.75 }),
@@ -37,7 +36,6 @@ fn point_roundtrip() {
 
 /// String and integer fields roundtrip exactly.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn person_roundtrip() {
     assert_eq!(
         roundtrip(Person {
@@ -55,7 +53,6 @@ fn person_roundtrip() {
 
 /// The empty string roundtrips without becoming None or any other value.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn empty_string_roundtrip() {
     assert_eq!(
         roundtrip(Person {
@@ -73,7 +70,6 @@ fn empty_string_roundtrip() {
 
 /// Nested structs roundtrip without losing inner-field data.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn nested_struct_roundtrip() {
     assert_eq!(
         roundtrip(Nested {
@@ -188,7 +184,6 @@ fn option_none_roundtrip() {
 
 /// Positive infinity roundtrips as positive infinity.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn positive_infinity_roundtrip() {
     assert_eq!(
         roundtrip(Point {
@@ -204,7 +199,6 @@ fn positive_infinity_roundtrip() {
 
 /// Negative infinity roundtrips as negative infinity.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn negative_infinity_roundtrip() {
     assert_eq!(
         roundtrip(Point {
@@ -220,7 +214,6 @@ fn negative_infinity_roundtrip() {
 
 /// NaN deserializes back to NaN (roundtrip via the "nan" string representation).
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn nan_roundtrip() {
     let (root_id, store) = serialize(&Point {
         x: f64::NAN,
@@ -238,7 +231,6 @@ fn nan_roundtrip() {
 
 /// Negative zero deserializes to a zero value (either sign — normalized on write).
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn negative_zero_roundtrip() {
     let (root_id, store) = serialize(&Point {
         x: -0.0_f64,
