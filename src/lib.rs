@@ -368,8 +368,14 @@ fn serialize_peek<W: Write + ?Sized>(
                 .map_err(Error::Backend)?
         } else {
             let mut inner_entries: Vec<TreeEntry> = Vec::new();
-            // Check if fields have names (struct variant) or not (tuple variant)
-            let named = variant.data.fields.iter().any(|f| !f.name.starts_with('_'));
+            // Check if fields have names (struct variant) or not (tuple variant).
+            // Facet names tuple-variant fields as plain digits ("0", "1", …); struct
+            // variant fields are always non-numeric identifiers.
+            let named = variant
+                .data
+                .fields
+                .iter()
+                .any(|f| f.name.parse::<usize>().is_err());
             for (i, field) in variant.data.fields.iter().enumerate() {
                 let child = pe
                     .field(i)

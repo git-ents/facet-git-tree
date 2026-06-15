@@ -27,7 +27,6 @@ enum Shape {
 
 /// An enum value is a tree with exactly one entry, named after the active variant.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn enum_is_single_entry_tree() {
     let (root_id, store) = serialize(&Shape::Circle { radius: 1.0 }).expect("serialize ok");
     let entries = tree_entries(&store, &root_id);
@@ -45,7 +44,6 @@ fn enum_is_single_entry_tree() {
 /// The active variant for a unit variant is recorded the same way: a sole entry
 /// named after it, resolving to an empty tree (no payload).
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn unit_variant_is_named_empty_tree() {
     let (root_id, store) = serialize(&Shape::Unit).expect("serialize ok");
     let entry = find_entry(&store, &root_id, "Unit");
@@ -62,7 +60,6 @@ fn unit_variant_is_named_empty_tree() {
 
 /// A tuple variant's sole entry is named after it.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn tuple_variant_is_named() {
     let (root_id, store) = serialize(&Shape::Pair(1, 2)).expect("serialize ok");
     let _ = find_entry(&store, &root_id, "Pair");
@@ -70,7 +67,6 @@ fn tuple_variant_is_named() {
 
 /// Struct-variant fields are encoded under the variant entry, named by field name.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn struct_variant_fields_named_by_field() {
     let (root_id, store) = serialize(&Shape::Circle { radius: 2.5 }).expect("serialize ok");
     let circle = find_entry(&store, &root_id, "Circle");
@@ -85,7 +81,6 @@ fn struct_variant_fields_named_by_field() {
 /// Tuple-variant fields are encoded under the variant entry, named by their
 /// zero-padded, zero-based index (`0000`, `0001`, …).
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn tuple_variant_fields_named_by_index() {
     let (root_id, store) = serialize(&Shape::Pair(7, 13)).expect("serialize ok");
     let pair = find_entry(&store, &root_id, "Pair");
@@ -97,7 +92,6 @@ fn tuple_variant_fields_named_by_index() {
 
 /// Distinct variants of the same enum produce distinct root object IDs.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn distinct_variants_differ() {
     let (unit, _) = serialize(&Shape::Unit).expect("serialize ok");
     let (circle, _) = serialize(&Shape::Circle { radius: 0.0 }).expect("serialize ok");
@@ -110,13 +104,11 @@ fn distinct_variants_differ() {
 // --- roundtrip ---
 
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn unit_variant_roundtrip() {
     assert_eq!(roundtrip(Shape::Unit), Shape::Unit);
 }
 
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn struct_variant_roundtrip() {
     assert_eq!(
         roundtrip(Shape::Circle { radius: 3.5 }),
@@ -125,7 +117,6 @@ fn struct_variant_roundtrip() {
 }
 
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn tuple_variant_roundtrip() {
     assert_eq!(roundtrip(Shape::Pair(-1, 99)), Shape::Pair(-1, 99));
 }
