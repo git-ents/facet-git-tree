@@ -16,7 +16,7 @@ use common::Point;
 
 /// Deserializing from a root id absent from the store yields `NotFound`.
 #[test]
-#[ignore = "deserialization not yet implemented"]
+
 fn missing_root_object_is_not_found() {
     // An id produced in one store, queried in an empty one, is absent.
     let written = ObjectStore::default();
@@ -32,7 +32,7 @@ fn missing_root_object_is_not_found() {
 
 /// Deserializing where the root id points to a blob yields `NotATree`.
 #[test]
-#[ignore = "deserialization not yet implemented"]
+
 fn blob_root_is_not_a_tree() {
     let store = ObjectStore::default();
     let blob_id = store
@@ -48,7 +48,7 @@ fn blob_root_is_not_a_tree() {
 
 /// A foreign tree with a non-UTF-8 entry name is rejected as `NonUtf8Name`.
 #[test]
-#[ignore = "deserialization not yet implemented"]
+
 fn non_utf8_entry_name_is_rejected() {
     let store = ObjectStore::default();
     let blob = store.write_buf(Kind::Blob, b"v").expect("write blob");

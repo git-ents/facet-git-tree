@@ -15,7 +15,7 @@ use common::{Nested, Person, Point, find_entry, tree_entries};
 /// The `serialize` function is callable with any Facet type and returns a root ID
 /// plus an object store containing at least one object.
 #[test]
-#[ignore = "serialization not yet implemented"]
+
 fn serialize_returns_non_empty_store() {
     let (root_id, store) = serialize(&Point { x: 1.0, y: 2.0 }).expect("serialize should succeed");
     assert!(
@@ -28,7 +28,7 @@ fn serialize_returns_non_empty_store() {
 
 /// Scalar struct fields are stored as UTF-8 blobs, not sub-trees.
 #[test]
-#[ignore = "serialization not yet implemented"]
+
 fn scalar_fields_are_blobs() {
     let (root_id, store) = serialize(&Point { x: 1.0, y: 2.0 }).expect("serialize should succeed");
 
@@ -49,7 +49,7 @@ fn scalar_fields_are_blobs() {
 
 /// Blob content for numeric fields is valid UTF-8.
 #[test]
-#[ignore = "serialization not yet implemented"]
+
 fn blob_content_is_utf8() {
     let (root_id, store) = serialize(&Point { x: 2.5, y: -1.0 }).expect("serialize should succeed");
 
@@ -65,7 +65,7 @@ fn blob_content_is_utf8() {
 
 /// Blob content for a string field is the UTF-8 encoding of the string value.
 #[test]
-#[ignore = "serialization not yet implemented"]
+
 fn string_field_blob_content() {
     let (root_id, store) = serialize(&Person {
         name: "Alice".to_string(),
@@ -88,7 +88,7 @@ fn string_field_blob_content() {
 
 /// A composite is a plain tree of its fields, carrying no sentinel entry.
 #[test]
-#[ignore = "serialization not yet implemented"]
+
 fn struct_is_plain_tree_of_fields() {
     let (root_id, store) = serialize(&Point { x: 1.0, y: 2.0 }).expect("serialize should succeed");
 
@@ -106,7 +106,7 @@ fn struct_is_plain_tree_of_fields() {
 /// A nested struct field is itself a plain tree; the inner structure is recovered
 /// from the Facet type on read, not from any embedded schema.
 #[test]
-#[ignore = "serialization not yet implemented"]
+
 fn nested_struct_field_is_tree() {
     let (root_id, store) = serialize(&Nested {
         location: Point { x: 1.0, y: 2.0 },
