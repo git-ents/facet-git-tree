@@ -288,21 +288,64 @@ fn serialize_peek<W: Write + ?Sized>(
         return Ok((oid, EntryKind::Tree));
     }
 
-    // Map → tree keyed by map keys
-    if matches!(shape.def, Def::Map(_)) {
+    // Map → tree. A map with scalar keys names each entry by the textual form of
+    // its key (the readable, JSON-like form). A map with composite keys (structs,
+    // tuples, enums, ...) — which have no faithful textual form — instead stores
+    // each pair as an ordinal-named two-entry sub-tree `{ k, v }`, both children
+    // recursing through the normal encoding. The two layouts are distinguished by
+    // the static key shape, so no on-disk marker is needed.
+    if let Def::Map(md) = shape.def {
         let pm = peek.into_map().map_err(|e| Error::Message(e.to_string()))?;
+        let scalar_keys = matches!(md.k.def, Def::Scalar);
         let mut entries: Vec<TreeEntry> = Vec::new();
-        for (k, v) in pm.iter() {
-            let key_str = k
-                .as_str()
-                .ok_or_else(|| Error::Message("map key must be a string".into()))?;
-            check_key(key_str)?;
-            let (oid, kind) = serialize_peek(v, store)?;
-            entries.push(TreeEntry {
-                mode: EntryMode::from(kind),
-                filename: key_str.into(),
-                oid,
-            });
+        if scalar_keys {
+            for (k, v) in pm.iter() {
+                let key_bytes = scalar_bytes(k)?;
+                let key_str = std::str::from_utf8(&key_bytes)
+                    .map_err(|_| Error::Message("map key is not valid UTF-8".into()))?;
+                check_key(key_str)?;
+                let (oid, kind) = serialize_peek(v, store)?;
+                entries.push(TreeEntry {
+                    mode: EntryMode::from(kind),
+                    filename: key_str.into(),
+                    oid,
+                });
+            }
+        } else {
+            // Each pair becomes a `{ k, v }` sub-tree; the outer entries are named
+            // by ordinal. To keep the map content-addressed (insertion-order
+            // independent), the ordinals are assigned after sorting the pairs by
+            // their sub-tree object id.
+            let mut pair_oids: Vec<ObjectId> = Vec::new();
+            for (k, v) in pm.iter() {
+                let (k_oid, k_kind) = serialize_peek(k, store)?;
+                let (v_oid, v_kind) = serialize_peek(v, store)?;
+                let mut pair = vec![
+                    TreeEntry {
+                        mode: EntryMode::from(k_kind),
+                        filename: "k".into(),
+                        oid: k_oid,
+                    },
+                    TreeEntry {
+                        mode: EntryMode::from(v_kind),
+                        filename: "v".into(),
+                        oid: v_oid,
+                    },
+                ];
+                pair.sort();
+                let pair_oid = store
+                    .write(&gix_object::Tree { entries: pair })
+                    .map_err(Error::Backend)?;
+                pair_oids.push(pair_oid);
+            }
+            pair_oids.sort();
+            for (i, pair_oid) in pair_oids.into_iter().enumerate() {
+                entries.push(TreeEntry {
+                    mode: EntryMode::from(EntryKind::Tree),
+                    filename: format!("{i:04}").into(),
+                    oid: pair_oid,
+                });
+            }
         }
         entries.sort();
         let oid = store
@@ -730,25 +773,54 @@ fn deser_into<'facet, F: Find + ?Sized>(
         return Ok(partial);
     }
 
-    // Map
-    if matches!(shape.def, Def::Map(_)) {
+    // Map: mirror serialization. Scalar-keyed maps name each entry by the key's
+    // textual form (parsed back via `parse_from_str`); composite-keyed maps store
+    // each pair as a `{ k, v }` sub-tree, both children recovered by recursing.
+    if let Def::Map(md) = shape.def {
         let entries = find_tree_entries(oid, store)?;
+        let scalar_keys = matches!(md.k.def, Def::Scalar);
         let mut partial = partial
             .init_map()
             .map_err(|e| Error::Message(e.to_string()))?;
-        for (key, child_oid, _) in entries {
-            partial = partial
-                .begin_key()
-                .map_err(|e| Error::Message(e.to_string()))?;
-            partial = partial
-                .parse_from_str(&key)
-                .map_err(|e| Error::Message(e.to_string()))?;
-            partial = partial.end().map_err(|e| Error::Message(e.to_string()))?;
-            partial = partial
-                .begin_value()
-                .map_err(|e| Error::Message(e.to_string()))?;
-            partial = deser_into(partial, &child_oid, store)?;
-            partial = partial.end().map_err(|e| Error::Message(e.to_string()))?;
+        if scalar_keys {
+            for (key, child_oid, _) in entries {
+                partial = partial
+                    .begin_key()
+                    .map_err(|e| Error::Message(e.to_string()))?;
+                partial = partial
+                    .parse_from_str(&key)
+                    .map_err(|e| Error::Message(e.to_string()))?;
+                partial = partial.end().map_err(|e| Error::Message(e.to_string()))?;
+                partial = partial
+                    .begin_value()
+                    .map_err(|e| Error::Message(e.to_string()))?;
+                partial = deser_into(partial, &child_oid, store)?;
+                partial = partial.end().map_err(|e| Error::Message(e.to_string()))?;
+            }
+        } else {
+            for (_, pair_oid, _) in entries {
+                let pair = find_tree_entries(&pair_oid, store)?;
+                let find = |want: &str| {
+                    pair.iter()
+                        .find(|(n, _, _)| n == want)
+                        .map(|(_, o, _)| *o)
+                        .ok_or_else(|| {
+                            Error::Message(format!("map pair sub-tree missing {want:?} entry"))
+                        })
+                };
+                let k_oid = find("k")?;
+                let v_oid = find("v")?;
+                partial = partial
+                    .begin_key()
+                    .map_err(|e| Error::Message(e.to_string()))?;
+                partial = deser_into(partial, &k_oid, store)?;
+                partial = partial.end().map_err(|e| Error::Message(e.to_string()))?;
+                partial = partial
+                    .begin_value()
+                    .map_err(|e| Error::Message(e.to_string()))?;
+                partial = deser_into(partial, &v_oid, store)?;
+                partial = partial.end().map_err(|e| Error::Message(e.to_string()))?;
+            }
         }
         return Ok(partial);
     }
