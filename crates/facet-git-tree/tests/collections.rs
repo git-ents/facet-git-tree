@@ -18,7 +18,6 @@ use common::{WithArray, WithMap, WithVec, get_tree_entry_mode, tree_entries};
 
 /// A Vec field is encoded as a tree (not a blob) holding only its elements.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn vec_field_is_tree() {
     let (root_id, store) = serialize(&WithVec {
         items: vec![1, 2, 3],
@@ -36,7 +35,6 @@ fn vec_field_is_tree() {
 
 /// An empty Vec serializes to an empty tree.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn empty_vec_is_empty_tree() {
     let (root_id, store) = serialize(&WithVec { items: vec![] }).expect("serialize should succeed");
 
@@ -52,7 +50,6 @@ fn empty_vec_is_empty_tree() {
 
 /// A fixed-size array field is encoded as a tree holding only its elements.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn array_field_is_tree() {
     let (root_id, store) = serialize(&WithArray {
         values: [1, 2, 3, 4],
@@ -72,7 +69,6 @@ fn array_field_is_tree() {
 
 /// A HashMap field is encoded as a tree holding only its entries.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn map_field_is_tree() {
     let mut table = HashMap::new();
     table.insert("a".to_string(), "1".to_string());
@@ -91,7 +87,6 @@ fn map_field_is_tree() {
 
 /// An empty map serializes to an empty tree.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn empty_map_is_empty_tree() {
     let (root_id, store) = serialize(&WithMap {
         table: HashMap::new(),
@@ -108,7 +103,6 @@ fn empty_map_is_empty_tree() {
 
 /// A map entry is named by the textual form of its key and resolves to its value.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn map_entry_named_by_key() {
     let mut table = HashMap::new();
     table.insert("a".to_string(), "1".to_string());
@@ -128,7 +122,6 @@ fn map_entry_named_by_key() {
 /// Map insertion order does not affect the serialized tree: git sorts tree entries
 /// by name, so two maps with the same pairs produce the same root object ID.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn map_insertion_order_is_irrelevant() {
     let mut a = HashMap::new();
     a.insert("alpha".to_string(), "1".to_string());

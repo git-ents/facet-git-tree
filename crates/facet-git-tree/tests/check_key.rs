@@ -43,7 +43,6 @@ fn rejects_keys_with_slash(#[case] key: &str) {
 /// `serialize` rejects a map key containing the path separator, surfacing it as
 /// [`Error::InvalidKey`] rather than emitting an invalid tree entry name.
 #[test]
-#[ignore = "serialization not yet implemented"]
 fn serialize_rejects_map_key_with_slash() {
     let mut table = HashMap::new();
     table.insert("a/b".to_string(), "v".to_string());
