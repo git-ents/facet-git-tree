@@ -225,8 +225,7 @@ where
     W: Write + ?Sized,
 {
     let peek = Peek::new(value);
-    let (oid, _kind) = serialize_peek(peek, store)?;
-    Ok(oid)
+    serialize_peek_into(peek, store)
 }
 
 /// Serialize a [`facet::Facet`] value into a set of Git objects.
@@ -236,6 +235,30 @@ where
 pub fn serialize<T: for<'a> facet::Facet<'a>>(value: &T) -> Result<(ObjectId, ObjectStore), Error> {
     let store = ObjectStore::default();
     let root = serialize_into(value, &store)?;
+    Ok((root, store))
+}
+
+/// Serialize an already-constructed [`Peek`] into the given `gix` object `store`.
+///
+/// The [`Peek`] entry point for callers that have a reflected handle rather than
+/// a concrete `T` — for example, when relaying a value obtained from another
+/// `facet` operation. This is the [`Peek`]-based mirror of [`serialize_into`];
+/// `serialize_into` is just `serialize_peek_into` applied to `Peek::new(value)`.
+pub fn serialize_peek_into<W>(peek: Peek<'_, '_>, store: &W) -> Result<ObjectId, Error>
+where
+    W: Write + ?Sized,
+{
+    let (oid, _kind) = serialize_node(peek, store)?;
+    Ok(oid)
+}
+
+/// Serialize an already-constructed [`Peek`] into a fresh set of Git objects.
+///
+/// The [`Peek`]-based mirror of [`serialize`]: returns the root [`ObjectId`] and
+/// an [`ObjectStore`] containing every object reachable from it.
+pub fn serialize_peek(peek: Peek<'_, '_>) -> Result<(ObjectId, ObjectStore), Error> {
+    let store = ObjectStore::default();
+    let root = serialize_peek_into(peek, &store)?;
     Ok((root, store))
 }
 
@@ -258,9 +281,25 @@ pub fn deserialize<T: for<'a> facet::Facet<'a>>(
         .map_err(|e| Error::Message(format!("materialize failed: {e}")))
 }
 
+/// Deserialize the tree at `root` into an existing [`Partial`].
+///
+/// The into-existing-[`Partial`] entry point, mirroring `facet`'s `*_into`
+/// convention: the caller owns allocation and `build`, so a value read from a
+/// Git tree can be slotted into a larger reflected construction. [`deserialize`]
+/// is this applied to a freshly-allocated `Partial`, then built and materialized.
+///
+/// `store` is any `gix` [`Find`] source, exactly as for [`deserialize`].
+pub fn deserialize_into<'facet>(
+    partial: Partial<'facet, true>,
+    root: &ObjectId,
+    store: &(impl Find + ?Sized),
+) -> Result<Partial<'facet, true>, Error> {
+    deser_into(partial, root, store, 0)
+}
+
 // --- serialization internals ---
 
-fn serialize_peek<W: Write + ?Sized>(
+fn serialize_node<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
 ) -> Result<(ObjectId, EntryKind), Error> {
@@ -287,7 +326,7 @@ fn serialize_peek<W: Write + ?Sized>(
         let mut entries: Vec<TreeEntry> = Vec::with_capacity(st.fields.len());
         for (i, field) in st.fields.iter().enumerate() {
             let child = ps.field(i).map_err(msg)?;
-            let (oid, kind) = serialize_peek(child, store)?;
+            let (oid, kind) = serialize_node(child, store)?;
             let filename: gix_object::bstr::BString = if positional {
                 format!("{i:04}").into()
             } else {
@@ -331,7 +370,7 @@ fn serialize_peek<W: Write + ?Sized>(
                 let key_str = std::str::from_utf8(&key_bytes)
                     .map_err(|_| Error::Message("map key is not valid UTF-8".into()))?;
                 check_key(key_str)?;
-                let (oid, kind) = serialize_peek(v, store)?;
+                let (oid, kind) = serialize_node(v, store)?;
                 entries.push(TreeEntry {
                     mode: EntryMode::from(kind),
                     filename: key_str.into(),
@@ -345,8 +384,8 @@ fn serialize_peek<W: Write + ?Sized>(
             // their sub-tree object id.
             let mut pair_oids: Vec<ObjectId> = Vec::new();
             for (k, v) in pm.iter() {
-                let (k_oid, k_kind) = serialize_peek(k, store)?;
-                let (v_oid, v_kind) = serialize_peek(v, store)?;
+                let (k_oid, k_kind) = serialize_node(k, store)?;
+                let (v_oid, v_kind) = serialize_node(v, store)?;
                 let mut pair = vec![
                     TreeEntry {
                         mode: EntryMode::from(k_kind),
@@ -385,7 +424,7 @@ fn serialize_peek<W: Write + ?Sized>(
     if matches!(shape.def, Def::Option(_)) {
         let po = peek.into_option().map_err(msg)?;
         if let Some(inner) = po.value() {
-            let (oid, kind) = serialize_peek(inner, store)?;
+            let (oid, kind) = serialize_node(inner, store)?;
             // Some: wrap in a tree with a single "some" entry
             let entries = vec![TreeEntry {
                 mode: EntryMode::from(kind),
@@ -428,7 +467,7 @@ fn serialize_peek<W: Write + ?Sized>(
                 .field(0)
                 .map_err(msg)?
                 .ok_or_else(|| Error::Message("variant field 0 missing".into()))?;
-            serialize_peek(child, store)?
+            serialize_node(child, store)?
         } else {
             let mut inner_entries: Vec<TreeEntry> = Vec::new();
             for (i, field) in variant.data.fields.iter().enumerate() {
@@ -436,7 +475,7 @@ fn serialize_peek<W: Write + ?Sized>(
                     .field(i)
                     .map_err(msg)?
                     .ok_or_else(|| Error::Message(format!("variant field {i} missing")))?;
-                let (oid, kind) = serialize_peek(child, store)?;
+                let (oid, kind) = serialize_node(child, store)?;
                 let name: gix_object::bstr::BString = if positional {
                     format!("{i:04}").into()
                 } else {
@@ -484,7 +523,7 @@ fn serialize_sequence<W: Write + ?Sized>(
     if matches!(shape.def, Def::List(_)) {
         let pl = peek.into_list().map_err(msg)?;
         for (i, item) in pl.iter().enumerate() {
-            let (oid, kind) = serialize_peek(item, store)?;
+            let (oid, kind) = serialize_node(item, store)?;
             entries.push(TreeEntry {
                 mode: EntryMode::from(kind),
                 filename: format!("{i:04}").into(),
@@ -494,7 +533,7 @@ fn serialize_sequence<W: Write + ?Sized>(
     } else if matches!(shape.def, Def::Array(_)) {
         let pa = peek.into_list_like().map_err(msg)?;
         for (i, item) in pa.iter().enumerate() {
-            let (oid, kind) = serialize_peek(item, store)?;
+            let (oid, kind) = serialize_node(item, store)?;
             entries.push(TreeEntry {
                 mode: EntryMode::from(kind),
                 filename: format!("{i:04}").into(),
