@@ -110,13 +110,29 @@ The variant name is a value, not schema: it records which variant is live, infor
 --
 The following standard Rust collections MUST be supported, each encoded as a Git tree.
 
-. `Array` and `Vec` — sequence elements are recorded as entries named by their zero-based index, encoded as a link:#serialization.design.trees.ordering[zero-padded ordinal name].
+. `Array`, `Vec`, and slices — sequence elements are recorded as entries named by their zero-based index, encoded as a link:#serialization.design.trees.ordering[zero-padded ordinal name]. A sequence whose element type is `u8` is the sole exception: it is stored as a single blob rather than a tree, per link:#serialization.design.bytes[byte-sequence encoding].
 . `Map` — the entry layout is selected by the static shape of the key type, with no on-disk marker, since that shape is known to both writer and reader:
 +
 .. *Scalar keys* (those whose `Def` is `Scalar` — integers, floats, `bool`, `char`, `String`, and other types stored as a single leaf): each entry is named by the textual form of its key and resolves to the encoded value, exactly as a leaf would be encoded. This is the readable, JSON-like form.
 .. *Composite keys* (structs, tuples, enums, sequences, and any other key that does not encode to a single leaf): the textual-name form cannot faithfully represent them, so each pair is recorded as a two-entry sub-tree with children named `k` and `v` holding the independently-encoded key and value. The map's entries point at these pair sub-trees and are named by a link:#serialization.design.trees.ordering[zero-padded ordinal name]; the ordinals are assigned in ascending order of each pair sub-tree's object id so that the map remains content-addressed independent of iteration order.
 
 No type marker is recorded; element and key types are recovered from the target `Facet` type on read.
+--
+
+[role="requirement", id="serialization.design.bytes"]
+.Byte-Sequence Encoding
+--
+A sequence of `u8` — `Vec<u8>`, `[u8; N]`, or a `[u8]` slice — MUST be stored as a single Git blob whose content is the bytes verbatim, rather than as a tree with one entry per byte.
+
+This is the Git-native representation of a byte buffer: it lets identical buffers deduplicate to one object and avoids the cost of a per-byte tree. The distinction is recovered from the element type on read; no marker is stored.
+--
+
+[role="requirement", id="serialization.design.pointers"]
+.Smart-Pointer Encoding
+--
+A smart pointer — `Box<T>`, `Arc<T>`, `Rc<T>`, including the unsized slice forms `Arc<[T]>` and friends — MUST be encoded as the encoding of its pointee `T`, with no wrapping tree or marker.
+
+The indirection carries no information Git needs to record, so it is transparent: `Box<Issue>` encodes exactly as `Issue`, and `Arc<[u8]>` encodes exactly as `[u8]` (a single blob). On read the pointer is reconstructed around the decoded pointee.
 --
 
 [role="requirement", id="serialization.design.trees.ordering"]

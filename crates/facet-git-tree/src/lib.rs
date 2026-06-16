@@ -299,6 +299,22 @@ pub fn deserialize_into<'facet>(
 
 // --- serialization internals ---
 
+/// The element shape of a `Vec`/array/slice, or `None` for any other type.
+fn seq_elem(shape: &facet::Shape) -> Option<&'static facet::Shape> {
+    match shape.def {
+        Def::List(d) => Some(d.t),
+        Def::Array(d) => Some(d.t),
+        Def::Slice(d) => Some(d.t),
+        _ => None,
+    }
+}
+
+/// Whether `shape` is a sequence of `u8` (`Vec<u8>`, `[u8; N]`, `[u8]`). Such a
+/// sequence is stored as one blob rather than a per-element tree.
+fn is_byte_seq(shape: &facet::Shape) -> bool {
+    seq_elem(shape).is_some_and(|t| t.is_type::<u8>())
+}
+
 fn serialize_node<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
@@ -308,6 +324,35 @@ fn serialize_node<W: Write + ?Sized>(
     // Scalar leaf → blob
     if matches!(shape.def, Def::Scalar) {
         let bytes = scalar_bytes(peek)?;
+        let oid = store
+            .write_buf(Kind::Blob, &bytes)
+            .map_err(Error::Backend)?;
+        return Ok((oid, EntryKind::Blob));
+    }
+
+    // Smart pointer (`Box`/`Arc`/`Rc`, including `Arc<[T]>`) → the pointee's own
+    // encoding. The indirection carries no information Git needs to record, so it
+    // is transparent: `Arc<[u8]>` serializes exactly as `[u8]` would.
+    if matches!(shape.def, Def::Pointer(_)) {
+        let ptr = peek.into_pointer().map_err(msg)?;
+        let inner = ptr.borrow_inner().ok_or_else(|| {
+            Error::Message(format!(
+                "cannot read through pointer: {}",
+                shape.type_identifier
+            ))
+        })?;
+        return serialize_node(inner, store);
+    }
+
+    // Byte sequence (`Vec<u8>`, `[u8; N]`, `[u8]`) → a single blob. This is the
+    // Git-native representation; a per-byte tree would be wasteful and would
+    // defeat blob-level deduplication of identical buffers.
+    if is_byte_seq(shape) {
+        let seq = peek.into_list_like().map_err(msg)?;
+        let mut bytes = Vec::new();
+        for item in seq.iter() {
+            bytes.push(*item.get::<u8>().map_err(msg)?);
+        }
         let oid = store
             .write_buf(Kind::Blob, &bytes)
             .map_err(Error::Backend)?;
@@ -346,7 +391,7 @@ fn serialize_node<W: Write + ?Sized>(
     }
 
     // Vec / Array / slice → tree with ordinal keys
-    if matches!(shape.def, Def::List(_) | Def::Array(_)) {
+    if matches!(shape.def, Def::List(_) | Def::Array(_) | Def::Slice(_)) {
         let entries = serialize_sequence(peek, store)?;
         let oid = store
             .write(&gix_object::Tree { entries })
@@ -517,31 +562,16 @@ fn serialize_sequence<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
 ) -> Result<Vec<TreeEntry>, Error> {
-    let shape = peek.shape();
+    let seq = peek.into_list_like().map_err(msg)?;
     let mut entries: Vec<TreeEntry> = Vec::new();
-
-    if matches!(shape.def, Def::List(_)) {
-        let pl = peek.into_list().map_err(msg)?;
-        for (i, item) in pl.iter().enumerate() {
-            let (oid, kind) = serialize_node(item, store)?;
-            entries.push(TreeEntry {
-                mode: EntryMode::from(kind),
-                filename: format!("{i:04}").into(),
-                oid,
-            });
-        }
-    } else if matches!(shape.def, Def::Array(_)) {
-        let pa = peek.into_list_like().map_err(msg)?;
-        for (i, item) in pa.iter().enumerate() {
-            let (oid, kind) = serialize_node(item, store)?;
-            entries.push(TreeEntry {
-                mode: EntryMode::from(kind),
-                filename: format!("{i:04}").into(),
-                oid,
-            });
-        }
+    for (i, item) in seq.iter().enumerate() {
+        let (oid, kind) = serialize_node(item, store)?;
+        entries.push(TreeEntry {
+            mode: EntryMode::from(kind),
+            filename: format!("{i:04}").into(),
+            oid,
+        });
     }
-
     entries.sort();
     Ok(entries)
 }
@@ -685,6 +715,57 @@ fn deser_into<'facet, F: Find + ?Sized>(
         return partial
             .parse_from_str(s)
             .map_err(|e| Error::Message(format!("parse failed: {e}")));
+    }
+
+    // Byte sequence (`Vec<u8>`, `[u8; N]`): read the single blob and fill the
+    // collection one byte at a time, mirroring the serializer's blob encoding.
+    if is_byte_seq(shape) {
+        let bytes = find_blob_bytes(oid, store)?;
+        if matches!(shape.def, Def::Array(_)) {
+            let mut partial = partial.init_array().map_err(msg)?;
+            for (i, b) in bytes.iter().enumerate() {
+                partial = partial.begin_nth_field(i).map_err(msg)?;
+                partial = partial.set::<u8>(*b).map_err(msg)?;
+                partial = partial.end().map_err(msg)?;
+            }
+            return Ok(partial);
+        }
+        let mut partial = partial.init_list().map_err(msg)?;
+        for b in bytes {
+            partial = partial.begin_list_item().map_err(msg)?;
+            partial = partial.set::<u8>(b).map_err(msg)?;
+            partial = partial.end().map_err(msg)?;
+        }
+        return Ok(partial);
+    }
+
+    // Smart pointer (`Box`/`Arc`/`Rc`). For a slice pointee (`Arc<[T]>`) facet
+    // hands back a slice builder we feed item by item; its element type decides
+    // blob-vs-tree exactly as for an owned sequence. For a sized pointee the
+    // pointee shares this node's encoding, so we recurse on the same object.
+    if let Def::Pointer(pd) = shape.def {
+        let mut partial = partial.begin_smart_ptr().map_err(msg)?;
+        if partial.is_building_smart_ptr_slice() {
+            if pd.pointee.is_some_and(is_byte_seq) {
+                let bytes = find_blob_bytes(oid, store)?;
+                for b in bytes {
+                    partial = partial.begin_list_item().map_err(msg)?;
+                    partial = partial.set::<u8>(b).map_err(msg)?;
+                    partial = partial.end().map_err(msg)?;
+                }
+            } else {
+                let mut entries = find_tree_entries(oid, store)?;
+                sort_by_ordinal(&mut entries)?;
+                for (_, child_oid, _) in entries {
+                    partial = partial.begin_list_item().map_err(msg)?;
+                    partial = deser_into(partial, &child_oid, store, depth + 1)?;
+                    partial = partial.end().map_err(msg)?;
+                }
+            }
+            return partial.end().map_err(msg);
+        }
+        partial = deser_into(partial, oid, store, depth + 1)?;
+        return partial.end().map_err(msg);
     }
 
     // Struct: read tree, fill fields by name. Tuples and tuple structs key their
