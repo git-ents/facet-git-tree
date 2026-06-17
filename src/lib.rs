@@ -192,8 +192,14 @@ fn msg(e: impl std::fmt::Display) -> Error {
 /// Maximum tree nesting depth accepted on deserialization.
 ///
 /// Bounds recursion in [`deser_into`] so a hostile or corrupt tree cannot
-/// overflow the stack. Far deeper than any practically-encoded value.
-const MAX_DEPTH: usize = 64;
+/// overflow the stack. The limit must stay well under what a default thread
+/// stack can hold: [`deser_into`] is a large recursive frame (a debug build is
+/// tens of KB per level), so a 2 MiB stack — the standard library's default for
+/// spawned threads — only holds a few dozen levels before overflowing. The
+/// guard exists precisely to forestall that overflow, so it is kept low enough
+/// to fire first with margin to spare. Still far deeper than any
+/// practically-encoded value nests.
+const MAX_DEPTH: usize = 32;
 
 /// Validate a user-supplied key for use as a Git tree entry name.
 ///
@@ -692,7 +698,8 @@ fn sort_by_ordinal(entries: &mut [(String, ObjectId, EntryKind)]) -> Result<(), 
         name.parse::<usize>()
             .map_err(|_| Error::InvalidOrdinal(name.clone()))?;
     }
-    entries.sort_by_key(|(name, _, _)| name.parse::<usize>().expect("ordinal validated above"));
+    entries
+        .sort_by_cached_key(|(name, _, _)| name.parse::<usize>().expect("ordinal validated above"));
     Ok(())
 }
 
@@ -817,8 +824,11 @@ fn deser_into<'facet, F: Find + ?Sized>(
         let mut entries = find_tree_entries(oid, store)?;
         sort_by_ordinal(&mut entries)?;
         let mut partial = partial.init_array().map_err(msg)?;
-        for (i, (_, child_oid, _)) in entries.into_iter().enumerate() {
-            partial = partial.begin_nth_field(i).map_err(msg)?;
+        for (name, child_oid, _) in entries {
+            let idx = name
+                .parse::<usize>()
+                .expect("ordinal validated by sort_by_ordinal");
+            partial = partial.begin_nth_field(idx).map_err(msg)?;
             partial = deser_into(partial, &child_oid, store, depth + 1)?;
             partial = partial.end().map_err(msg)?;
         }
@@ -894,10 +904,16 @@ fn deser_into<'facet, F: Find + ?Sized>(
     // Enum: single-entry tree → variant name → variant contents
     if let facet::Type::User(facet::UserType::Enum(et)) = shape.ty {
         let entries = find_tree_entries(oid, store)?;
+        if entries.len() != 1 {
+            return Err(Error::Message(format!(
+                "malformed enum tree: expected exactly one entry, found {}",
+                entries.len()
+            )));
+        }
         let (variant_name, inner_oid, _) = entries
             .into_iter()
             .next()
-            .ok_or_else(|| Error::Message("enum tree must have exactly one entry".into()))?;
+            .expect("length checked to be 1 above");
 
         // The variant's field layout comes from the type, not the tree: a tuple
         // variant (`TupleStruct`) keys by ordinal, a struct variant by name, and a
