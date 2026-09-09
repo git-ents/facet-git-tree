@@ -1,0 +1,943 @@
+= Adversarial Analysis: git-meta vs facet-git-tree
+
+Two systems, one substrate — Git's object model — and two radically different
+answers to the question *what does it mean for a tree to hold metadata?*
+
+This document lays out the rules of each system side by side, diagrams every
+supported data type down to the blob level, and then attacks both from the
+negative space: what each system *cannot* do, what it makes awkward, and what
+it silently collapses.
+
+== 1. The rules of git-meta
+
+=== 1.1 Core model
+
+Every piece of metadata is a tuple `(target, key, value)`.
+
+* **Target** — what the metadata is *about*.
+* **Key** — a colon-separated namespaced string identifying the field.
+* **Value** — one of three types: `string`, `list`, or `set`.
+
+Targets are typed:
+
+[cols="1,1",options="header"]
+|===
+| Target type | Target value
+| `commit` | a Git commit SHA
+| `change-id` | a UUID
+| `branch` | a branch name or UUID
+| `path` | a file or directory path
+| `project` | (none — global scope)
+|===
+
+Keys are arbitrary colon-separated strings (e.g. `agent:model`,
+`review:status`). Key segments cannot be empty, `.`, `..`, or start with `__`.
+Segments cannot contain `/`, `:`, or NUL.
+
+=== 1.2 Exchange format rules
+
+Metadata is serialized into a Git commit whose tree root lives under
+`refs/meta/*`.
+
+Target layout in the tree:
+
+```
+commit/<first2>/<full-sha>/...         (fanout by first 2 hex of SHA)
+branch/<first2>/<full-name>/...       (fanout by first 2 hex of SHA-1(name))
+change-id/<first2>/<full-id>/...      (fanout by first 2 hex of SHA-1(id))
+path/<escaped-segs>/__target__/...    (literal path segments)
+project/...                           (flat)
+```
+
+Key path layout under the target base:
+
+* String: `<base>/<key-segs>/__value`
+* List:   `<base>/<key-segs>/__list/<entry-id>`
+* Set:    `<base>/<key-segs>/__set`
+
+Where `<entry-id>` = `<timestamp-ms>-<content-hash-prefix>`.
+
+=== 1.3 Value types and their encoding
+
+.String — single scalar value
+[source]
+----
+[base]/agent/model/__value        → blob "claude-4.6\n"
+----
+
+Removal: `[base]/__tombstones/<key-segs>/__deleted` (blob = old value).
+
+.List — append-friendly ordered log
+[source]
+----
+[base]/agent/chat/__list/
+  1771232450203-23c0f     → blob "first comment\n"
+  1771232450204-a1b2c     → blob "second comment\n"
+----
+
+Entry ID format: `{timestamp-ms}-{sha1-prefix-of-content}`.
+Duplicate values are allowed at different timestamps.
+Entry-level tombstones: `[base]/<key-segs>/__tombstones/<entry-id>/__deleted`.
+
+.Set — unordered unique collection
+[source]
+----
+[base]/owners/__set/
+  0dd8...4b1b2a     → blob 0dd8...4b1b2a    (name = blob sha1 of the value)
+  1296...a463c7     → blob 1296...a463c7
+----
+
+The tree entry name IS the SHA-1 of the member string, and the blob contains
+the same string. Member removal: `[base]/<key-segs>/__tombstones/<member-sha>`.
+Whole-key removal: `[base]/__tombstones/<key-segs>/__deleted`.
+
+=== 1.4 Deletion and absence
+
+* Absence ≠ deletion. Missing paths may be pruned or sparse.
+* Explicit tombstones are the *only* deletion mechanism.
+* `__tombstones` is a shared namespace; incompatible child tombstones (e.g. a
+  list-entry tombstone under a currently-string key) are preserved but ignored.
+
+=== 1.5 Materialization and merge
+
+* **Serialize**: local state (SQLite) → Git tree → commit on `refs/meta/local/main`.
+* **Materialize**: remote tree → merge into local tree → write to SQLite.
+* Merge is *linear history preferred*: serialize, merge in memory, write one
+  commit, fast-forward push. On conflict, remote wins for overlapping keys
+  (two-way merge when no common ancestor).
+* Strings: last-writer-wins (configurable `ours`/`theirs`).
+* Lists: natural tree merge (new entries appear as new tree entries).
+* Sets: natural tree merge (added/removed members are independent entries).
+
+=== 1.6 Scalability model
+
+* Promisor remotes + partial clone (`blob:none`) for lazy blob fetching.
+* Commit messages encode a diffstat of changes, enabling history-walk-based key
+  discovery *without fetching blobs*.
+* Auto-pruning: high-water/low-water on key count or total blob size.
+* Serialize filters: `local:*` keys never serialized; `exclude`/`route` rules
+  split metadata across multiple refs.
+
+=== 1.7 Refs
+
+* `refs/meta/local/main` — local serialized head.
+* `refs/meta/remotes/main` — primary remote tracking.
+* `refs/meta/remotes/<name>/main` — side remote tracking.
+* `refs/meta/local/<destination>` — routed serialization destinations.
+
+== 2. The rules of facet-git-tree
+
+=== 2.1 Core model
+
+facet-git-tree is a **general-purpose codec**: it maps *any* Rust type that
+derives `facet::Facet` to a graph of Git objects. There is no target/key/value
+tuple — the type system *is* the schema.
+
+A value is encoded as a tree-of-trees and blobs addressed by SHA-1, exactly as
+Git would compute them. The codec is:
+
+1. **Schemaless on the wire** — no type marker is stored; the consumer must
+   know the type (or carry a `Schema` document).
+2. **Content-addressed** — two structurally-identical values produce the
+   identical object graph, root OID included.
+3. **Self-hosting** — `Schema` is itself a `Facet` type, stored through the
+   same codec.
+
+=== 2.2 Shape classification and dispatch
+
+Every `Facet` shape is classified into one of these encoding classes:
+
+[cols="1,3",options="header"]
+|===
+| Class | Encoding
+| `RawTree` | Passthrough: the tree OID is stored verbatim.
+| `RawBlob` | Passthrough: the blob OID is stored verbatim.
+| `Dynamic` | Runtime-dispatched `facet_value::Value` (heuristic on read).
+| `Scalar` | Blob: the value's `Display` text + trailing `\n`.
+| `Bytes` | Blob: raw bytes + trailing `\n`.
+| `Struct` | Tree: one entry per field, keyed by field name.
+| `Sequence` | Tree: ordinal-named entries (`0000`, `0001`, …).
+| `Map` | Tree: scalar keys name entries; composite keys → `{k, v}` pair subtrees.
+| `Option` | Tree: `None` → presence marker; `Some(v)` → single `some` entry.
+| `Enum` | Tree: externally tagged by variant name (unit → bare blob; others → single-entry tree).
+|===
+
+=== 2.3 The presence marker
+
+`None`, dynamic `Null`, and empty collections (`Vec`, `Map`) are encoded as a
+**marker tree** — a single entry named `_` pointing at the empty blob — rather
+than a literal empty tree. This makes them visible to `git ls-tree -r` and
+`git diff`, which otherwise treat an empty tree as absent.
+
+The name `_` is reserved and rejected by `check_key` for dynamic map keys and
+schema field names.
+
+=== 2.4 Leaf blob format
+
+Every leaf blob has exactly **one trailing newline** appended. This is
+mandatory in `DecodeMode::Strict` and optional in `DecodeMode::LegacyLeaves`.
+
+Scalars are encoded as their Rust `Display` representation:
+
+* `bool` → `"true"` or `"false"`
+* Integers → decimal text (`"42"`, `"-7"`)
+* Floats → shortest-round-tripping decimal, with `nan` for NaN and
+  positive-zero normalization
+* `char` → UTF-8 bytes of the character
+* `String`/`&str` → UTF-8 bytes verbatim
+
+Byte sequences (`Vec<u8>`, `[u8; N]`) are a single blob holding the raw bytes.
+
+=== 2.5 Struct encoding
+
+Named fields become tree entries keyed by field name:
+
+```
+Person/
+  name     → blob "Ada\n"
+  age      → blob "36\n"
+```
+
+Positional (tuple/tuple struct) fields use zero-padded ordinals:
+
+```
+(42, "hello")/
+  0000     → blob "42\n"
+  0001     → blob "hello\n"
+```
+
+Fields with `#[facet(facet_git_tree::identity_key)]` are compiled into
+reserved `identity:*` schema definitions; the encoding is byte-identical to
+unmarked — the mark is a schema-layer concern, not a tree-layer difference.
+
+=== 2.6 Sequence encoding
+
+Variable-length (`Vec<T>`, `[T]`):
+
+```
+[1, -2, 3]/
+  0000     → blob "1\n"
+  0001     → blob "-2\n"
+  0002     → blob "3\n"
+```
+
+Empty sequence → marker tree (entry `_` → empty blob).
+
+Fixed-length arrays: same shape, but with known element count.
+
+=== 2.7 Map encoding
+
+**Scalar keys** — entry name IS the key's text form:
+
+```
+{"a": 1, "b": 2}/
+  a        → blob "1\n"
+  b        → blob "2\n"
+```
+
+**Composite keys** — each pair is a `{k, v}` subtree, named by ordinal:
+
+```
+{Coord(x:1,y:2) → "alpha", Coord(x:3,y:4) → "beta"}/
+  0000/
+    k        → tree { x → "1\n", y → "2\n" }
+    v        → blob "alpha\n"
+  0001/
+    k        → tree { x → "3\n", y → "4\n" }
+    v        → blob "beta\n"
+```
+
+Pair subtrees are sorted by their own OID before ordinal assignment,
+keeping the map content-addressed regardless of insertion order.
+
+=== 2.8 Option encoding
+
+* `Some(v)` → tree with single entry `some` → v's encoding.
+* `None` → marker tree.
+
+=== 2.9 Enum encoding
+
+Externally tagged. **Unit variant** → bare blob holding the variant name:
+
+```
+State::Open    → blob "Open\n"
+```
+
+**Other variants** → single-entry tree:
+
+```
+FixtureEnum::Newtype(-99)/
+  Newtype   → blob "-99\n"
+
+FixtureEnum::Tuple(1, "two")/
+  Tuple/
+    0000    → blob "1\n"
+    0001    → blob "two\n"
+
+FixtureEnum::Struct { a: 1, b: "s" }/
+  Struct/
+    a       → blob "1\n"
+    b       → blob "s\n"
+```
+
+=== 2.10 Schema system
+
+`Schema` is a `Facet` type:
+
+```
+Schema/
+  kind     → blob "Issue\n"
+  root     → tree (Node)
+  defs/
+    Issue  → tree (Node)
+    Comment→ tree (Node)
+```
+
+`Node` is a `#[repr(u8)]` enum — each variant maps to a specific tree shape.
+Schemas are pinned: a `schema` entry is spliced onto the stored tree pointing
+at the schema-schema generation that wrote it, enabling version negotiation
+before deserialization.
+
+=== 2.11 Identity normal form
+
+A **frozen mini-codec** over a closed universe, used for identity- and
+key-bearing subtrees (`#[facet(identity_key)]`). This mapping is *deliberately
+separate* from the general codec so the general codec can evolve without
+moving an identity.
+
+Key differences from the general codec:
+
+* No trailing newline on blobs.
+* Integers are big-endian binary (not decimal text).
+* Booleans are single bytes (`0x00`/`0x01`).
+* Floats are raw IEEE-754 bits, big-endian, with no canonicalization.
+* No presence marker — empty list/struct/map = literal empty tree.
+* Platform-width integers (`isize`/`usize`) are excluded.
+* `Enum`, `Option`, `Dynamic`, `RawTree`, `Unit` are excluded.
+* List elements use 8-digit ordinals (`00000000`).
+
+=== 2.12 Migration system
+
+Migrations are **data**, not code: a `Migration` value (itself `Facet`)
+describes rename/add/remove/wrap operations on schema definitions. Migrations
+are **read-time upcast**, never rewrite: old values are projected into the new
+schema on read, leaving the stored tree untouched.
+
+Schema diffing (`derive`) produces a migration automatically, supplemented by
+author hints (`renamed_from`, `defaulted`) for facts a diff cannot infer.
+
+== 3. Storage diagrams — git-meta
+
+=== 3.1 String on a commit target
+
+```
+commit/ea/ea875f69726986da822cdb2670a089eddd09b6ce/
+  agent/
+    model/
+      __value            blob "claude-4.6"
+```
+
+Full path: `commit/ea/<full-sha>/agent/model/__value`.
+
+=== 3.2 List on a branch target
+
+```
+branch/fe/feat-metrics/
+  agent/
+    chat/
+      __list/
+        1771232450203-23c0f   blob "Looks good to me"
+        1771232450204-a1b2c   blob "Merged after CI passed"
+```
+
+=== 3.3 Set on a path target
+
+```
+path/src/metrics/
+  __target__/
+    owners/
+      __set/
+        0dd8e3a7c4b1b2a       blob 0dd8e3a7c4b1b2a  ("alice")
+        1296f5d8a463c7       blob 1296f5d8a463c7  ("bob")
+```
+
+Note: the tree entry filename *is* the SHA-1 of the member string, and the blob
+content *is* the member string. The entry name and blob SHA are the same value.
+
+=== 3.4 Project-level metadata
+
+```
+project/
+  codename/
+    __value                blob "acme-api"
+  meta/
+    prune/
+      max-keys/
+        __value            blob "10000"
+```
+
+=== 3.5 Tombstones
+
+```
+commit/ea/<full-sha>/
+  __tombstones/
+    old-key/
+      __deleted            blob <old-value>
+  agent/
+    model/
+      __value              blob "claude-4.6"
+```
+
+Whole-key tombstone at `__tombstones/<key-segs>/__deleted`. Entry-level
+tombstone for lists at `<key-segs>/__tombstones/<entry-id>/__deleted`. Member
+tombstone for sets at `<key-segs>/__tombstones/<member-sha>`.
+
+== 4. Storage diagrams — facet-git-tree
+
+=== 4.1 Struct with scalar fields
+
+```
+Person/
+  name                   blob "Ada\n"
+  age                    blob "36\n"
+```
+
+=== 4.2 Enum: unit and newtype variants
+
+```
+State::Open              blob "Open\n"
+
+State::Closed             (same blob shape)
+
+FixtureEnum::Newtype(-99)/
+  Newtype                blob "-99\n"
+```
+
+=== 4.3 Vec and array
+
+```
+labels/                  (Vec<String>)
+  0000                   blob "bug\n"
+  0001                   blob "serde\n"
+
+values/                  ([i32; 3])
+  0000                   blob "1\n"
+  0001                   blob "-2\n"
+  0002                   blob "3\n"
+```
+
+Empty Vec → marker tree:
+
+```
+empty/                   (Vec<i32>, len=0)
+  _                      blob ""    (empty blob)
+```
+
+=== 4.4 Map (scalar keys)
+
+```
+table/
+  a                      blob "1\n"
+  b                      blob "2\n"
+```
+
+=== 4.5 Map (composite keys)
+
+```
+table/
+  0000/
+    k/                   tree { x → "1\n", y → "2\n" }
+    v                    blob "alpha\n"
+  0001/
+    k/                   tree { x → "3\n", y → "4\n" }
+    v                    blob "beta\n"
+```
+
+=== 4.6 Option
+
+```
+assignee/               (Some("alice"))
+  some                   blob "alice\n"
+
+reviewer/               (None)
+  _                      blob ""    (marker tree)
+```
+
+=== 4.7 Nested struct with recursive type
+
+```
+Issue/
+  title                  blob "Serialize fails\n"
+  state                  blob "Open\n"
+  labels/
+    0000                 blob "bug\n"
+    0001                 blob "serde\n"
+  assignee/
+    some                 blob "alice\n"
+  comments/
+    0000/
+      author             blob "bob\n"
+      body               blob "Can you share a repro?\n"
+      replies/
+        0000/
+          author         blob "alice\n"
+          body           blob "Added one to the description.\n"
+          replies/
+            _            blob ""     (marker: empty Vec)
+```
+
+=== 4.8 Schema document (self-hosted)
+
+```
+Schema/
+  kind                   blob "Issue\n"
+  root/                  (Node tree)
+    ...
+  defs/
+    Issue/               (Node::Struct)
+      title/             (StructField)
+        node             blob "String\n"
+        has_default      blob "false\n"
+      ...
+    Comment/             (Node::Struct)
+      ...
+```
+
+=== 4.9 Identity normal form (vs. general codec)
+
+.General codec: `i32 = 42`
+```
+blob "42\n"
+```
+
+.Identity normal form: `i32 = 42`
+```
+blob \x00\x00\x00\x2a   (4 bytes, big-endian, no newline)
+```
+
+.General codec: `bool = true`
+```
+blob "true\n"
+```
+
+.Identity normal form: `bool = true`
+```
+blob \x01                (1 byte, no newline)
+```
+
+== 5. Comparative strengths and weaknesses
+
+=== 5.1 git-meta
+
+==== Strengths
+
+1. **Collaboration-first**. The entire design assumes multiple writers on shared
+   refs. Linear-history merge, remote-wins conflict resolution, promisor
+   remotes, auto-pruning, and serialize filters are all built to handle real
+   multi-user workflows from day one.
+
+2. **No schema required to read or write**. The wire format is self-describing:
+   `__value`, `__list`, `__set`, and `__tombstones` are recognizable by any
+   implementation without a schema document. This is a genuine interop
+   advantage: a new tool can parse the tree structure without knowing any
+   application schema.
+
+3. **Independent key mutability**. Each key on a target is a separate subtree
+   path. Changing `agent:model` does not touch `agent:provider`; the merge
+   impact is minimal. This is the *right* factoring for the key-value problem.
+
+4. **Tombstones make deletion unambiguous**. The spec explicitly forbids
+   interpreting absence as deletion, closing the most common semantic hole in
+   distributed metadata systems.
+
+5. **Scalable by design**. Fanout directories, promisor remotes, blobless clone,
+   auto-pruning, and commit-message diffstats are all designed for millions of
+   entries. This is the only system here that can plausibly handle a large
+   monorepo's worth of metadata.
+
+6. **Partial clone integration**. The promisor remote setup means a fresh clone
+   can fetch tree objects cheaply and only materialize the blobs it needs.
+   This is the key to scaling.
+
+7. **Standard keys namespace**. The spec defines a vocabulary (`agent:model`,
+   `review:status`, `owner`, etc.) that gives interop a starting point.
+
+==== Weaknesses
+
+1. **Three types only**. String, list, set. No structs, no enums, no maps with
+   non-string keys, no numbers, no booleans, no nested collections. Want to
+   store `{ model: "claude", cost: 0.03 }`? You flatten it to
+   `agent:model = "claude"` and `agent:cost = "0.03"`, and you eat the string
+   encoding. This is a *severe* expressive ceiling.
+
+2. **No type fidelity on read**. Everything is a string at rest. A `0.03`
+   written as a string is just `"0.03"` — there is no way to distinguish a
+   float from an integer from a string on the wire without out-of-band
+   agreement. The `standard-keys` doc says "prefer simple portable text
+   formats" — but that is exactly the problem: the format collapses all
+   scalars to text and hopes for the best.
+
+3. **Lists are append-only logs**. You cannot reorder, splice, or replace a
+   list element in place — you can only append or tombstone. This is
+   intentional (it makes merging easy), but it means lists cannot model mutable
+   sequences. A list that accumulates tombstones grows without bound in the
+   exchange tree until pruned.
+
+4. **Set members are strings only**. A set member is a string, named by its
+   SHA-1. You cannot have a set of structs or a set of enums. For CODEOWNERS
+   this is fine; for anything richer, it is a wall.
+
+5. **No schema evolution story**. There is no migration mechanism. If a project
+   decides `review:status` should become `review:state`, the spec offers no
+   path: you set the new key and tombstone the old one. There is no derivation
+   or diff mechanism. Historical data is either manually migrated or left
+   behind.
+
+6. **SQLite is the local store**. The reference implementation couples the
+   wire format to a specific local database. The spec says "local
+   implementation isn't highly important," but the SQLite schema is the only
+   concrete local model and the materialization logic is defined in terms of
+   it. A different local store would need to re-derive the entire
+   materialization workflow.
+
+7. **Ref layout is opinionated and rigid**. `refs/meta/local/main`,
+   `refs/meta/remotes/main`, etc. — this is a specific Git namespace
+   convention. Other systems using `refs/meta/` for other purposes will clash.
+   The namespace is configurable, but the *shape* of the ref namespace is not.
+
+8. **Two-way merge with remote-wins is lossy**. The spec explicitly states
+   that on overlapping keys with no common ancestor, "remote wins." Local
+   values are silently overwritten. There is no three-way merge, no conflict
+   reporting, and no way to recover a clobbered local value short of walking
+   Git history.
+
+9. **Path target encoding is fragile**. The `__target__` separator and the `~`
+   escaping rules for segments starting with `__` or `~` create a
+   double-escaping problem: any consumer must unescape *both* `~__` and `~~`
+   prefixes, and a bug in either direction silently corrupts the target path.
+
+10. **Commit message diffstat as key index**. The spec uses commit messages to
+    encode change lists for blobless history walks. This couples the commit
+    message format to the query index, making commit messages a *de facto*
+    wire format extension that every implementation must parse.
+
+=== 5.2 facet-git-tree
+
+==== Strengths
+
+1. **Full type fidelity**. Every Rust type that derives `Facet` — structs,
+   enums, maps, options, nested collections, byte sequences, numeric widths —
+   round-trips exactly. An `i32` is not a string; a `bool` is not `"true"`.
+   The codec preserves the full type system.
+
+2. **Content-addressed by construction**. Two structurally-identical values
+   produce the identical root OID, always. This is not a design goal — it is
+   a *consequence* of using Git's tree model faithfully. Dedup, diff, and
+   "nothing changed" detection are free.
+
+3. **Schema evolution is a solved problem**. The migration system produces
+   *data* (not code) describing rename/add/remove/wrap operations. Old values
+   are read-time upcast into the new schema without rewriting. This is
+   semantically deep: the stored tree is immutable, and compatibility is a
+   read-time projection.
+
+4. **Self-hosting schemas**. `Schema` is a `Facet` type stored through the
+   same codec. The schema-schema is pinned by generation, giving version
+   negotiation before deserialization. This is a complete meta-circular
+   bootstrap.
+
+5. **Identity normal form is frozen**. Identity-bearing subtrees use a
+   deliberately separate, frozen binary encoding that the general codec can
+   evolve independently of. This solves the hardest versioning problem —
+   identity stability — by construction.
+
+6. **Presence marker**. The `_` entry in the marker tree makes `None` and
+   empty collections visible to `git diff` and `git ls-tree -r`. This is a
+   subtle but real improvement over literal empty trees, which are invisible
+   to Git's blob-oriented tools.
+
+7. **RawTree and RawBlob passthrough**. You can embed an existing Git object
+   by OID without walking or rewriting it. This makes the codec composable
+   with *any* other tree layout, including git-meta's.
+
+8. **Schema-directed dynamic read/write**. With the `value` feature, a
+   `Schema` document guides full-fidelity read/write of `facet_value::Value`
+   (a JSON-like dynamic type). This means you can store data from a language
+   with no Rust types and still get exact encoding.
+
+9. **No out-of-band database**. The codec is pure Git: read from a `gix`
+   `Find`, write to a `gix` `Write`. There is no SQLite, no separate local
+   store. The Git ODB *is* the store. This simplifies every layer above.
+
+==== Weaknesses
+
+1. **No collaboration story**. There is no merge, no materialization, no ref
+   management, no push/pull, no conflict resolution. The codec is
+   oid-in/oid-out. A higher layer (`git-store`) must provide all of this, and
+   the crate does not define what that layer looks like.
+
+2. **Schemaless on the wire**. A tree written by facet-git-tree carries no
+   type information. Without the `Facet` type or a `Schema` document at hand,
+   a consumer must fall back to the heuristic dynamic read — which is
+   documented as lossy (numbers become strings, `None` and empty map collapse
+   to the same `Object`). This is the cost of content-addressing: the hash
+   depends on the encoding, and any type marker would change the hash.
+
+3. **No deletion markers**. The codec has no tombstones. Deleting a field from
+   a struct means the tree entry is simply absent. In a collaborative context,
+   this is ambiguous: did the field never exist, or was it removed? The
+   presence marker distinguishes `None` from never-existing, but there is no
+   mechanism to signal "this field was present and is now gone."
+
+4. **No target model**. facet-git-tree encodes *a value*, not *metadata about
+   a target*. There is no commit-scoping, branch-scoping, or path-scoping
+   inside the codec. If you want per-commit metadata, you build a map keyed
+   by commit SHA — but the codec does not help you lay that out.
+
+5. **No scalars-as-sets or scalars-as-lists**. The set type in git-meta (SHA-1
+   named members) and the list type (timestamp-named entries) are
+   collaboration-friendly encodings designed for concurrent append/add. In
+   facet-git-tree, a `Vec<T>` is an ordinal-named tree — fine for a single
+   writer, but concurrent append creates ordinal collisions that must be
+   resolved by a higher layer.
+
+6. **Ordinal naming is fragile under concurrent writes**. Two writers appending
+   to the same `Vec` both write `0004`. Git tree merge has no special
+   handling for ordinal-named entries; it would see a content conflict on
+   the `0004` entry. git-meta's timestamp-based list entry IDs avoid this by
+   construction.
+
+7. **No fanout or sharding**. A map with 100K keys is a single tree with 100K
+   entries. Git's tree format handles this (sorted binary search), but the
+   tree object itself grows linearly. git-meta's two-character fanout
+   (`commit/ea/...`) limits any single tree's fanout to 256 entries.
+
+8. **Float precision is lossy at the text level**. The general codec writes
+   floats as `f64.to_string()` — shortest-round-tripping decimal. This is
+   *correct* for IEEE 754 round-trip, but it is not a *canonical*
+   representation: `0.1` and `0.10000000000000001` are the same float and
+   could produce different strings on different platforms. The identity normal
+   form avoids this by using raw bits, but the general codec does not.
+
+9. **No partial clone story**. There is no promisor-remote integration, no
+   blobless-clone-awareness, no lazy loading. The codec assumes the consumer
+   has the full object graph available. A schema-guided lazy read is
+   *possible* (read the tree, then fetch only needed blobs), but the crate
+   does not implement it.
+
+10. **Depth limit is low (32)**. `MAX_DEPTH` bounds recursion to 32 levels.
+    This is generous for practical data but is a hard ceiling that the codec
+    enforces on both read and write. A deeply nested type (e.g. a recursive
+    tree with 40 levels of nesting) will fail.
+
+== 6. Negative space analysis
+
+=== 6.1 What git-meta cannot do that facet-git-tree can
+
+1. **Store a struct**. git-meta has no struct type. You flatten everything to
+   namespaced string keys. `agent:model`, `agent:provider`, `agent:session-id`
+   are three independent string values — not one `agent` struct with three
+   fields. There is no way to atomically update all three, no way to treat
+   them as a unit for migration, no way to distinguish "agent struct with no
+   provider" from "agent struct that has never been written."
+
+2. **Store an enum**. git-meta has no variant type. `review:status` is a
+   string — `"approved"`, `"pending"`, `"rejected"` — but the set of valid
+   values is purely conventional. The wire format cannot enforce it, and a
+   typo (`"approvd"`) is silently accepted.
+
+3. **Store a map with non-string keys**. git-meta's set and list are string-
+   only. You cannot store a map from commit SHA to review verdict, or a map
+   from integer to string, without inventing a key encoding convention that
+   lives outside the spec.
+
+4. **Round-trip a number**. An `i64` written as `"42"` reads back as a string.
+   There is no way to know, from the wire format alone, that `"42"` was an
+   integer and not a string. The `standard-keys` doc suggests conventions,
+   but the format does not enforce them.
+
+5. **Store binary data**. git-meta's three value types are all text. A set
+   member or list entry is a string. There is no `bytes` type. If you want
+   to store a binary attestation, you base64-encode it — and now you need an
+   out-of-band convention to know it is base64.
+
+6. **Represent absence atomically**. In git-meta, deleting a struct means
+   tombstoning every key under it independently. There is no "delete the
+   `agent` struct" operation — only "delete `agent:model`", "delete
+   `agent:provider`", etc. This is fine for key-value metadata, but a struct
+   is a *unit of meaning*, and deleting it piecemeal can leave intermediate
+   states that are semantically invalid.
+
+=== 6.2 What facet-git-tree cannot do that git-meta can
+
+1. **Merge concurrent writes without a higher layer**. git-meta defines
+   materialization, merge semantics, and push/pull as part of its spec.
+   facet-git-tree is a codec with no collaboration story. Two writers
+   producing different trees for the same type must be reconciled by
+   something above this crate.
+
+2. **Scale to millions of entries**. git-meta's fanout, partial clone, and
+   auto-pruning are designed for large-scale use. facet-git-tree puts all
+   entries in a single tree with no sharding. A `BTreeMap` with 10M keys
+   becomes one tree object with ~10M entries — feasible for Git (binary
+   search), but not cheap to materialize over the wire.
+
+3. **Lazy-load blobs**. git-meta's promisor remote setup means a consumer can
+   walk the tree structure and fetch only the blobs it needs. facet-git-tree
+   assumes the full object graph is available. For a small value this is
+   fine; for a large metadata store, it is a non-starter.
+
+4. **Express deletion unambiguously in a distributed context**. git-meta's
+   tombstones are a first-class wire-format concept. facet-git-tree has no
+   deletion marker: a missing field is just missing. In a single-writer
+   context this is fine (the writer knows what was there), but in a
+   distributed context, absence is ambiguous.
+
+5. **Target metadata at a commit or branch**. git-meta's target model
+   (commit SHA, branch name, path) is baked into the wire format.
+   facet-git-tree has no target concept — it encodes a *value*, and
+   associating that value with a commit or branch is a higher-layer concern.
+
+6. **Prune stale data**. git-meta's auto-pruning (high-water/low-water on key
+   count or blob size) keeps the published tree bounded. facet-git-tree has
+   no concept of pruning: the tree is what the value is, and if the value is
+   large, the tree is large.
+
+7. **Split metadata across refs**. git-meta's serialize filters let you route
+   different key namespaces to different refs (public vs. private, vendor vs.
+   internal). facet-git-tree produces one tree per value; splitting it is not
+   a codec concern.
+
+8. **Discover keys from commit messages**. git-meta encodes change lists in
+   commit messages, enabling key discovery without fetching blobs.
+   facet-git-tree produces no commit messages (it is not a commit layer).
+
+=== 6.3 What neither system does
+
+1. **Three-way merge with conflict reporting**. git-meta uses two-way merge
+   with remote-wins on overlap. facet-git-tree does not define merge at all.
+   Neither system can report a conflict to the user and ask for resolution.
+
+2. **Schema negotiation between heterogeneous clients**. git-meta has no
+   schema format at all — it relies on key conventions. facet-git-tree has
+   schemas but does not define how two clients discover or agree on one.
+
+3. **Binary value types on the wire**. git-meta is string-only.
+   facet-git-tree's general codec uses text for scalars (except byte
+   sequences and the identity normal form). Neither system offers a
+   first-class binary scalar in the primary encoding.
+
+4. **Query language or index**. Neither system defines how to query metadata
+   (e.g. "all commits with `review:status = approved`").
+   git-meta's commit-message diffstats are an index, but they are append-only
+   and keyed by serialization commit, not by target.
+
+5. **Time-travel read**. Neither system defines how to read metadata as of a
+   specific point in history. git-meta stores metadata history as a linear
+   commit chain; reading a past state requires walking that chain.
+   facet-git-tree has no history concept at all.
+
+6. **Cross-referencing**. Neither system defines how to link metadata across
+   targets (e.g. "the reviewer of this commit is also the owner of that
+   path"). The flat key-value model of git-meta and the value-isolated model
+   of facet-git-tree both leave cross-referencing to the application.
+
+7. **Authorization or access control**. Neither system restricts who can write
+   which keys. git-meta's serialize filters are purely about routing, not
+   permissions.
+
+8. **Compression or deduplication of large values**. git-meta stores large
+   values as blobs; facet-git-tree stores them as blobs or trees. Neither
+   system compresses across values or deduplicates partial matches.
+
+== 7. The fundamental tradeoff
+
+The two systems sit at opposite ends of a single axis:
+
+* **git-meta** is a *collaborative metadata protocol*. It solves the
+  multi-writer, multi-scale, exchange problem. Its value model is deliberately
+  minimal (string/list/set) to keep merge and distribution tractable. It
+  sacrifices type expressiveness for operational simplicity.
+
+* **facet-git-tree** is a *type-faithful codec*. It solves the encoding problem
+  — any Rust type to Git objects and back, exactly. Its collaboration model
+  is deliberately absent (oid-in/oid-out) to keep the codec pure and
+  content-addressed. It sacrifices operational features for type expressiveness.
+
+These are not competitors. They are layers. A complete system needs both:
+facet-git-tree as the encoding layer, and a git-meta-like collaboration layer
+above it that defines targets, merge, refs, and distribution.
+
+The hard question is whether the collaboration layer can be built *on top of*
+facet-git-tree's richer encoding without losing git-meta's merge simplicity.
+The answer depends on whether struct fields and enum variants can be merged as
+independently as git-meta's key/value pairs — and they can, *if* the
+collaboration layer treats each struct field as a separate merge unit, exactly
+as git-meta treats each key as a separate merge unit.
+
+The obstacle is ordinal-named sequences (facet-git-tree's `Vec` encoding).
+Two concurrent appends to the same `Vec` produce colliding ordinals that Git
+tree merge cannot resolve without a custom strategy. git-meta's timestamp-based
+list entry IDs solve exactly this problem. A facet-git-tree-based collaboration
+layer would need either:
+
+1. A different sequence encoding for collaborative contexts (timestamp-named
+   entries, like git-meta), or
+2. A merge driver that understands ordinal renaming, or
+3. A restriction that collaborative metadata never includes mutable sequences.
+
+Option 1 is the most promising: a collaboration layer could define a "list
+facet" that uses git-meta-style entry IDs, while the core codec retains
+ordinal naming for non-collaborative use. The `RawTree` passthrough type
+already allows mixing tree layouts in a single value.
+
+== 8. Summary table
+
+[cols="1,1,1",options="header"]
+|===
+| Dimension | git-meta | facet-git-tree
+| Core abstraction | (target, key, value) | Facet type → Git objects
+| Value types | string, list, set | 19 scalar widths, bytes, struct, tuple, list, array, map, option, enum, RawTree, RawBlob, dynamic
+| Type fidelity | None (all scalars are strings) | Full (i32 ≠ String ≠ bool)
+| Deletion | Explicit tombstones | Absent (no markers)
+| Merge | Defined (linear, remote-wins) | Undefined (codec only)
+| Scale | Millions (fanout, partial clone, pruning) | Single value (no fanout)
+| Schema | None (convention only) | Self-hosted, pinned, versioned
+| Migration | None | Data-driven (rename/add/remove/wrap)
+| Identity stability | N/A (values are mutable) | Frozen normal form for identity-bearing subtrees
+| Collaboration | Full (push/pull/sync, refs, filters) | None (oid-in/oid-out)
+| Local store | SQLite | None (Git ODB is the store)
+| Wire self-description | Partial (`__value`/`__list`/`__set`) | None (schema required for fidelity)
+|===
+
+== 9. Conclusion
+
+git-meta and facet-git-tree solve different problems. git-meta solves the
+*exchange* problem: how do multiple writers share metadata over Git refs?
+facet-git-tree solves the *encoding* problem: how do you faithfully store a
+typed value in Git's object model?
+
+git-meta's three-type ceiling is its most serious limitation. A metadata system
+that cannot express a struct, an enum, or a non-string map key is a metadata
+system that will be outgrown by any application complex enough to need it. The
+standard-keys doc's workaround — flatten structs to namespaced keys — works
+but sacrifices atomicity and type fidelity.
+
+facet-git-tree's missing collaboration story is its most serious limitation. A
+codec that cannot merge, prune, or distribute its values is a codec that
+cannot be used alone in a multi-writer project. The higher layers that would
+provide these features (`git-store`, etc.) are not specified here.
+
+The negative space — what neither does — is also instructive. Neither system
+addresses three-way merge with conflict reporting, schema negotiation between
+heterogeneous clients, binary scalars in the primary encoding, a query
+language, time-travel read, cross-target referencing, authorization, or
+cross-value deduplication. These are all real needs in a production metadata
+system, and neither system is close to meeting them.
+
+The most productive path forward is compositional: use facet-git-tree's codec
+for type-faithful encoding, and build a git-meta-like collaboration layer
+above it that defines targets, merge semantics, refs, and distribution. The
+challenge is designing the collaboration layer to preserve the codec's
+content-addressing while adding the mutability and distribution features that
+real-world use requires.
