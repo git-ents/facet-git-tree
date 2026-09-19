@@ -7,6 +7,37 @@
 //! real `gix` repository or object database works just as well.
 //!
 //! The normative encoding rules live in `docs/specification.adoc`.
+//!
+//! # Design notes
+//!
+//! Three properties of the mapping are worth stating explicitly, because
+//! they are the subtle wins (and the one deliberate cost) of encoding into
+//! Git's object model rather than inventing a container format over it:
+//!
+//! * **Unit enum variants are bare blobs** holding the variant name — their
+//!   entire information content — rather than trees wrapping it. Git's
+//!   `ls-tree -r` and `diff` are blob-oriented, so a variant flip shows up
+//!   as an ordinary one-line content change instead of vanishing as a
+//!   tree-entry rename with no content on either side.
+//!
+//! * **Emptiness is a blob, not an absence**: `None`, dynamic `Null`, and
+//!   empty collections are written as a one-entry presence-marker tree
+//!   (see `marker`) instead of a literal empty tree, which contributes
+//!   nothing to `ls-tree -r` or `diff` — so a field going empty is
+//!   visible in exactly the way a field never existing is not.
+//!
+//! * **Every `Some` costs a tree level** (`field/some/blob`): the `some`
+//!   wrapper is what keeps a defaulted field's absence (no entry at all)
+//!   distinguishable from an explicit `None` (the marker). That is one
+//!   extra hop per optional value in every tree listing — a deliberate
+//!   trade of a little depth for the defaulted-field ambiguity it removes.
+//!
+//! One documented asymmetry: a dynamic `DateTime` is written as RFC 3339
+//! text, but the schema language has no `Node::DateTime`, so a
+//! schema-directed read recovers it as a `String` — the schema cannot
+//! describe a value the codec writes. Lossy by design, and stated here so
+//! the asymmetry is visible at the crate boundary, not only at the error
+//! variant.
 #![forbid(unsafe_code)]
 
 pub mod attr;

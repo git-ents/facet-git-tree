@@ -309,8 +309,8 @@ pub enum NormalFormError {
     ///
     /// The ordinal width is part of the frozen mapping, so a longer list is
     /// refused rather than silently widened. Eight-digit ordinals name
-    /// indices `0..=99_999_999`, hence at most [`MAX_LIST_LEN`] — exactly
-    /// 100_000_000 — elements, so a list of that length is accepted.
+    /// indices `0..=99_999_999`, hence at most exactly 100_000_000
+    /// elements, so a list of that length is accepted.
     #[error(
         "normal-form list holds {len} elements, more than the {max} eight-digit ordinals can name"
     )]
@@ -399,9 +399,11 @@ pub enum SchemaError {
     },
     /// The schema document's embedded kind is the anonymous-root sentinel.
     ///
-    /// Two structurally different anonymous roots both carry
-    /// [`Schema::ANONYMOUS_KIND`], so publishing it would silently lose
-    /// provenance; name the document with [`Schema::with_kind`] instead.
+    /// Two structurally different anonymous roots both carry the
+    /// anonymous-root sentinel ([`Schema::ANONYMOUS_KIND`](crate::Schema::ANONYMOUS_KIND)),
+    /// so publishing it would silently lose
+    /// provenance; name the document with
+    /// [`Schema::with_kind`](crate::Schema::with_kind) instead.
     #[error(
         "schema kind is the anonymous-root sentinel; name it with `Schema::with_kind` before \
          publication"
