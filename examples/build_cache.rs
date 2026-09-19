@@ -37,7 +37,7 @@ fn reachable(root: &ObjectId, store: &ObjectStore, seen: &mut HashSet<ObjectId>)
     if !seen.insert(*root) {
         return;
     }
-    if let Some(GitObject::Tree(tree)) = store.get(root) {
+    if let Some(GitObject::Tree(tree)) = store.get(root).expect("read object") {
         for entry in tree.entries {
             reachable(&entry.oid, store, seen);
         }
@@ -69,9 +69,13 @@ fn main() {
     println!("cache root tree: {root}");
 
     // The two shared entries point at the same Artifacts sub-tree OID.
-    let entries = store.get_tree(&root).expect("root is a tree");
+    let entries = store
+        .get_tree(&root)
+        .expect("read object")
+        .expect("root is a tree");
     let entries = store
         .get_tree(&entries[0].oid)
+        .expect("read object")
         .expect("entries map is a tree");
     for entry in &entries {
         println!("  {} -> {}", entry.filename, entry.oid);

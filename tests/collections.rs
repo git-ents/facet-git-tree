@@ -158,7 +158,10 @@ fn map_entry_named_by_key() {
     let (mode, value_id) = get_tree_entry_mode(&store, &map_id, "a");
     assert_eq!(mode, EntryKind::Blob, "map value must be a leaf blob");
     assert_eq!(
-        store.get_blob(&value_id).expect("value blob in store"),
+        store
+            .get_blob(&value_id)
+            .expect("read object")
+            .expect("value blob in store"),
         b"1\n",
         "map entry named by key must resolve to the value"
     );
@@ -180,7 +183,10 @@ fn map_with_int_keys_named_by_textual_key() {
     let (mode, value_id) = get_tree_entry_mode(&store, &map_id, "42");
     assert_eq!(mode, EntryKind::Blob, "map value must be a leaf blob");
     assert_eq!(
-        store.get_blob(&value_id).expect("value blob in store"),
+        store
+            .get_blob(&value_id)
+            .expect("read object")
+            .expect("value blob in store"),
         b"x\n",
         "map entry named by the textual form of its key must resolve to the value"
     );
@@ -238,7 +244,10 @@ fn map_with_smart_pointer_scalar_keys_is_name_keyed() {
          form, not wrapped in a {{k, v}} pair sub-tree"
     );
     assert_eq!(
-        store.get_blob(&v_id).expect("value blob in store"),
+        store
+            .get_blob(&v_id)
+            .expect("read object")
+            .expect("value blob in store"),
         b"5\n",
         "name-keyed entry must resolve directly to the value"
     );
@@ -278,13 +287,19 @@ fn map_with_composite_keys_uses_pair_subtrees() {
     assert_eq!(kmode, EntryKind::Tree, "struct key encodes to a sub-tree");
     assert_eq!(vmode, EntryKind::Blob, "string value is a leaf blob");
     assert_eq!(
-        store.get_blob(&v_id).expect("value blob"),
+        store
+            .get_blob(&v_id)
+            .expect("read object")
+            .expect("value blob"),
         b"a\n",
         "value sub-entry resolves to the value"
     );
     let (_, x_id) = get_tree_entry_mode(&store, &k_id, "x");
     assert_eq!(
-        store.get_blob(&x_id).expect("x field blob"),
+        store
+            .get_blob(&x_id)
+            .expect("read object")
+            .expect("x field blob"),
         b"1\n",
         "key sub-tree carries the struct fields"
     );

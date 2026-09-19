@@ -53,6 +53,7 @@ fn v_blob<T: for<'a> Facet<'a>>(value: &T) -> Vec<u8> {
     let entry = find_entry(&store, &root_id, "v");
     store
         .get_blob(&entry.oid)
+        .expect("read object")
         .expect("`v` must be a blob in store")
 }
 

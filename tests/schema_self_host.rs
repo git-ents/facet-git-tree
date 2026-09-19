@@ -27,7 +27,10 @@ mod common;
 use common::{Event, Nested, Person, TreeNode, find_entry, splice_codec};
 
 fn splice_empty_schema(store: &ObjectStore, tree: &ObjectId) -> ObjectId {
-    let mut entries = store.get_tree(tree).expect("tree present");
+    let mut entries = store
+        .get_tree(tree)
+        .expect("read object")
+        .expect("tree present");
     entries.push(TreeEntry {
         mode: EntryMode::from(EntryKind::Tree),
         filename: "schema".into(),
@@ -69,7 +72,10 @@ struct LegacySchemaDocument {
 }
 
 fn splice_legacy_pin(store: &ObjectStore, tree: &ObjectId) -> ObjectId {
-    let mut entries = store.get_tree(tree).expect("tree present");
+    let mut entries = store
+        .get_tree(tree)
+        .expect("read object")
+        .expect("tree present");
     entries.push(TreeEntry {
         mode: EntryMode::from(EntryKind::Tree),
         filename: SchemaSchema::ENTRY.into(),
@@ -82,7 +88,10 @@ fn splice_legacy_pin(store: &ObjectStore, tree: &ObjectId) -> ObjectId {
 }
 
 fn splice_migration_metadata(store: &ObjectStore, tree: &ObjectId) -> ObjectId {
-    let mut entries = store.get_tree(tree).expect("tree present");
+    let mut entries = store
+        .get_tree(tree)
+        .expect("read object")
+        .expect("tree present");
     entries.push(TreeEntry {
         mode: EntryMode::from(EntryKind::Tree),
         filename: "migration".into(),
@@ -95,7 +104,10 @@ fn splice_migration_metadata(store: &ObjectStore, tree: &ObjectId) -> ObjectId {
 }
 
 fn splice_unexpected_metadata(store: &ObjectStore, tree: &ObjectId) -> ObjectId {
-    let mut entries = store.get_tree(tree).expect("tree present");
+    let mut entries = store
+        .get_tree(tree)
+        .expect("read object")
+        .expect("tree present");
     entries.push(TreeEntry {
         mode: EntryMode::from(EntryKind::Tree),
         filename: "unexpected".into(),
@@ -323,11 +335,17 @@ fn schema_field_type_change_is_a_blob_level_diff() -> anyhow::Result<()> {
         "the `schema` entry's oid must differ at this stable path"
     );
     assert_eq!(
-        before_store.get_blob(&before_schema.oid).expect("blob"),
+        before_store
+            .get_blob(&before_schema.oid)
+            .expect("read object")
+            .expect("blob"),
         b"U32\n"
     );
     assert_eq!(
-        after_store.get_blob(&after_schema.oid).expect("blob"),
+        after_store
+            .get_blob(&after_schema.oid)
+            .expect("read object")
+            .expect("blob"),
         b"String\n"
     );
     Ok(())
@@ -381,7 +399,7 @@ fn write_pinned_document_has_a_resolvable_pin() -> anyhow::Result<()> {
     assert_eq!(&pin_entry.oid, SchemaSchema::CURRENT.tree());
     assert!(
         matches!(
-            store.get(&pin_entry.oid),
+            store.get(&pin_entry.oid).expect("read object"),
             Some(facet_git_tree::GitObject::Tree(_))
         ),
         "the pinned schema-schema tree must actually be present in the store"
@@ -420,6 +438,7 @@ fn absent_pin_on_an_unknown_tree_is_rejected() -> anyhow::Result<()> {
 
     let entries: Vec<_> = store
         .get_tree(&root)
+        .expect("read object")
         .expect("root is a tree")
         .into_iter()
         .filter(|e| e.filename != SchemaSchema::ENTRY)
@@ -456,7 +475,10 @@ fn unrecognized_pin_is_rejected_before_a_full_deserialize_is_attempted() -> anyh
         .write_buf(gix_object::Kind::Blob, b"DateTime\n")
         .unwrap();
 
-    let mut entries = store.get_tree(&root).expect("root is a tree");
+    let mut entries = store
+        .get_tree(&root)
+        .expect("read object")
+        .expect("root is a tree");
     for entry in &mut entries {
         if entry.filename == SchemaSchema::ENTRY {
             entry.oid = bogus_pin;
@@ -548,12 +570,19 @@ fn walk_blobs(
     prefix: &str,
     out: &mut Vec<(String, Vec<u8>)>,
 ) {
-    for entry in store.get_tree(root).expect("tree present") {
+    for entry in store
+        .get_tree(root)
+        .expect("read object")
+        .expect("tree present")
+    {
         let name = String::from_utf8_lossy(&entry.filename);
         let path = format!("{prefix}/{name}");
         match entry.mode.kind() {
             EntryKind::Blob => {
-                let content = store.get_blob(&entry.oid).expect("blob present");
+                let content = store
+                    .get_blob(&entry.oid)
+                    .expect("read object")
+                    .expect("blob present");
                 out.push((path, content));
             }
             _ => walk_blobs(store, &entry.oid, &path, out),

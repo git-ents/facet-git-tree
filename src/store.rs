@@ -5,6 +5,7 @@ use std::io::Read;
 use gix_hash::Kind as HashKind;
 use gix_object::{Data, Find, Kind, ObjectRef, Write};
 
+use crate::error::DeserializeError;
 use crate::{GitObject, ObjectId, TreeEntry};
 
 /// A content-addressed store of Git objects produced by
@@ -40,29 +41,43 @@ impl std::fmt::Debug for ObjectStore {
 
 impl ObjectStore {
     /// Decode and return the object stored under `id`, if present.
-    pub fn get(&self, id: &ObjectId) -> Option<GitObject> {
+    ///
+    /// Corrupt and missing are distinguished: a failed fetch surfaces as
+    /// [`DeserializeError::Backend`] and an undecodable object as
+    /// [`DeserializeError::Decode`], so a corrupt-object diagnostic is
+    /// possible through this API instead of every failure collapsing to
+    /// `None`.
+    pub fn get(&self, id: &ObjectId) -> Result<Option<GitObject>, DeserializeError> {
         let mut buf = Vec::new();
-        let data = self.0.try_find(id, &mut buf).ok().flatten()?;
+        let Some(data) = self
+            .0
+            .try_find(id, &mut buf)
+            .map_err(DeserializeError::Backend)?
+        else {
+            return Ok(None);
+        };
+        let decode = |source| DeserializeError::Decode { oid: *id, source };
         ObjectRef::from_bytes(data.data, data.kind, HashKind::Sha1)
-            .ok()?
+            .map_err(decode)?
             .into_owned()
-            .ok()
+            .map_err(decode)
+            .map(Some)
     }
 
     /// Return the entries of the tree stored under `id`, if it is a tree.
-    pub fn get_tree(&self, id: &ObjectId) -> Option<Vec<TreeEntry>> {
-        match self.get(id)? {
-            GitObject::Tree(tree) => Some(tree.entries),
+    pub fn get_tree(&self, id: &ObjectId) -> Result<Option<Vec<TreeEntry>>, DeserializeError> {
+        Ok(match self.get(id)? {
+            Some(GitObject::Tree(tree)) => Some(tree.entries),
             _ => None,
-        }
+        })
     }
 
     /// Return the raw bytes of the blob stored under `id`, if it is a blob.
-    pub fn get_blob(&self, id: &ObjectId) -> Option<Vec<u8>> {
-        match self.get(id)? {
-            GitObject::Blob(blob) => Some(blob.data),
+    pub fn get_blob(&self, id: &ObjectId) -> Result<Option<Vec<u8>>, DeserializeError> {
+        Ok(match self.get(id)? {
+            Some(GitObject::Blob(blob)) => Some(blob.data),
             _ => None,
-        }
+        })
     }
 }
 

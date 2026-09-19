@@ -158,9 +158,16 @@ fn scalar_leaves_have_one_trailing_newline() {
         f64_value: 1.0,
     };
     let (root, store) = serialize(&value).expect("serialize");
-    for entry in store.get_tree(&root).expect("root tree") {
+    for entry in store
+        .get_tree(&root)
+        .expect("read object")
+        .expect("root tree")
+    {
         assert_eq!(entry.mode.kind(), EntryKind::Blob);
-        let blob = store.get_blob(&entry.oid).expect("leaf blob");
+        let blob = store
+            .get_blob(&entry.oid)
+            .expect("read object")
+            .expect("leaf blob");
         assert_eq!(blob.last(), Some(&b'\n'), "{}", entry.filename);
         assert_ne!(
             blob.get(blob.len().saturating_sub(2)),
@@ -180,7 +187,10 @@ fn trailing_newlines_remain_lossless(#[case] text: &str) {
     let value = WithString { value: text.into() };
     let (root, store) = serialize(&value).expect("serialize");
     let entry = find_entry(&store, &root, "value");
-    let blob = store.get_blob(&entry.oid).expect("string blob");
+    let blob = store
+        .get_blob(&entry.oid)
+        .expect("read object")
+        .expect("string blob");
     assert_eq!(blob.last(), Some(&b'\n'));
     let back: WithString = deserialize(&root, &store).expect("deserialize");
     assert_eq!(back, value);
@@ -398,5 +408,11 @@ fn vec_u8_is_one_leaf_blob() {
     assert_eq!(entry.mode.kind(), EntryKind::Blob);
     let mut expected = bytes;
     expected.push(b'\n');
-    assert_eq!(store.get_blob(&entry.oid).expect("blob"), expected);
+    assert_eq!(
+        store
+            .get_blob(&entry.oid)
+            .expect("read object")
+            .expect("blob"),
+        expected
+    );
 }
