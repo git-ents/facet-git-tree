@@ -11,6 +11,7 @@ use gix_object::{Data, Find, Kind};
 pub(crate) use crate::classify::collapse_shape;
 use crate::classify::{ShapeClass, classify, is_byte_seq};
 use crate::error::{DeserializeError, KeyError};
+use crate::limits::MAX_VALUE_DEPTH;
 use crate::{EntryKind, ObjectId, RawBlob, RawTree};
 
 /// Collapse a `facet` reflection error to [`DeserializeError::Reflect`].
@@ -21,18 +22,6 @@ use crate::{EntryKind, ObjectId, RawBlob, RawTree};
 fn reflect(e: impl std::fmt::Display) -> DeserializeError {
     DeserializeError::Reflect(e.to_string())
 }
-
-/// Maximum tree nesting depth accepted on deserialization.
-///
-/// Bounds recursion in [`deser_into`] so a hostile or corrupt tree cannot
-/// overflow the stack. The limit must stay well under what a default thread
-/// stack can hold: [`deser_into`] is a large recursive frame (a debug build is
-/// tens of KB per level), so a 2 MiB stack — the standard library's default for
-/// spawned threads — only holds a few dozen levels before overflowing. The
-/// guard exists precisely to forestall that overflow, so it is kept low enough
-/// to fire first with margin to spare. Still far deeper than any
-/// practically-encoded value nests.
-pub(crate) const MAX_DEPTH: usize = 32;
 
 /// Whether a decoder accepts the historical leaf-blob spelling.
 ///
@@ -122,7 +111,7 @@ pub fn deserialize_legacy_leaves<T: for<'a> facet::Facet<'a>>(
 /// deserialization — schema-driven reads route a [`Node::Dynamic`]
 /// (`crate::schema::Node`) node back through this crate's own typed
 /// [`deserialize`], and must hand off the depth already spent so the combined
-/// recursion still respects [`MAX_DEPTH`] rather than resetting the budget.
+/// recursion still respects [`MAX_VALUE_DEPTH`] rather than resetting the budget.
 /// [`deserialize`] is this with `depth` fixed at `0`.
 pub(crate) fn deserialize_at_depth<T: for<'a> facet::Facet<'a>>(
     root: &ObjectId,
@@ -414,8 +403,8 @@ fn deser_into<'facet, F: Find + ?Sized>(
     depth: usize,
     mode: DecodeMode,
 ) -> Result<Partial<'facet, true>, DeserializeError> {
-    if depth > MAX_DEPTH {
-        return Err(DeserializeError::MaxDepth(MAX_DEPTH));
+    if depth > MAX_VALUE_DEPTH {
+        return Err(DeserializeError::MaxDepth(MAX_VALUE_DEPTH));
     }
     let shape = partial.shape();
 
@@ -786,7 +775,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
 /// the marker is stripped before the ordinal classification below, so it
 /// never surfaces as a phantom `"_"` member.
 ///
-/// The caller ([`deser_into`]) has already applied the [`MAX_DEPTH`] guard for
+/// The caller ([`deser_into`]) has already applied the [`MAX_VALUE_DEPTH`] guard for
 /// this level; children recurse through `deser_into` at `depth + 1`, so the
 /// guard bounds heuristic recursion exactly as it bounds typed recursion.
 ///

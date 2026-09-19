@@ -15,11 +15,11 @@ use facet_value::{VArray, VNumber, VObject, Value};
 use gix_object::{Find, Kind};
 
 use crate::de::{
-    DecodeMode, MAX_DEPTH, deserialize_at_depth_mode, extract_enum_entry_mode,
-    find_blob_bytes_mode, find_object, find_tree_entries, map_pair_entries, sort_by_ordinal,
-    validate_option_entries,
+    DecodeMode, deserialize_at_depth_mode, extract_enum_entry_mode, find_blob_bytes_mode,
+    find_object, find_tree_entries, map_pair_entries, sort_by_ordinal, validate_option_entries,
 };
 use crate::error::{DeserializeError, SchemaReadError};
+use crate::limits::MAX_VALUE_DEPTH;
 use crate::schema::{DefaultFieldNode, Node, Schema, VariantKind};
 use crate::{EntryKind, ObjectId};
 
@@ -94,7 +94,7 @@ type Entries = Vec<(String, ObjectId, EntryKind)>;
 /// Read one schema node's value from the object at `oid`.
 ///
 /// `depth` counts every hop — including [`Node::Ref`] resolution — against
-/// the same [`MAX_DEPTH`] limit that bounds typed deserialization, so
+/// the same [`MAX_VALUE_DEPTH`] limit that bounds typed deserialization, so
 /// `Ref`-to-`Ref` chains cannot recurse unboundedly.
 fn read_node<F: Find + ?Sized>(
     oid: &ObjectId,
@@ -104,8 +104,8 @@ fn read_node<F: Find + ?Sized>(
     depth: usize,
     mode: DecodeMode,
 ) -> Result<Value, SchemaReadError> {
-    if depth > MAX_DEPTH {
-        return Err(DeserializeError::MaxDepth(MAX_DEPTH).into());
+    if depth > MAX_VALUE_DEPTH {
+        return Err(DeserializeError::MaxDepth(MAX_VALUE_DEPTH).into());
     }
     match schema {
         Node::Unit => {
@@ -291,7 +291,7 @@ fn read_node<F: Find + ?Sized>(
         // already `depth` levels into the schema-driven walk, so the typed
         // read underneath it must keep spending from that same budget rather
         // than resetting it — otherwise a `Dynamic` node nested near
-        // `MAX_DEPTH` could recurse further than an ordinary typed read of
+        // `MAX_VALUE_DEPTH` could recurse further than an ordinary typed read of
         // the same effective depth ever could.
         Node::Dynamic => Ok(deserialize_at_depth_mode::<Value>(oid, store, depth, mode)?),
         Node::Ref(name) => {

@@ -449,7 +449,7 @@ fn transparent_newtype_schema_collapses() -> anyhow::Result<()> {
 /// regardless of what schema described it.
 ///
 /// Exercised through `from_shape_with_limit` with a small bound: a type
-/// actually deeper than `MAX_DEPTH` (32) makes the compiler's recursive
+/// actually deeper than the codec depth bound (32) makes the compiler's recursive
 /// `SHAPE` evaluation prohibitively expensive, and the guard's threading is
 /// identical at every bound.
 #[test]

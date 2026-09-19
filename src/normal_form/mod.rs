@@ -87,6 +87,7 @@ use gix_object::{Kind, Write};
 
 use crate::de::is_tree_entry_name;
 use crate::error::{NormalFormError, UniverseError};
+use crate::limits::MAX_UNIVERSE_DEPTH;
 use crate::schema::{Node, Schema};
 use crate::store::ObjectStore;
 use crate::{EntryKind, EntryMode, ObjectId, TreeEntry};
@@ -97,14 +98,6 @@ use crate::{EntryKind, EntryMode, ObjectId, TreeEntry};
 /// `:` cannot occur in a Rust type identifier, so a reserved name can never
 /// collide with a name [`schema_of`](crate::schema_of) assigns to a user type.
 pub const IDENTITY_DEF_PREFIX: &str = "identity:";
-
-/// The maximum nesting depth [`check_universe`] walks before refusing.
-///
-/// A schema may be recursive, so the check is bounded rather than relying on
-/// the graph being finite. The bound matches the codec's own
-/// [`MAX_DEPTH`](crate::schema::Schema::from_shape) in spirit: a value nested
-/// deeper could not be read back regardless.
-const MAX_DEPTH: usize = 64;
 
 /// How many elements a list may hold, given eight-digit ordinals: index
 /// `99_999_999` is the largest an eight-digit ordinal names, so a list of
@@ -434,10 +427,10 @@ fn walk(
     path: String,
     depth: usize,
 ) -> Result<(), UniverseError> {
-    if depth > MAX_DEPTH {
+    if depth > MAX_UNIVERSE_DEPTH {
         return Err(UniverseError::MaxDepth {
             path,
-            depth: MAX_DEPTH,
+            depth: MAX_UNIVERSE_DEPTH,
         });
     }
     let excluded = |found: &'static str| UniverseError::Excluded {

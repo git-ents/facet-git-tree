@@ -18,8 +18,8 @@ use std::collections::BTreeMap;
 use core::fmt::Write as _;
 use facet_value::{VArray, VNumber, VObject, Value};
 
-use crate::de::MAX_DEPTH;
 use crate::error::MigrationError;
+use crate::limits::MAX_VALUE_DEPTH;
 use crate::migration::{Change, Constant, Migration, Target};
 use crate::schema::{FieldNode, Node, Schema, VariantKind};
 
@@ -124,7 +124,7 @@ impl<'a> Path<'a> {
 /// hand-authored document's bare root) has no name a `Target` could address.
 ///
 /// `depth` counts every hop — including `Ref` resolution — against
-/// [`MAX_DEPTH`], exactly as `schema::read` does, so a `Ref`-to-`Ref` cycle
+/// [`MAX_VALUE_DEPTH`], exactly as `schema::read` does, so a `Ref`-to-`Ref` cycle
 /// fails rather than recursing unboundedly.
 fn walk_named(
     value: &Value,
@@ -135,10 +135,10 @@ fn walk_named(
     path: &Path,
     depth: usize,
 ) -> Result<Value, MigrationError> {
-    if depth > MAX_DEPTH {
+    if depth > MAX_VALUE_DEPTH {
         return Err(MigrationError::MaxDepth {
             path: path.show(),
-            depth: MAX_DEPTH,
+            depth: MAX_VALUE_DEPTH,
         });
     }
     match schema {

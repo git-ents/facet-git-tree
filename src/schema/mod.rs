@@ -24,8 +24,9 @@ use facet::{ConstTypeId, Def, Facet, ScalarType, Shape};
 
 use crate::attr;
 use crate::classify::{ShapeClass, classify};
-use crate::de::{MAX_DEPTH, collapse_shape};
+use crate::de::collapse_shape;
 use crate::error::SchemaError;
+use crate::limits::MAX_VALUE_DEPTH;
 use crate::migration::{Hints, Target};
 use crate::normal_form::IDENTITY_DEF_PREFIX;
 
@@ -336,18 +337,18 @@ impl Schema {
     /// assigned deterministically in pre-order, so the same shape always
     /// yields an identical — and identically-encoded — document.
     pub fn from_shape(shape: &'static Shape) -> Result<Self, SchemaError> {
-        Self::from_shape_with_limit(shape, MAX_DEPTH).map(|(doc, _hints)| doc)
+        Self::from_shape_with_limit(shape, MAX_VALUE_DEPTH).map(|(doc, _hints)| doc)
     }
 
     /// [`from_shape`](Self::from_shape), additionally returning the rename
     /// [`Hints`] collected from `#[facet(migrate::renamed_from = …)]`
     /// attributes on named struct fields and struct enum variant fields.
     pub fn from_shape_with_hints(shape: &'static Shape) -> Result<(Self, Hints), SchemaError> {
-        Self::from_shape_with_limit(shape, MAX_DEPTH)
+        Self::from_shape_with_limit(shape, MAX_VALUE_DEPTH)
     }
 
     /// [`from_shape`](Self::from_shape) with a custom nesting bound in place
-    /// of [`MAX_DEPTH`], also returning the collected [`Hints`].
+    /// of [`MAX_VALUE_DEPTH`], also returning the collected [`Hints`].
     ///
     /// Exists so tests can exercise the depth guard without a pathologically
     /// deep type (whose `SHAPE` evaluation is prohibitively expensive to
@@ -423,7 +424,7 @@ struct Walker {
     /// How many types have claimed each identifier, for `_2`, `_3`, …
     /// disambiguation.
     claimed: HashMap<&'static str, usize>,
-    /// The nesting bound `node` enforces — [`MAX_DEPTH`] outside of tests.
+    /// The nesting bound `node` enforces — [`MAX_VALUE_DEPTH`] outside of tests.
     limit: usize,
     /// Rename hints collected from named-field structs' and struct enum
     /// variants' fields as they are visited.
@@ -484,7 +485,7 @@ impl Walker {
 
     /// The schema of one shape, mirroring `serialize_node`'s dispatch order.
     ///
-    /// `depth` counts nesting levels against [`MAX_DEPTH`], the same bound
+    /// `depth` counts nesting levels against [`MAX_VALUE_DEPTH`], the same bound
     /// typed deserialization enforces on reads: a shape nested deeper than
     /// that could never be read back regardless of what schema described it,
     /// so generation is refused here rather than recursing unboundedly on a

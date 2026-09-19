@@ -276,7 +276,7 @@ fn nest_some(store: &ObjectStore, oid: ObjectId, wraps: usize, leaf_is_blob: boo
 /// surrounding schema-driven read is already spending from, rather than
 /// resetting it to `0`. Neither half of this tree — 20 `Node::Optional`
 /// levels, then 20 more levels the dynamic heuristic itself must walk —
-/// exceeds `MAX_DEPTH` (32) alone, but their sum (40) does. Before the
+/// exceeds the codec depth bound (32) alone, but their sum (40) does. Before the
 /// hand-off carried the depth across, the inner heuristic read restarted at
 /// depth `0` and this tree would have been read successfully instead of
 /// rejected.

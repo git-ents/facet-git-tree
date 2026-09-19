@@ -7,8 +7,8 @@ use std::collections::BTreeSet;
 
 use crate::check_key;
 use crate::classify::{ShapeClass, classify, collapse_shape};
-use crate::de::MAX_DEPTH;
 use crate::error::SerializeError;
+use crate::limits::MAX_VALUE_DEPTH;
 use crate::schema::scalar_node;
 use crate::store::ObjectStore;
 use crate::{EntryKind, EntryMode, ObjectId, RawBlob, RawTree, TreeEntry};
@@ -82,8 +82,8 @@ pub(crate) fn serialize_node<W: Write + ?Sized>(
     let peek = peek.innermost_peek();
     let shape = peek.shape();
 
-    if depth > MAX_DEPTH {
-        return Err(SerializeError::MaxDepth(MAX_DEPTH));
+    if depth > MAX_VALUE_DEPTH {
+        return Err(SerializeError::MaxDepth(MAX_VALUE_DEPTH));
     }
 
     match classify(shape) {

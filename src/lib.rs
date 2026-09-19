@@ -13,6 +13,7 @@ pub mod attr;
 mod classify;
 mod de;
 mod error;
+mod limits;
 mod marker;
 pub mod migration;
 pub mod normal_form;

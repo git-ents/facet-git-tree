@@ -29,8 +29,8 @@ use facet::Peek;
 use facet_value::{VArray, VNumber, Value};
 use gix_object::Write;
 
-use crate::de::MAX_DEPTH;
 use crate::error::{SchemaWriteError, SerializeError};
+use crate::limits::MAX_VALUE_DEPTH;
 use crate::schema::{DefaultFieldNode, Node, Schema, VariantKind};
 use crate::ser::{float_text, serialize_node, write_leaf_blob};
 use crate::{EntryKind, EntryMode, ObjectId, TreeEntry, check_key};
@@ -141,7 +141,7 @@ impl<'a> Path<'a> {
 /// typed encoder does.
 ///
 /// `depth` counts every hop — including [`Node::Ref`] resolution — against
-/// the same [`MAX_DEPTH`] limit that bounds deserialization, so a `Ref`-to-`Ref`
+/// the same [`MAX_VALUE_DEPTH`] limit that bounds deserialization, so a `Ref`-to-`Ref`
 /// cycle in the schema fails rather than recursing unboundedly.
 fn write_node<W: Write + ?Sized>(
     value: &Value,
@@ -151,10 +151,10 @@ fn write_node<W: Write + ?Sized>(
     path: &Path,
     depth: usize,
 ) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
-    if depth > MAX_DEPTH {
+    if depth > MAX_VALUE_DEPTH {
         return Err(SchemaWriteError::MaxDepth {
             path: path.show(),
-            depth: MAX_DEPTH,
+            depth: MAX_VALUE_DEPTH,
         });
     }
     match schema {
