@@ -255,6 +255,17 @@ pub enum NormalFormError {
         /// The offending name form.
         key: String,
     },
+    /// A struct's field name is not usable as a Git tree entry name.
+    ///
+    /// A `NormalForm::Struct` is public data, so its entry names are only
+    /// fixed by the type when the type itself is trusted; `hash_into` is the
+    /// boundary that refuses names canonical git would refuse, by the same
+    /// shared rules as [`crate::check_key`].
+    #[error("invalid normal-form struct field name {field:?}: not a usable git tree entry name")]
+    InvalidFieldName {
+        /// The offending field name.
+        field: String,
+    },
     /// A list holds more elements than an eight-digit ordinal can name.
     ///
     /// The ordinal width is part of the frozen mapping, so a longer list is

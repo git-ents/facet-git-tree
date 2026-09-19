@@ -85,6 +85,7 @@ use std::collections::BTreeMap;
 
 use gix_object::{Kind, Write};
 
+use crate::de::is_tree_entry_name;
 use crate::error::{NormalFormError, UniverseError};
 use crate::schema::{Node, Schema};
 use crate::store::ObjectStore;
@@ -157,8 +158,10 @@ pub enum NormalForm {
     ///
     /// First-class beside [`Map`](Self::Map) because named-field composites are
     /// the dominant identity shape and their keys come from the schema, not
-    /// from the data: a `Struct`'s entry names are fixed by the type, so they
-    /// need neither the key-name mapping nor its validation.
+    /// from the data: a `Struct`'s entry names are fixed by the type. They are
+    /// still checked against the shared tree-entry-name rules at write time
+    /// ([`NormalFormError::InvalidFieldName`]), because the type is public
+    /// data and a hand-constructed map can carry any name at all.
     Struct(BTreeMap<String, NormalForm>),
     /// A keyed map, whose keys come from the data.
     Map(BTreeMap<Key, NormalForm>),
@@ -228,7 +231,7 @@ impl Key {
             Key::Bytes(v) => hex(v),
             Key::Hash(v) => v.to_string(),
         };
-        if let Some(_reason) = crate::de::tree_entry_name_violation(&name) {
+        if !crate::de::is_tree_entry_name(&name) {
             return Err(NormalFormError::InvalidKey { key: name });
         }
         Ok(name)
@@ -289,7 +292,17 @@ fn write_node<W: Write + ?Sized>(
         NormalForm::Struct(fields) => {
             let entries = fields
                 .iter()
-                .map(|(name, field)| entry(name.clone(), field, store))
+                .map(|(name, field)| {
+                    // `NormalForm` is public, so a `Struct` can be constructed
+                    // with names that are not usable entry names; the write is
+                    // the boundary that must refuse them.
+                    if !is_tree_entry_name(name) {
+                        return Err(NormalFormError::InvalidFieldName {
+                            field: name.clone(),
+                        });
+                    }
+                    entry(name.clone(), field, store)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             write_tree(entries, store)
         }
