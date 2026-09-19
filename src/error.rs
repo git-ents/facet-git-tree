@@ -82,9 +82,11 @@ pub enum SerializeError {
     /// The generic dynamic-value vtable only surfaces 64-bit reads, so an
     /// integer beyond the 64-bit range can only be observed as a lossy `f64`
     /// approximation. Writing that approximation would silently change the
-    /// value — and therefore its object id — so it is refused instead. The
-    /// `value` cargo feature adds a `facet_value::Value` fast path that
-    /// renders integers exactly at any width.
+    /// value — and therefore its object id — so it is refused instead. A
+    /// `facet_value::Value` is always downcast first (the crate is an
+    /// unconditional dependency), so it renders integers exactly at any
+    /// width; this error remains for dynamic values of other types whose
+    /// vtable cannot render their numbers exactly.
     #[error("dynamic number has no exact textual rendering")]
     UnrepresentableNumber,
     /// A dynamic value's runtime kind is not supported by this encoding.

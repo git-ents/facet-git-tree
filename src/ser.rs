@@ -397,28 +397,30 @@ fn serialize_dynamic<W: Write + ?Sized>(
         DynValueKind::Number => {
             // Resolve values beyond the generic vtable's 64-bit accessors
             // without changing the encoding of values those accessors handle.
-            #[cfg(feature = "value")]
+            // The `facet_value::Value` downcast is unconditional — the crate
+            // is an unconditional dependency — so an exact integer or a
+            // genuinely float-backed whole number encodes identically with
+            // and without the `value` feature: the same input must not
+            // succeed or fail depending on a feature flag.
+            if peek.shape().is_type::<facet_value::Value>()
+                && dv.as_i64().is_none()
+                && dv.as_u64().is_none()
             {
-                if peek.shape().is_type::<facet_value::Value>()
-                    && dv.as_i64().is_none()
-                    && dv.as_u64().is_none()
-                {
-                    let v = peek.get::<facet_value::Value>().map_err(reflect)?;
-                    if let Some(n) = v.as_number() {
-                        // Preserve float-backed values as floats: integer
-                        // accessors can expose an exact integer while changing
-                        // the shortest-round-tripping decimal representation.
-                        if n.is_float() {
-                            return blob(&float_text(n.to_f64_lossy()));
-                        }
-                        // `VNumber` canonicalizes integer representations, so
-                        // the range-appropriate accessor is exact.
-                        if let Some(i) = n.to_i128() {
-                            return blob(i.to_string().as_bytes());
-                        }
-                        if let Some(u) = n.to_u128() {
-                            return blob(u.to_string().as_bytes());
-                        }
+                let v = peek.get::<facet_value::Value>().map_err(reflect)?;
+                if let Some(n) = v.as_number() {
+                    // Preserve float-backed values as floats: integer
+                    // accessors can expose an exact integer while changing
+                    // the shortest-round-tripping decimal representation.
+                    if n.is_float() {
+                        return blob(&float_text(n.to_f64_lossy()));
+                    }
+                    // `VNumber` canonicalizes integer representations, so
+                    // the range-appropriate accessor is exact.
+                    if let Some(i) = n.to_i128() {
+                        return blob(i.to_string().as_bytes());
+                    }
+                    if let Some(u) = n.to_u128() {
+                        return blob(u.to_string().as_bytes());
                     }
                 }
             }

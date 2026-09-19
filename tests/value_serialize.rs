@@ -154,15 +154,15 @@ fn value_nested_in_typed_struct() -> anyhow::Result<()> {
     Ok(())
 }
 
-// --- floats beyond 64/128 bits (`value` feature) ---
+// --- floats beyond 64/128 bits ---
 
 /// A finite float whose magnitude exceeds both `i128::MAX` and `u128::MAX`
-/// still serializes: the `value`-feature fast path can tell — via
-/// `VNumber::to_i128`/`to_u128` both returning `None` — that the value is
+/// still serializes: the `facet_value::Value` downcast — unconditional, so
+/// this holds with and without the `value` feature — can tell, via
+/// `VNumber::to_i128`/`to_u128` both returning `None`, that the value is
 /// genuinely float-backed rather than the lossy image of an out-of-range
 /// integer, so it renders through the same float encoding a typed `f64`
 /// would use, producing an identical blob and OID.
-#[cfg(feature = "value")]
 #[test]
 fn large_finite_float_matches_typed_f64() -> anyhow::Result<()> {
     let (dyn_root, dyn_store) = serialize(&Value::from(1e40_f64))?;
@@ -176,9 +176,8 @@ fn large_finite_float_matches_typed_f64() -> anyhow::Result<()> {
 }
 
 /// A whole-valued float that fits `u128` (unlike `1e40` above) exercises the
-/// same fast path through its other branch — `to_u128` succeeds — and must
+/// same downcast through its other branch — `to_u128` succeeds — and must
 /// still match the typed encoding exactly.
-#[cfg(feature = "value")]
 #[test]
 fn avogadro_float_matches_typed_f64() -> anyhow::Result<()> {
     let (dyn_root, dyn_store) = serialize(&Value::from(6.022e23_f64))?;
