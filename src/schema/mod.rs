@@ -416,13 +416,18 @@ impl Schema {
         Self::from_shape_with_limit(shape, MAX_VALUE_DEPTH)
     }
 
-    /// [`from_shape`](Self::from_shape) with a custom nesting bound in place
-    /// of [`MAX_VALUE_DEPTH`], also returning the collected [`Hints`].
+    /// [`from_shape`](Self::from_shape) with an explicit nesting bound,
+    /// also returning the collected [`Hints`].
     ///
-    /// Exists so tests can exercise the depth guard without a pathologically
-    /// deep type (whose `SHAPE` evaluation is prohibitively expensive to
-    /// compile); not part of the public API.
-    #[doc(hidden)]
+    /// The nesting bound replaces [`MAX_VALUE_DEPTH`]; use it when walking a
+    /// shape that is already some levels deep in a larger structure, or when
+    /// a smaller bound must be enforced than generation's default. Passing
+    /// [`MAX_VALUE_DEPTH`] reproduces [`from_shape_with_hints`](Self::from_shape_with_hints)
+    /// exactly.
+    ///
+    /// Public rather than test-only because the bound is a real generation
+    /// parameter, not a test affordance: a caller composing schemas from
+    /// fragments can spend its own depth budget here.
     pub fn from_shape_with_limit(
         shape: &'static Shape,
         limit: usize,
@@ -493,7 +498,8 @@ struct Walker {
     /// How many types have claimed each identifier, for `_2`, `_3`, …
     /// disambiguation.
     claimed: HashMap<&'static str, usize>,
-    /// The nesting bound `node` enforces — [`MAX_VALUE_DEPTH`] outside of tests.
+    /// The nesting bound `node` enforces — [`MAX_VALUE_DEPTH`] unless the
+    /// caller of [`Schema::from_shape_with_limit`] supplied a smaller one.
     limit: usize,
     /// Rename hints collected from named-field structs' and struct enum
     /// variants' fields as they are visited.

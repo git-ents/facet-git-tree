@@ -459,8 +459,7 @@ fn excessively_nested_shape_schema_is_rejected() {
     assert!(
         matches!(err, SchemaError::MaxDepth(3)),
         "expected MaxDepth(3), got {err:?}"
-    );
-    // The same shape is comfortably within the real bound.
+    ); // The same shape is comfortably within the real bound.
     assert!(schema_of::<Nested>().is_ok());
 }
 
@@ -483,5 +482,16 @@ fn anonymous_kind_is_a_placeholder_publication_refuses() -> anyhow::Result<()> {
 
     let named = doc.with_kind("triples")?;
     named.validate()?;
+    Ok(())
+}
+
+/// The explicit-bound entry point at the default bound reproduces
+/// `from_shape_with_hints` exactly — same document, same hints — so the
+/// bound is a genuine parameter, not a test-only affordance.
+#[test]
+fn from_shape_with_limit_at_default_matches_from_shape_with_hints() -> anyhow::Result<()> {
+    let via_limit = Schema::from_shape_with_limit(<common::Person as facet::Facet>::SHAPE, 32)?;
+    let via_hints = Schema::from_shape_with_hints(<common::Person as facet::Facet>::SHAPE)?;
+    assert_eq!(via_limit, via_hints);
     Ok(())
 }
