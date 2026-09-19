@@ -122,7 +122,15 @@ fn serialize_byte_sequence<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
 ) -> Result<(ObjectId, EntryKind), SerializeError> {
+    // Bulk path: a contiguous `u8` list-like (Vec, array, slice) hands over
+    // its whole buffer in one call instead of one reflection call per byte —
+    // the per-byte loop below is the fallback for non-contiguous element
+    // storage.
     let seq = peek.into_list_like().map_err(reflect)?;
+    if let Some(bytes) = seq.as_bytes() {
+        let oid = write_leaf_blob(store, bytes)?;
+        return Ok((oid, EntryKind::Blob));
+    }
     let mut bytes = Vec::new();
     for item in seq.iter() {
         bytes.push(*item.get::<u8>().map_err(reflect)?);

@@ -476,10 +476,16 @@ fn deser_into<'facet, F: Find + ?Sized>(
             });
     }
 
-    // Byte sequence (`Vec<u8>`, `[u8; N]`): read the single blob and fill the
-    // collection one byte at a time, mirroring the serializer's blob encoding.
+    // Byte sequence (`Vec<u8>`, `[u8; N]`): read the single blob. An exact
+    // `Vec<u8>` target takes the whole buffer in one set — one reflection
+    // call instead of one per byte; every other byte-leaf shape (arrays,
+    // slice smart pointers) fills item by item below, mirroring the
+    // serializer's blob encoding.
     if matches!(classify(shape), ShapeClass::Bytes) {
         let bytes = find_blob_bytes_mode(oid, store, mode)?;
+        if shape.is_type::<Vec<u8>>() {
+            return partial.set::<Vec<u8>>(bytes).map_err(reflect);
+        }
         if matches!(shape.def, Def::Array(_)) {
             let mut partial = partial.init_array().map_err(reflect)?;
             for (i, b) in bytes.iter().enumerate() {
