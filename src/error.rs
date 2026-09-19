@@ -397,6 +397,16 @@ pub enum SchemaError {
         /// The first violated ref-name rule.
         reason: &'static str,
     },
+    /// The schema document's embedded kind is the anonymous-root sentinel.
+    ///
+    /// Two structurally different anonymous roots both carry
+    /// [`Schema::ANONYMOUS_KIND`], so publishing it would silently lose
+    /// provenance; name the document with [`Schema::with_kind`] instead.
+    #[error(
+        "schema kind is the anonymous-root sentinel; name it with `Schema::with_kind` before \
+         publication"
+    )]
+    AnonymousKind,
     /// Schema generation exceeded the maximum supported nesting depth.
     ///
     /// Mirrors [`DeserializeError::MaxDepth`]: data nested deeper than the

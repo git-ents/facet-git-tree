@@ -463,3 +463,25 @@ fn excessively_nested_shape_schema_is_rejected() {
     // The same shape is comfortably within the real bound.
     assert!(schema_of::<Nested>().is_ok());
 }
+
+/// A schema generated for a root with no valid publication name carries the
+/// deterministic [`Schema::ANONYMOUS_KIND`] sentinel — and publication
+/// refuses it: two structurally different anonymous roots would otherwise
+/// both publish under one kind, silently losing provenance. `with_kind` is
+/// the required, checked way out.
+#[test]
+fn anonymous_kind_is_a_placeholder_publication_refuses() -> anyhow::Result<()> {
+    let doc = schema_of::<[i32; 3]>()?;
+    assert_eq!(doc.kind, Schema::ANONYMOUS_KIND);
+    assert!(matches!(doc.validate(), Err(SchemaError::AnonymousKind)));
+
+    let store = facet_git_tree::ObjectStore::default();
+    assert!(
+        doc.write_pinned(&store).is_err(),
+        "an anonymous schema must not be publishable"
+    );
+
+    let named = doc.with_kind("triples")?;
+    named.validate()?;
+    Ok(())
+}

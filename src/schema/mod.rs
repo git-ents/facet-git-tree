@@ -64,6 +64,17 @@ impl Schema {
     /// [`schema_of`]. Compatibility callers that require a publication name
     /// should replace it with [`Self::with_kind`] before writing.
     pub const LEGACY_KIND: &'static str = "legacy-unknown";
+
+    /// The kind embedded in a schema generated for a root with no valid
+    /// publication name (an anonymous tuple or container).
+    ///
+    /// Deterministic so equal shapes still share an object id, but it is a
+    /// placeholder, not a publication name: two structurally different
+    /// anonymous roots both carry it, so publishing one would silently lose
+    /// provenance. [`Self::validate`] refuses it, and a publisher must
+    /// replace it via [`Self::with_kind`] — the omission is a checked error,
+    /// not a silent default.
+    pub const ANONYMOUS_KIND: &'static str = "anonymous";
 }
 
 /// The historical schema document, before [`Schema::kind`] was part of the
@@ -353,10 +364,11 @@ impl Schema {
             kind
         } else {
             // A schema generated for an anonymous/container root has no
-            // publication name to derive. Keep generation deterministic; a
-            // storage layer should replace this sentinel with its kind name
-            // through [`Schema::with_kind`] before publication.
-            "anonymous".to_owned()
+            // publication name to derive. Keep generation deterministic;
+            // [`Schema::validate`] refuses this sentinel at the publication
+            // boundary, so a storage layer cannot forget to replace it with
+            // its kind name through [`Schema::with_kind`].
+            Self::ANONYMOUS_KIND.to_owned()
         };
         Ok((
             Schema {
@@ -388,7 +400,15 @@ impl Schema {
     }
 
     /// Validate the schema document's embedded kind name.
+    ///
+    /// The anonymous-root sentinel is refused: it is a deterministic
+    /// placeholder for roots with no publication name, and publishing one
+    /// would silently lose provenance. Name the schema with
+    /// [`Self::with_kind`] before publication.
     pub fn validate(&self) -> Result<(), SchemaError> {
+        if self.kind == Self::ANONYMOUS_KIND {
+            return Err(SchemaError::AnonymousKind);
+        }
         validate_kind_name(&self.kind)
     }
 }
