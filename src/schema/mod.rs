@@ -104,7 +104,8 @@ pub enum Node {
     I64,
     /// `i128`.
     I128,
-    /// `isize`.
+    /// `isize`, spec'd i64-shaped: encoded as its decimal text within the
+    /// i64 range, so object ids never depend on pointer width.
     ISize,
     /// `u8`.
     U8,
@@ -116,7 +117,8 @@ pub enum Node {
     U64,
     /// `u128`.
     U128,
-    /// `usize`.
+    /// `usize`, spec'd u64-shaped: encoded as its decimal text within the
+    /// u64 range, so object ids never depend on pointer width.
     USize,
     /// `f32`.
     F32,

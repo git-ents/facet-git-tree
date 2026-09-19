@@ -19,9 +19,12 @@
 //! Every value in [`fixture`] must encode identically on every target and
 //! feature combination, since the generation id is a hash of them: two builds
 //! of one version that disagreed here would reject each other's documents.
-//! That rules out pointer-width-dependent extremes such as `isize::MIN`, and
-//! is why `facet-value` is an unconditional dependency rather than gated
-//! behind the `value` feature.
+//! The fixture therefore holds its `isize`/`usize` fields at values
+//! representable on every target — platform-width *extremes* are
+//! target-dependent numbers, whatever the encoding says — while the encoding
+//! itself is target-independent by construction: platform-width integers are
+//! spec'd i64/u64-shaped. This is also why `facet-value` is an
+//! unconditional dependency rather than gated behind the `value` feature.
 
 use std::collections::BTreeMap;
 
@@ -117,9 +120,10 @@ pub struct Fixture {
     pub i64: i64,
     /// `Node::I128`, at its negative extreme.
     pub i128: i128,
-    /// `Node::ISize`. Held to 32-bit range: an integer is encoded as its
-    /// decimal `Display` form, so `isize::MIN` would make the generation id
-    /// depend on the target's pointer width.
+    /// `Node::ISize`. The fixture *value* must be target-independent (the
+    /// generation id is computed from it), so it holds a value
+    /// representable in `isize` on every target; the *encoding* is
+    /// i64-shaped regardless.
     pub isize: isize,
     /// `Node::U8`, at its maximum.
     pub u8: u8,
@@ -131,7 +135,8 @@ pub struct Fixture {
     pub u64: u64,
     /// `Node::U128`, at its maximum.
     pub u128: u128,
-    /// `Node::USize`. Held to 32-bit range, for the reason on `isize`.
+    /// `Node::USize`. Held to a target-independent value, for the reason on
+    /// `isize`; the encoding is u64-shaped regardless.
     pub usize: usize,
     /// `Node::F32`: fractional, negative exponent.
     pub f32: f32,

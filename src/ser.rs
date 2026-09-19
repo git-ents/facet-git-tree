@@ -686,8 +686,22 @@ fn scalar_bytes(peek: Peek<'_, '_>) -> Result<Vec<u8>, SerializeError> {
                 }
             }
             PrimitiveType::Numeric(NumericType::Integer { .. }) => {
-                // Display also handles `isize`/`usize`, which are distinct from
-                // same-sized fixed-width types to `Peek::get`.
+                // Platform-width integers are spec'd i64/u64-shaped: they are
+                // encoded as their decimal text, exactly as the same value's
+                // fixed-width encoding would be, so object ids never depend
+                // on pointer width. The bounded conversions are infallible on
+                // every target where `usize` fits `u64`; a hypothetical wider
+                // target is refused rather than re-spelled per platform.
+                if let Ok(v) = peek.get::<isize>() {
+                    let v = i64::try_from(*v)
+                        .map_err(|_| SerializeError::UnsupportedScalar(shape.type_identifier))?;
+                    return Ok(v.to_string().into_bytes());
+                }
+                if let Ok(v) = peek.get::<usize>() {
+                    let v = u64::try_from(*v)
+                        .map_err(|_| SerializeError::UnsupportedScalar(shape.type_identifier))?;
+                    return Ok(v.to_string().into_bytes());
+                }
                 return Ok(peek.to_string().into_bytes());
             }
             _ => {}

@@ -189,13 +189,16 @@ fn write_node<W: Write + ?Sized>(
         Node::I32 => signed_blob::<i32, W>(value, "I32", path, store),
         Node::I64 => signed_blob::<i64, W>(value, "I64", path, store),
         Node::I128 => signed_blob::<i128, W>(value, "I128", path, store),
-        Node::ISize => signed_blob::<isize, W>(value, "ISize", path, store),
+        // `isize`/`usize` are spec'd i64/u64-shaped, so the schema-directed
+        // writer renders them at the fixed width: the blob is target-
+        // independent by construction, not by fixture discipline.
+        Node::ISize => signed_blob::<i64, W>(value, "ISize", path, store),
         Node::U8 => unsigned_blob::<u8, W>(value, "U8", path, store),
         Node::U16 => unsigned_blob::<u16, W>(value, "U16", path, store),
         Node::U32 => unsigned_blob::<u32, W>(value, "U32", path, store),
         Node::U64 => unsigned_blob::<u64, W>(value, "U64", path, store),
         Node::U128 => unsigned_blob::<u128, W>(value, "U128", path, store),
-        Node::USize => unsigned_blob::<usize, W>(value, "USize", path, store),
+        Node::USize => unsigned_blob::<u64, W>(value, "USize", path, store),
         Node::F64 => {
             let n = as_number(value, path)?;
             // A float-backed number is rendered at any magnitude; an

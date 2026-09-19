@@ -6,6 +6,32 @@ use rstest::rstest;
 mod common;
 use common::{find_entry, roundtrip};
 
+/// `isize`/`usize` are spec'd i64/u64-shaped: their blob is byte-identical
+/// to the fixed-width encoding of the same value, so an object id never
+/// depends on the target's pointer width. (`usize::MAX == u64::MAX` on a
+/// 64-bit target, so this pins the identity where it is observable; on a
+/// target where `usize` is narrower the same value still encodes as the
+/// same text.)
+#[test]
+fn platform_width_integers_encode_i64_u64_shaped() -> anyhow::Result<()> {
+    let (usize_root, store) = serialize(&WithUsize { value: usize::MAX })?;
+    let (u64_root, _) = serialize(&WithU64 { value: u64::MAX })?;
+    assert_eq!(usize_root, u64_root, "usize must encode u64-shaped");
+
+    let (isize_root, _) = serialize(&WithIsize { value: isize::MIN })?;
+    let (i64_root, _) = serialize(&WithI64 { value: i64::MIN })?;
+    assert_eq!(isize_root, i64_root, "isize must encode i64-shaped");
+
+    let entry = find_entry(&store, &usize_root, "value");
+    let blob = store
+        .get_blob(&entry.oid)
+        .expect("read object")
+        .expect("leaf blob");
+    // Every leaf blob carries exactly one trailing newline.
+    assert_eq!(blob, format!("{}\n", u64::MAX).as_bytes());
+    Ok(())
+}
+
 #[derive(Debug, Facet, PartialEq, Clone)]
 struct AllScalars {
     boolean: bool,

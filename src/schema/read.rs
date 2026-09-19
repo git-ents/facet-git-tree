@@ -131,12 +131,12 @@ fn read_node<F: Find + ?Sized>(
         Node::I32 => int_value::<i32, F>(oid, store, "I32", mode),
         Node::I64 => int_value::<i64, F>(oid, store, "I64", mode),
         Node::I128 => int_value::<i128, F>(oid, store, "I128", mode),
-        // `isize`/`usize` have no `From` into the 128-bit widths (their size
-        // is platform-defined), but are at most 64 bits on every supported
-        // platform, so the widening cast is lossless.
+        // `isize`/`usize` are spec'd i64/u64-shaped, so a read parses into the
+        // fixed width and widens: a 64-bit-written document reads identically
+        // on a 32-bit target instead of failing a platform-width parse.
         Node::ISize => {
             let text = blob_text(oid, store, mode)?;
-            let v: isize = text.parse().map_err(|_| invalid_scalar("ISize", &text))?;
+            let v: i64 = text.parse().map_err(|_| invalid_scalar("ISize", &text))?;
             Ok(VNumber::from_i128(v as i128).into())
         }
         Node::U8 => uint_value::<u8, F>(oid, store, "U8", mode),
@@ -146,7 +146,7 @@ fn read_node<F: Find + ?Sized>(
         Node::U128 => uint_value::<u128, F>(oid, store, "U128", mode),
         Node::USize => {
             let text = blob_text(oid, store, mode)?;
-            let v: usize = text.parse().map_err(|_| invalid_scalar("USize", &text))?;
+            let v: u64 = text.parse().map_err(|_| invalid_scalar("USize", &text))?;
             Ok(VNumber::from_u128(v as u128).into())
         }
         Node::F32 => {
