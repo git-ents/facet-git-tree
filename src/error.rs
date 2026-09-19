@@ -266,12 +266,14 @@ pub enum NormalFormError {
         /// The offending field name.
         field: String,
     },
-    /// A list holds more elements than an eight-digit ordinal can name.
+    /// A list holds more elements than eight-digit ordinals can name.
     ///
     /// The ordinal width is part of the frozen mapping, so a longer list is
-    /// refused rather than silently widened.
+    /// refused rather than silently widened. Eight-digit ordinals name
+    /// indices `0..=99_999_999`, hence at most [`MAX_LIST_LEN`] — exactly
+    /// 100_000_000 — elements, so a list of that length is accepted.
     #[error(
-        "normal-form list holds {len} elements, more than the {max} an eight-digit ordinal names"
+        "normal-form list holds {len} elements, more than the {max} eight-digit ordinals can name"
     )]
     ListTooLong {
         /// The element count.

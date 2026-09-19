@@ -106,7 +106,9 @@ pub const IDENTITY_DEF_PREFIX: &str = "identity:";
 /// deeper could not be read back regardless.
 const MAX_DEPTH: usize = 64;
 
-/// How many elements a list may hold, given eight-digit ordinals.
+/// How many elements a list may hold, given eight-digit ordinals: index
+/// `99_999_999` is the largest an eight-digit ordinal names, so a list of
+/// exactly this many elements is the largest accepted.
 const MAX_LIST_LEN: usize = 100_000_000;
 
 /// A value in the identity normal form's closed universe.
@@ -276,10 +278,10 @@ fn write_node<W: Write + ?Sized>(
 ) -> Result<(ObjectId, EntryKind), NormalFormError> {
     match value {
         NormalForm::List(items) => {
-            if items.len() >= MAX_LIST_LEN {
+            if items.len() > MAX_LIST_LEN {
                 return Err(NormalFormError::ListTooLong {
                     len: items.len(),
-                    max: MAX_LIST_LEN - 1,
+                    max: MAX_LIST_LEN,
                 });
             }
             let entries = items
@@ -552,5 +554,24 @@ fn node_name(node: &Node) -> &'static str {
         Node::RawTree => "RawTree",
         Node::Dynamic => "Dynamic",
         Node::Ref(_) => "Ref",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ordinal boundary the list length check is derived from: index
+    /// `99_999_999` is the largest an eight-digit ordinal names, so a list of
+    /// exactly `MAX_LIST_LEN` elements occupies exactly the nameable indices
+    /// and must be accepted — the check refuses `len > MAX_LIST_LEN`, not
+    /// `>=`. (`MAX_LIST_LEN` itself is too large to materialize in a test;
+    /// the guard is `ordinal(MAX_LIST_LEN - 1)` being exactly eight digits,
+    /// and this assertion is the arithmetic it rests on.)
+    #[test]
+    fn the_last_nameable_ordinal_is_eight_digits() {
+        assert_eq!(ordinal(0), "00000000");
+        assert_eq!(ordinal(99_999_999), "99999999");
+        assert_eq!(ordinal(MAX_LIST_LEN).len(), 9);
     }
 }
