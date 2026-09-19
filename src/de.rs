@@ -228,12 +228,10 @@ pub(crate) fn strip_leaf_newline(
     mut bytes: Vec<u8>,
     mode: DecodeMode,
 ) -> Result<Vec<u8>, DeserializeError> {
+    // Both modes strip the mandatory trailing newline; legacy mode
+    // additionally accepts its historical absence.
     match (mode, bytes.last().copied()) {
-        (DecodeMode::Strict, Some(b'\n')) => {
-            bytes.pop();
-            Ok(bytes)
-        }
-        (DecodeMode::LegacyLeaves, Some(b'\n')) => {
+        (DecodeMode::Strict | DecodeMode::LegacyLeaves, Some(b'\n')) => {
             bytes.pop();
             Ok(bytes)
         }

@@ -531,6 +531,10 @@ impl Walker {
     /// reference adds no tree level, so a marked subtree encodes exactly as
     /// an unmarked one does. Bodies are deduplicated, and an already-marked
     /// node is returned untouched, so marking is idempotent.
+    ///
+    /// Dedup is a linear scan of `defs`, which is fine for the handful of
+    /// marked subtrees a schema carries; index by body if marked subtrees
+    /// ever number in the thousands.
     fn mark_identity(&mut self, node: Node, marked: bool) -> Node {
         if !marked {
             return node;

@@ -99,7 +99,7 @@ pub(crate) fn serialize_node<W: Write + ?Sized>(
         ShapeClass::Scalar => serialize_leaf(peek, store),
         ShapeClass::Bytes => serialize_byte_sequence(peek, store),
         ShapeClass::Struct => serialize_struct(peek, store, depth),
-        ShapeClass::Sequence => serialize_sequence_node(peek, store, depth),
+        ShapeClass::Sequence => serialize_sequence(peek, store, depth),
         ShapeClass::Map => serialize_map(peek, store, depth),
         ShapeClass::Option => serialize_option(peek, store, depth),
         ShapeClass::Enum => serialize_enum(peek, store, depth),
@@ -169,12 +169,23 @@ fn serialize_struct<W: Write + ?Sized>(
     Ok((write_sorted_tree(store, entries)?, EntryKind::Tree))
 }
 
-fn serialize_sequence_node<W: Write + ?Sized>(
+/// Serialize a sequence: one ordinal-named entry per element, or the
+/// presence marker when the sequence is empty.
+fn serialize_sequence<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
     depth: usize,
 ) -> Result<(ObjectId, EntryKind), SerializeError> {
-    let entries = serialize_sequence(peek, store, depth)?;
+    let seq = peek.into_list_like().map_err(reflect)?;
+    let mut entries: Vec<TreeEntry> = Vec::new();
+    for (i, item) in seq.iter().enumerate() {
+        let (oid, kind) = serialize_node(item, store, depth + 1)?;
+        entries.push(TreeEntry {
+            mode: EntryMode::from(kind),
+            filename: format!("{i:04}").into(),
+            oid,
+        });
+    }
     Ok((
         write_tree_or_presence_marker(store, entries)?,
         EntryKind::Tree,
@@ -389,7 +400,8 @@ fn serialize_dynamic<W: Write + ?Sized>(
                 .ok_or_else(|| reflect("dynamic bool unreadable"))?;
             blob(if b { "true" } else { "false" }.as_bytes())
         }
-        // Dynamic chars are surfaced as their UTF-8 string representation.
+        // Strings (and dynamic chars, which surface through this same arm
+        // as their UTF-8 representation rather than a kind of their own).
         DynValueKind::String => {
             let s = dv
                 .as_str()
@@ -580,24 +592,6 @@ fn value_special_text(peek: Peek<'_, '_>) -> Result<Option<String>, SerializeErr
         }));
     }
     Ok(None)
-}
-
-fn serialize_sequence<W: Write + ?Sized>(
-    peek: Peek<'_, '_>,
-    store: &W,
-    depth: usize,
-) -> Result<Vec<TreeEntry>, SerializeError> {
-    let seq = peek.into_list_like().map_err(reflect)?;
-    let mut entries: Vec<TreeEntry> = Vec::new();
-    for (i, item) in seq.iter().enumerate() {
-        let (oid, kind) = serialize_node(item, store, depth + 1)?;
-        entries.push(TreeEntry {
-            mode: EntryMode::from(kind),
-            filename: format!("{i:04}").into(),
-            oid,
-        });
-    }
-    Ok(entries)
 }
 
 /// A float type [`float_text`] can canonicalize (`f32`, `f64`).
