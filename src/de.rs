@@ -256,23 +256,45 @@ pub(crate) fn strip_leaf_newline(
 pub(crate) fn sort_by_ordinal(
     entries: &mut [(String, ObjectId, EntryKind)],
 ) -> Result<(), DeserializeError> {
-    // Validate up front so the infallible sort key below cannot misorder entries.
-    for (name, _, _) in entries.iter() {
-        name.parse::<usize>()
-            .map_err(|_| DeserializeError::InvalidOrdinal(name.clone()))?;
-    }
-    entries
-        .sort_by_cached_key(|(name, _, _)| name.parse::<usize>().expect("ordinal validated above"));
+    // Parse each name exactly once into an `OrdinalEntry`; the ordinal is then
+    // a real field, so the sort key and the duplicate check need no re-parse
+    // whose correctness would rest on a separate validation pass.
+    let mut parsed: Vec<OrdinalEntry> = entries
+        .iter()
+        .map(|(name, oid, kind)| {
+            let ordinal = name
+                .parse::<usize>()
+                .map_err(|_| DeserializeError::InvalidOrdinal(name.clone()))?;
+            Ok(OrdinalEntry {
+                ordinal,
+                name: name.clone(),
+                oid: *oid,
+                kind: *kind,
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    parsed.sort_unstable_by_key(|entry| entry.ordinal);
     // Duplicates are now adjacent, so a single pass over sorted windows finds
     // any pair of entries claiming the same index.
-    for pair in entries.windows(2) {
-        let ordinal = |name: &str| name.parse::<usize>().expect("ordinal validated above");
-        let (a, b) = (ordinal(&pair[0].0), ordinal(&pair[1].0));
-        if a == b {
-            return Err(DeserializeError::DuplicateOrdinal(a));
+    for pair in parsed.windows(2) {
+        if pair[0].ordinal == pair[1].ordinal {
+            return Err(DeserializeError::DuplicateOrdinal(pair[0].ordinal));
         }
     }
+    for (entry, slot) in parsed.into_iter().zip(entries.iter_mut()) {
+        *slot = (entry.name, entry.oid, entry.kind);
+    }
     Ok(())
+}
+
+/// One sequence entry with its name parsed to an ordinal: the invariant that
+/// every entry's name is a valid decimal index is structural, so nothing
+/// downstream re-parses or re-validates it.
+struct OrdinalEntry {
+    ordinal: usize,
+    name: String,
+    oid: ObjectId,
+    kind: EntryKind,
 }
 
 /// The `k`/`v` object ids of a composite-key map pair sub-tree.
