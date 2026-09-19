@@ -11,6 +11,9 @@
 //! The normative rules live in `docs/specification.adoc` under
 //! `schema.representation` and `schema.generation`.
 
+#[cfg(feature = "value")]
+pub(crate) mod path;
+
 pub mod codec;
 pub mod pin;
 #[cfg(feature = "value")]
@@ -29,6 +32,9 @@ use crate::error::SchemaError;
 use crate::limits::MAX_VALUE_DEPTH;
 use crate::migration::{Hints, Target};
 use crate::normal_form::IDENTITY_DEF_PREFIX;
+
+#[cfg(feature = "value")]
+use facet_value::Value;
 
 /// A complete, self-contained schema document.
 ///
@@ -255,6 +261,69 @@ impl DefaultFieldNode for Node {
 impl DefaultFieldNode for StructField {
     fn has_default(&self) -> bool {
         self.has_default
+    }
+}
+
+/// Whether `schema` is a scalar node — the classification that decides map
+/// layout identically on the read side ([`Node::Map`]), the schema-directed
+/// writer, and the migration walk. One home: the layout decision must not
+/// be able to drift between the walks that must agree on it.
+#[cfg(feature = "value")]
+pub(crate) fn is_scalar_schema(schema: &Node) -> bool {
+    matches!(
+        schema,
+        Node::Bool
+            | Node::Char
+            | Node::String
+            | Node::I8
+            | Node::I16
+            | Node::I32
+            | Node::I64
+            | Node::I128
+            | Node::ISize
+            | Node::U8
+            | Node::U16
+            | Node::U32
+            | Node::U64
+            | Node::U128
+            | Node::USize
+            | Node::F32
+            | Node::F64
+    )
+}
+
+/// A dynamic value's runtime kind, for mismatch diagnostics in the
+/// schema-directed writer and the migration walk.
+///
+/// One home with the full arm set: the migration walk's copy had drifted to
+/// omit char/datetime/qname/uuid, so a `char` value reported `"value"` in
+/// migration errors but `"char"` in write errors.
+#[cfg(feature = "value")]
+pub(crate) fn value_kind(v: &Value) -> &'static str {
+    if v.is_null() {
+        "null"
+    } else if v.is_bool() {
+        "bool"
+    } else if v.is_number() {
+        "number"
+    } else if v.is_string() {
+        "string"
+    } else if v.is_bytes() {
+        "bytes"
+    } else if v.is_array() {
+        "array"
+    } else if v.is_object() {
+        "object"
+    } else if v.is_char() {
+        "char"
+    } else if v.is_datetime() {
+        "datetime"
+    } else if v.is_qname() {
+        "qname"
+    } else if v.is_uuid() {
+        "uuid"
+    } else {
+        "value"
     }
 }
 

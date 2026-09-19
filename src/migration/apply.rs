@@ -15,13 +15,13 @@
 
 use std::collections::BTreeMap;
 
-use core::fmt::Write as _;
 use facet_value::{VArray, VNumber, VObject, Value};
 
 use crate::error::MigrationError;
 use crate::limits::MAX_VALUE_DEPTH;
 use crate::migration::{Change, Constant, Migration, Target};
-use crate::schema::{FieldNode, Node, Schema, VariantKind};
+use crate::schema::path::Path;
+use crate::schema::{FieldNode, Node, Schema, VariantKind, is_scalar_schema, value_kind};
 
 /// Upcast a value read against `from` into one conforming to the schema on
 /// the far side of `migration`.
@@ -55,63 +55,6 @@ pub fn apply_chain(value: &Value, chain: &[Edge<'_>]) -> Result<Value, Migration
         current = apply(&current, edge.from, edge.migration)?;
     }
     Ok(current)
-}
-
-/// A location within the value being walked, threaded through so a mismatch
-/// can name exactly where it happened. Mirrors `schema::write`'s `Path`.
-struct Path<'a> {
-    parent: Option<&'a Path<'a>>,
-    seg: Seg<'a>,
-}
-
-enum Seg<'a> {
-    Root,
-    Field(&'a str),
-    Index(usize),
-}
-
-impl<'a> Path<'a> {
-    const ROOT: Path<'static> = Path {
-        parent: None,
-        seg: Seg::Root,
-    };
-
-    fn field<'b>(&'b self, name: &'b str) -> Path<'b> {
-        Path {
-            parent: Some(self),
-            seg: Seg::Field(name),
-        }
-    }
-
-    fn index<'b>(&'b self, i: usize) -> Path<'b> {
-        Path {
-            parent: Some(self),
-            seg: Seg::Index(i),
-        }
-    }
-
-    fn show(&self) -> String {
-        let mut segs = Vec::new();
-        let mut cur = Some(self);
-        while let Some(p) = cur {
-            segs.push(&p.seg);
-            cur = p.parent;
-        }
-        let mut s = String::from("$");
-        for seg in segs.into_iter().rev() {
-            match seg {
-                Seg::Root => {}
-                Seg::Field(name) => {
-                    s.push('.');
-                    s.push_str(name);
-                }
-                Seg::Index(i) => {
-                    let _ = write!(s, "[{i}]");
-                }
-            }
-        }
-        s
-    }
 }
 
 /// Migrate one schema node's value.
@@ -460,51 +403,4 @@ fn mismatch_kind(path: &Path, expected: &'static str, found: &'static str) -> Mi
         expected,
         found,
     }
-}
-
-/// A value's runtime kind, for [`MigrationError::Mismatch`] diagnostics.
-fn value_kind(v: &Value) -> &'static str {
-    if v.is_null() {
-        "null"
-    } else if v.is_bool() {
-        "bool"
-    } else if v.is_number() {
-        "number"
-    } else if v.is_string() {
-        "string"
-    } else if v.is_bytes() {
-        "bytes"
-    } else if v.is_array() {
-        "array"
-    } else if v.is_object() {
-        "object"
-    } else {
-        "value"
-    }
-}
-
-/// Whether `schema` decides scalar-keyed map layout. Mirrors the read path's
-/// `is_scalar_schema` (`schema/read.rs`), duplicated here since that one is
-/// private to its module.
-fn is_scalar_schema(schema: &Node) -> bool {
-    matches!(
-        schema,
-        Node::Bool
-            | Node::Char
-            | Node::String
-            | Node::I8
-            | Node::I16
-            | Node::I32
-            | Node::I64
-            | Node::I128
-            | Node::ISize
-            | Node::U8
-            | Node::U16
-            | Node::U32
-            | Node::U64
-            | Node::U128
-            | Node::USize
-            | Node::F32
-            | Node::F64
-    )
 }

@@ -20,7 +20,7 @@ use crate::de::{
 };
 use crate::error::{DeserializeError, SchemaReadError};
 use crate::limits::MAX_VALUE_DEPTH;
-use crate::schema::{DefaultFieldNode, Node, Schema, VariantKind};
+use crate::schema::{DefaultFieldNode, Node, Schema, VariantKind, is_scalar_schema};
 use crate::{EntryKind, ObjectId};
 
 /// Deserialize the tree at `root` into a full-fidelity [`Value`], guided by
@@ -367,31 +367,6 @@ fn read_tuple<F: Find + ?Sized>(
         array.push(read_node(child_oid, elem, doc, store, depth + 1, mode)?);
     }
     Ok(array)
-}
-
-/// Whether `schema` is a scalar node, deciding the map layout exactly as
-/// `Def::Scalar` does on the write side.
-fn is_scalar_schema(schema: &Node) -> bool {
-    matches!(
-        schema,
-        Node::Bool
-            | Node::Char
-            | Node::String
-            | Node::I8
-            | Node::I16
-            | Node::I32
-            | Node::I64
-            | Node::I128
-            | Node::ISize
-            | Node::U8
-            | Node::U16
-            | Node::U32
-            | Node::U64
-            | Node::U128
-            | Node::USize
-            | Node::F32
-            | Node::F64
-    )
 }
 
 /// Verify that `oid` is an empty tree (a `Unit` value or unit variant

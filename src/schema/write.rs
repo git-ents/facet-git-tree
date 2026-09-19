@@ -22,7 +22,6 @@
 //! The normative mapping lives in `docs/specification.adoc` under
 //! `serialization.schema-directed`.
 
-use core::fmt::Write as _;
 use std::collections::BTreeMap;
 
 use facet::Peek;
@@ -31,7 +30,8 @@ use gix_object::Write;
 
 use crate::error::{SchemaWriteError, SerializeError};
 use crate::limits::MAX_VALUE_DEPTH;
-use crate::schema::{DefaultFieldNode, Node, Schema, VariantKind};
+use crate::schema::path::Path;
+use crate::schema::{DefaultFieldNode, Node, Schema, VariantKind, is_scalar_schema, value_kind};
 use crate::ser::{float_text, serialize_node, write_leaf_blob};
 use crate::{EntryKind, EntryMode, ObjectId, TreeEntry, check_key};
 
@@ -70,68 +70,6 @@ pub fn serialize_value_with_schema<W: Write + ?Sized>(
 ) -> Result<ObjectId, SchemaWriteError> {
     let (oid, _kind) = write_node(value, &doc.root, doc, store, &Path::ROOT, 0)?;
     Ok(oid)
-}
-
-/// A location within the value being written, threaded through the walk so a
-/// mismatch can name exactly where it happened.
-///
-/// Borrowed and stack-linked, so the happy path allocates nothing; only
-/// [`Path::show`] materializes a string, at the point an error is built.
-struct Path<'a> {
-    parent: Option<&'a Path<'a>>,
-    seg: Seg<'a>,
-}
-
-enum Seg<'a> {
-    Root,
-    Field(&'a str),
-    Index(usize),
-}
-
-impl<'a> Path<'a> {
-    const ROOT: Path<'static> = Path {
-        parent: None,
-        seg: Seg::Root,
-    };
-
-    fn field<'b>(&'b self, name: &'b str) -> Path<'b> {
-        Path {
-            parent: Some(self),
-            seg: Seg::Field(name),
-        }
-    }
-
-    fn index<'b>(&'b self, i: usize) -> Path<'b> {
-        Path {
-            parent: Some(self),
-            seg: Seg::Index(i),
-        }
-    }
-
-    /// Render the path from the root as `$.field[0].inner`.
-    fn show(&self) -> String {
-        let mut segs = Vec::new();
-        let mut cur = Some(self);
-        while let Some(p) = cur {
-            segs.push(&p.seg);
-            cur = p.parent;
-        }
-        let mut s = String::from("$");
-        for seg in segs.into_iter().rev() {
-            match seg {
-                Seg::Root => {}
-                Seg::Field(name) => {
-                    s.push('.');
-                    s.push_str(name);
-                }
-                // Writing to a String is infallible.
-                Seg::Index(i) => {
-                    let _ = write!(s, "[{i}]");
-                }
-            }
-        }
-        s
-    }
 }
 
 /// Write one schema node's value from `value`.
@@ -701,58 +639,4 @@ fn number_text(n: &VNumber) -> String {
     } else {
         n.to_f64_lossy().to_string()
     }
-}
-
-/// A value's runtime kind, for mismatch messages.
-fn value_kind(v: &Value) -> &'static str {
-    if v.is_null() {
-        "null"
-    } else if v.is_bool() {
-        "bool"
-    } else if v.is_number() {
-        "number"
-    } else if v.is_string() {
-        "string"
-    } else if v.is_bytes() {
-        "bytes"
-    } else if v.is_array() {
-        "array"
-    } else if v.is_object() {
-        "object"
-    } else if v.is_char() {
-        "char"
-    } else if v.is_datetime() {
-        "datetime"
-    } else if v.is_qname() {
-        "qname"
-    } else if v.is_uuid() {
-        "uuid"
-    } else {
-        "value"
-    }
-}
-
-/// Whether `schema` is a scalar node — the same classification that decides
-/// map layout on read.
-fn is_scalar_schema(schema: &Node) -> bool {
-    matches!(
-        schema,
-        Node::Bool
-            | Node::Char
-            | Node::String
-            | Node::I8
-            | Node::I16
-            | Node::I32
-            | Node::I64
-            | Node::I128
-            | Node::ISize
-            | Node::U8
-            | Node::U16
-            | Node::U32
-            | Node::U64
-            | Node::U128
-            | Node::USize
-            | Node::F32
-            | Node::F64
-    )
 }
