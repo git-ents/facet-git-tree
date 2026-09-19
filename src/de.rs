@@ -542,24 +542,37 @@ fn deser_into<'facet, F: Find + ?Sized>(
             facet::StructKind::Tuple | facet::StructKind::TupleStruct
         );
         let entries = find_tree_entries(oid, store)?;
+        let mut matched = vec![false; entries.len()];
         let mut partial = partial;
         for (i, field) in st.fields.iter().enumerate() {
-            // Find this field's entry in the tree
             let entry_name = if positional {
                 format!("{i:04}")
             } else {
                 field.name.to_string()
             };
-            let entry = entries.iter().find(|(name, _, _)| *name == entry_name);
-            if let Some((_, child_oid, _)) = entry {
-                let child_oid = *child_oid;
-                partial = partial.begin_field(field.name).map_err(|e| {
-                    DeserializeError::Reflect(format!("begin_field {}: {e}", field.name))
-                })?;
-                partial = deser_into(partial, &child_oid, store, depth + 1, mode)?;
-                partial = partial.end().map_err(|e| {
-                    DeserializeError::Reflect(format!("end field {}: {e}", field.name))
-                })?;
+            match entries.iter().position(|(name, _, _)| *name == entry_name) {
+                Some(pos) => {
+                    let child_oid = entries[pos].1;
+                    matched[pos] = true;
+                    partial = partial.begin_field(field.name).map_err(|e| {
+                        DeserializeError::Reflect(format!("begin_field {}: {e}", field.name))
+                    })?;
+                    partial = deser_into(partial, &child_oid, store, depth + 1, mode)?;
+                    partial = partial.end().map_err(|e| {
+                        DeserializeError::Reflect(format!("end field {}: {e}", field.name))
+                    })?;
+                }
+                // A defaulted field may be absent; any other missing field
+                // means the tree does not describe this type.
+                None if field.has_default() => {}
+                None => return Err(DeserializeError::MissingField { field: entry_name }),
+            }
+        }
+        for (pos, m) in matched.iter().enumerate() {
+            if !*m && !crate::schema::pin::is_splice_entry(&entries[pos].0) {
+                return Err(DeserializeError::UnexpectedEntry {
+                    entry: entries[pos].0.clone(),
+                });
             }
         }
         return Ok(partial);
@@ -674,9 +687,17 @@ fn deser_into<'facet, F: Find + ?Sized>(
         let newtype = positional && variant.is_some_and(|v| v.data.fields.len() == 1);
         let is_unit = variant.is_some_and(|v| v.data.fields.is_empty());
 
+        // `select_variant_named` is the authority on whether `variant_name`
+        // even exists; its failure is collapsed to text exactly as before.
         let mut partial = partial.select_variant_named(&variant_name).map_err(|e| {
             DeserializeError::Reflect(format!("select variant {variant_name}: {e}"))
         })?;
+        let Some(variant) = variant else {
+            // `select_variant_named` already rejected the unknown name; this
+            // arm only satisfies the borrow checker's view of the fallible
+            // lookup above.
+            return Ok(partial);
+        };
 
         let inner_oid = match (is_unit, inner_oid) {
             // Unit variant, tagged with a blob: nothing further to read — the
@@ -703,6 +724,30 @@ fn deser_into<'facet, F: Find + ?Sized>(
         }
 
         let inner_entries = find_tree_entries(&inner_oid, store)?;
+        let fields = &variant.data.fields;
+        let mut matched = vec![false; inner_entries.len()];
+        for (i, field) in fields.iter().enumerate() {
+            let entry_name = if positional {
+                format!("{i:04}")
+            } else {
+                field.name.to_string()
+            };
+            match inner_entries
+                .iter()
+                .position(|(name, _, _)| *name == entry_name)
+            {
+                Some(pos) => matched[pos] = true,
+                None if field.has_default() => {}
+                None => return Err(DeserializeError::MissingField { field: entry_name }),
+            }
+        }
+        for (pos, m) in matched.iter().enumerate() {
+            if !*m && !crate::schema::pin::is_splice_entry(&inner_entries[pos].0) {
+                return Err(DeserializeError::UnexpectedEntry {
+                    entry: inner_entries[pos].0.clone(),
+                });
+            }
+        }
         for (name, child_oid, _) in inner_entries {
             if positional {
                 let idx = name

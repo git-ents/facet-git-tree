@@ -245,6 +245,28 @@ pub enum DeserializeError {
         /// The missing entry name (`"k"` or `"v"`).
         entry: &'static str,
     },
+    /// A struct tree lacks the entry a non-defaulted field requires.
+    ///
+    /// Fields carrying a `facet` default may be absent — that is the
+    /// documented leniency for defaults — but a field with no default that
+    /// is missing from the tree can only mean a foreign or stale tree.
+    /// Reporting it here, with the entry name, beats the opaque facet build
+    /// error ("build failed: …") the silent skip used to surface as.
+    #[error("struct field {field:?} is missing from the tree")]
+    MissingField {
+        /// The field (or positional-ordinal name) the tree omits.
+        field: String,
+    },
+    /// A tree entry has no counterpart field in the target type.
+    ///
+    /// Without this check a foreign tree sharing even one field name would
+    /// read "successfully" while its remaining entries were silently
+    /// dropped — indistinguishable from a value the tree never described.
+    #[error("tree entry {entry:?} has no counterpart in the target type")]
+    UnexpectedEntry {
+        /// The entry name found in the tree.
+        entry: String,
+    },
     /// The target type is not supported by this encoding.
     ///
     /// Holds the type identifier of the unsupported shape.

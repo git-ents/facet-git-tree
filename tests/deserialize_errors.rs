@@ -14,6 +14,8 @@
 //!   DeserializeError::UnitVariantIsTree    — a unit variant tagged with a tree, not a blob
 //!   DeserializeError::VariantPayloadIsBlob — a non-unit variant tagged with a blob, not a tree
 //!   DeserializeError::MissingLeafNewline   — a leaf blob is missing its mandatory trailing newline
+//!   DeserializeError::MissingField     — a struct tree omits a non-defaulted field
+//!   DeserializeError::UnexpectedEntry  — a tree entry has no counterpart field
 
 use facet::Facet;
 use facet_git_tree::{
@@ -250,5 +252,110 @@ fn excessively_deep_tree_is_rejected() {
     assert!(
         matches!(result, Err(DeserializeError::MaxDepth(_))),
         "deeply nested tree must be MaxDepth, got {result:?}"
+    );
+}
+
+// --- struct / enum field correspondence (MissingField, UnexpectedEntry) ---
+
+/// A struct tree missing a non-defaulted field is reported with the field's
+/// name, instead of the opaque facet build error the silent skip surfaced as.
+#[test]
+fn missing_struct_field_is_reported_by_name() {
+    let store = ObjectStore::default();
+    let x_blob = store.write_buf(Kind::Blob, b"1.0\n").expect("write blob");
+    let tree = write_tree(&store, &[("x", EntryKind::Blob, x_blob)]);
+
+    let result: Result<Point, _> = deserialize(&tree, &store);
+    assert!(
+        matches!(result, Err(DeserializeError::MissingField { field }) if field == "y"),
+        "missing field must be MissingField naming \"y\""
+    );
+}
+
+/// A struct tree carrying an entry the target type does not define is
+/// rejected: without this, a foreign tree sharing one field name would read
+/// "successfully" with the extra entry silently dropped.
+#[test]
+fn unexpected_struct_entry_is_rejected() {
+    let store = ObjectStore::default();
+    let x_blob = store.write_buf(Kind::Blob, b"1.0\n").expect("write blob");
+    let y_blob = store.write_buf(Kind::Blob, b"2.0\n").expect("write blob");
+    let tree = write_tree(
+        &store,
+        &[
+            ("x", EntryKind::Blob, x_blob),
+            ("y", EntryKind::Blob, y_blob),
+            ("z", EntryKind::Blob, x_blob),
+        ],
+    );
+
+    let result: Result<Point, _> = deserialize(&tree, &store);
+    assert!(
+        matches!(result, Err(DeserializeError::UnexpectedEntry { entry }) if entry == "z"),
+        "extra entry must be UnexpectedEntry naming \"z\""
+    );
+}
+
+/// An enum tuple variant whose ordinal entries have a gap (`0000`, `0002`)
+/// is reported as a missing field naming the gap, not an opaque build error.
+#[test]
+fn tuple_variant_ordinal_gap_is_reported() {
+    #[derive(Debug, Facet, PartialEq)]
+    #[repr(u8)]
+    enum Tagged {
+        Unit,
+        Pair(i32, String),
+        Named {
+            /// An arbitrary field.
+            a: i32,
+        },
+    }
+
+    let store = ObjectStore::default();
+    let one = store.write_buf(Kind::Blob, b"1\n").expect("write blob");
+    let text = store.write_buf(Kind::Blob, b"two\n").expect("write blob");
+    let payload = write_tree(
+        &store,
+        &[
+            ("0000", EntryKind::Blob, one),
+            ("0002", EntryKind::Blob, text),
+        ],
+    );
+    let tree = write_tree(&store, &[("Pair", EntryKind::Tree, payload)]);
+
+    let result: Result<Tagged, _> = deserialize(&tree, &store);
+    assert!(
+        matches!(result, Err(DeserializeError::MissingField { field }) if field == "0001"),
+        "the ordinal gap must be MissingField naming \"0001\""
+    );
+}
+
+/// A struct variant carrying an entry no field defines is rejected with the
+/// entry's name, exactly as a struct's extra entries are.
+#[test]
+fn struct_variant_unexpected_entry_is_rejected() {
+    #[derive(Debug, Facet, PartialEq)]
+    #[repr(u8)]
+    enum Tagged {
+        Unit,
+        Named {
+            /// An arbitrary field.
+            a: i32,
+        },
+    }
+
+    let store = ObjectStore::default();
+    let one = store.write_buf(Kind::Blob, b"1\n").expect("write blob");
+    let text = store.write_buf(Kind::Blob, b"two\n").expect("write blob");
+    let payload = write_tree(
+        &store,
+        &[("a", EntryKind::Blob, one), ("b", EntryKind::Blob, text)],
+    );
+    let tree = write_tree(&store, &[("Named", EntryKind::Tree, payload)]);
+
+    let result: Result<Tagged, _> = deserialize(&tree, &store);
+    assert!(
+        matches!(result, Err(DeserializeError::UnexpectedEntry { entry }) if entry == "b"),
+        "extra variant entry must be UnexpectedEntry naming \"b\""
     );
 }

@@ -417,6 +417,19 @@ fn decode_legacy<F: Find + ?Sized>(tree: &ObjectId, store: &F) -> Result<Schema,
     })
 }
 
+/// Whether `name` is a tree entry the pin towers splice onto documents at
+/// write time.
+///
+/// Spliced entries — the schema-schema pin and the codec fixture — are
+/// storage metadata, not fields of the document's Rust type, so a typed
+/// read of a pinned document must exempt them from its strict
+/// unexpected-entry check ([`DeserializeError::UnexpectedEntry`]). Before
+/// that check existed they were silently skipped; this keeps the
+/// load-bearing tolerance, but explicit and by name.
+pub(crate) fn is_splice_entry(name: &str) -> bool {
+    name == SchemaSchema::ENTRY || name == codec::ENTRY
+}
+
 /// The known generations, rendered for [`SchemaPinError::Unrecognized`]'s
 /// message. A private helper rather than a stored field: `KNOWN` is a
 /// compile-time constant, not state the error needs to carry.
