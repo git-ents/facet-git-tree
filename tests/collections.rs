@@ -251,9 +251,10 @@ fn map_with_smart_pointer_scalar_keys_is_name_keyed() {
 
 /// A map with composite (struct) keys records each pair as a `{ k, v }` sub-tree.
 ///
-/// Per spec serialization.design.trees.collections item 2b, composite keys have no
-/// faithful textual form, so the map's entries are ordinal-named and point at a
-/// two-entry sub-tree carrying the independently-encoded key and value.
+/// Composite keys have no faithful textual form, so each pair is encoded
+/// independently as a two-entry sub-tree — and the map's entry naming that
+/// sub-tree is the pair tree's own object id, so the map is content-addressed
+/// rather than ordered.
 #[test]
 fn map_with_composite_keys_uses_pair_subtrees() {
     let mut table = HashMap::new();
@@ -266,7 +267,11 @@ fn map_with_composite_keys_uses_pair_subtrees() {
 
     let pairs = tree_entries(&store, &map_id);
     assert_eq!(pairs.len(), 1, "one pair entry expected");
-    assert_eq!(pairs[0].filename, "0000", "pair entries are ordinal-named");
+    assert_eq!(
+        pairs[0].filename,
+        pairs[0].oid.to_string(),
+        "pair entries are named by their pair tree's own object id"
+    );
 
     let (kmode, k_id) = get_tree_entry_mode(&store, &pairs[0].oid, "k");
     let (vmode, v_id) = get_tree_entry_mode(&store, &pairs[0].oid, "v");
@@ -305,6 +310,46 @@ fn map_with_composite_keys_roundtrips_order_independently() {
 
     let got: WithCompositeKeyMap = deserialize(&id_a, &store).expect("deserialize");
     assert_eq!(got.table, a, "composite-keyed map must round-trip");
+}
+
+/// Adding one pair leaves every existing pair's entry name untouched, so a
+/// `git diff` of the two trees shows exactly one added entry. Ordinal
+/// naming could not do this: a pair whose object id sorted before existing
+/// ones would renumber the entire suffix, presenting N modified entries for
+/// a semantically single-pair addition.
+#[test]
+fn adding_a_pair_does_not_rename_existing_pairs() {
+    let mut small = HashMap::new();
+    small.insert(Coord { x: 5, y: 5 }, "a".to_string());
+    small.insert(Coord { x: 6, y: 6 }, "b".to_string());
+
+    let (small_root, small_store) = serialize(&WithCompositeKeyMap {
+        table: small.clone(),
+    })
+    .expect("serialize");
+    let (_, small_map) = get_tree_entry_mode(&small_store, &small_root, "table");
+    let small_entries = tree_entries(&small_store, &small_map);
+
+    let mut grown = small;
+    // A pair whose sub-tree id is likely to sort before the existing ones'
+    // — the case ordinal naming handled by renumbering everything after it.
+    grown.insert(Coord { x: -9, y: -9 }, "z".to_string());
+
+    let (grown_root, grown_store) =
+        serialize(&WithCompositeKeyMap { table: grown }).expect("serialize");
+    let (_, grown_map) = get_tree_entry_mode(&grown_store, &grown_root, "table");
+    let grown_entries = tree_entries(&grown_store, &grown_map);
+
+    assert_eq!(grown_entries.len(), small_entries.len() + 1);
+    for entry in &small_entries {
+        assert!(
+            grown_entries
+                .iter()
+                .any(|g| g.filename == entry.filename && g.oid == entry.oid),
+            "existing pair entry {} must keep its name and target",
+            entry.filename
+        );
+    }
 }
 
 proptest! {
@@ -379,13 +424,12 @@ proptest! {
         let (_, map_id) = get_tree_entry_mode(&store, &root, "table");
         let pairs = tree_entries(&store, &map_id);
         prop_assert_eq!(pairs.len(), expected);
-        let mut ordinals: Vec<_> = pairs
-            .iter()
-            .map(|pair| pair.filename.to_string().parse::<usize>().expect("ordinal"))
-            .collect();
-        ordinals.sort_unstable();
-        prop_assert_eq!(ordinals, (0..expected).collect::<Vec<_>>());
-        for pair in pairs {
+        for pair in &pairs {
+            prop_assert_eq!(
+                pair.filename.to_string(),
+                pair.oid.to_string(),
+                "each pair entry is named by its pair tree's own object id"
+            );
             let pair_entries = tree_entries(&store, &pair.oid);
             prop_assert_eq!(pair_entries.len(), 2);
             prop_assert!(pair_entries.iter().any(|entry| entry.filename == "k"));

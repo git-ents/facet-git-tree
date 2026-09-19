@@ -412,12 +412,14 @@ fn write_seq<'s, W: Write + ?Sized>(
     tree(store, entries)
 }
 
-/// Encode a composite-key map as ordinal-named `{ k, v }` pair sub-trees.
+/// Encode a composite-key map as `{ k, v }` pair sub-trees named by each
+/// pair tree's own object id.
 ///
 /// The value is the pair array the read path produces: an [`Array`] of
-/// two-member objects `{ "k": …, "v": … }`. Pair sub-trees are sorted by their
-/// own object id before ordinal assignment, exactly as the typed encoder does,
-/// so the map stays content-addressed independent of array order.
+/// two-member objects `{ "k": …, "v": … }`. Pair entries are named by the
+/// pair sub-tree's own object id — exactly as the typed encoder does (see
+/// [`crate::ser`]'s map serialization for why content names beat ordinals) —
+/// so the map is content-addressed independent of array order.
 ///
 /// [`Array`]: facet_value::Value::as_array
 fn write_composite_map<W: Write + ?Sized>(
@@ -430,7 +432,8 @@ fn write_composite_map<W: Write + ?Sized>(
     depth: usize,
 ) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
     let arr = as_array(value, path)?;
-    let mut pair_oids: Vec<ObjectId> = Vec::with_capacity(arr.len());
+    let mut entries = Vec::with_capacity(arr.len());
+    let mut pair_oids = std::collections::BTreeSet::new();
     for (i, item) in arr.as_slice().iter().enumerate() {
         let ipath = path.index(i);
         let obj = as_object(item, &ipath)?;
@@ -456,14 +459,15 @@ fn write_composite_map<W: Write + ?Sized>(
         ];
         pair.sort();
         let (pair_oid, _) = tree(store, pair)?;
-        pair_oids.push(pair_oid);
-    }
-    pair_oids.sort();
-    let mut entries = Vec::with_capacity(pair_oids.len());
-    for (i, pair_oid) in pair_oids.into_iter().enumerate() {
+        if !pair_oids.insert(pair_oid) {
+            return Err(SerializeError::DuplicatePair { oid: pair_oid }.into());
+        }
         entries.push(TreeEntry {
             mode: EntryMode::from(EntryKind::Tree),
-            filename: format!("{i:04}").into(),
+            // Named by the pair's own object id, exactly as the typed
+            // encoder does — see `ser::serialize_map` for why content
+            // names beat ordinals.
+            filename: pair_oid.to_string().into(),
             oid: pair_oid,
         });
     }

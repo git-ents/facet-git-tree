@@ -200,7 +200,8 @@ fn read_node<F: Find + ?Sized>(
         }
         // The key schema decides the layout, exactly as the static key shape
         // does on write: scalar keys name the entries directly; composite keys
-        // store ordinal-named `{ k, v }` pair sub-trees. The marker tree
+        // store `{ k, v }` pair sub-trees named by their own object id. The
+        // marker tree
         // written for an empty map (either layout) is stripped up front.
         Node::Map { key, value } => {
             let mut entries = find_tree_entries(oid, store)?;

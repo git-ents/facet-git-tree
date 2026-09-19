@@ -52,6 +52,21 @@ pub enum SerializeError {
     /// tree entry name.
     #[error("map key is not valid UTF-8")]
     NonUtf8MapKey,
+    /// Two distinct composite-key map pairs encoded to the same object id.
+    ///
+    /// Pair entries are named by their pair sub-tree's own object id, so two
+    /// pairs sharing an id would be written as two identically-named entries
+    /// — a tree canonical git rejects (`duplicateEntries`). Reachable only
+    /// when the map's key equality is broken (e.g. NaN float keys, which
+    /// compare unequal while encoding identically to `"nan"`), so it is
+    /// refused rather than silently collapsed.
+    #[error(
+        "two distinct map pairs encode to the same object {oid}; the map's key equality is broken"
+    )]
+    DuplicatePair {
+        /// The shared pair sub-tree id.
+        oid: ObjectId,
+    },
     /// The value contains a type this encoding does not support.
     ///
     /// Holds the type identifier of the unsupported shape.

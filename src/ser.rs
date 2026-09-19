@@ -3,6 +3,8 @@
 use facet::{Def, DynDateTimeKind, DynValueKind, Peek};
 use gix_object::{Kind, Write};
 
+use std::collections::BTreeSet;
+
 use crate::check_key;
 use crate::classify::{ShapeClass, classify, collapse_shape};
 use crate::de::MAX_DEPTH;
@@ -171,6 +173,17 @@ fn serialize_sequence_node<W: Write + ?Sized>(
     ))
 }
 
+/// Serialize a map: scalar keys name their entries directly; composite keys
+/// are written as `{ k, v }` pair sub-trees, each named by the pair tree's
+/// own object id.
+///
+/// Composite pairs are content-named rather than ordinal-named because a map
+/// is unordered data — ordinals would imply an ordering the type does not
+/// have and pay renumbering churn on every insertion. Content names make a
+/// `git diff` show only the pairs that changed, let a merge add or remove
+/// one pair without touching the rest, and deduplicate identical pairs. The
+/// read side is name-agnostic (it iterates entries and recurses into each
+/// as a pair sub-tree), so this is a writer-side spelling change only.
 fn serialize_map<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
@@ -196,7 +209,7 @@ fn serialize_map<W: Write + ?Sized>(
             });
         }
     } else {
-        let mut pair_oids = Vec::new();
+        let mut pair_oids = BTreeSet::new();
         for (k, v) in pm.iter() {
             let (k_oid, k_kind) = serialize_node(k, store, depth + 1)?;
             let (v_oid, v_kind) = serialize_node(v, store, depth + 1)?;
@@ -212,13 +225,20 @@ fn serialize_map<W: Write + ?Sized>(
                     oid: v_oid,
                 },
             ];
-            pair_oids.push(write_sorted_tree(store, pair)?);
-        }
-        pair_oids.sort();
-        for (i, pair_oid) in pair_oids.into_iter().enumerate() {
+            let pair_oid = write_sorted_tree(store, pair)?;
+            if !pair_oids.insert(pair_oid) {
+                return Err(SerializeError::DuplicatePair { oid: pair_oid });
+            }
             entries.push(TreeEntry {
                 mode: EntryMode::from(EntryKind::Tree),
-                filename: format!("{i:04}").into(),
+                // The pair's own object id, as hex: a map is unordered data,
+                // so entry names carry no ordering to preserve — naming them
+                // by content instead makes a diff show only the pairs that
+                // changed, deduplicates identical pairs, and lets a
+                // tree-merge add or remove one pair without renumbering the
+                // rest. Hex of a fixed-width oid sorts in oid order, so the
+                // name-sorted tree is content-ordered too.
+                filename: pair_oid.to_string().into(),
                 oid: pair_oid,
             });
         }

@@ -141,8 +141,8 @@ pub enum Node {
         /// The exact element count.
         len: usize,
     },
-    /// A map: a name-keyed tree for scalar keys, or ordinal-named `{ k, v }`
-    /// pair sub-trees for composite keys.
+    /// A map: a name-keyed tree for scalar keys, or `{ k, v }` pair
+    /// sub-trees named by their own object id for composite keys.
     Map {
         /// The key schema; whether it is a scalar variant decides the layout.
         key: Box<Node>,
