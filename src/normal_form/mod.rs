@@ -370,7 +370,7 @@ pub fn identity_subtrees(schema: &Schema) -> impl Iterator<Item = (&str, &Node)>
 ///
 /// The gate a schema registration runs: a marked subtree that reaches an enum,
 /// a dynamic value, an option, or any other excluded node makes the schema
-/// unregisterable, because a value under it could never be given a stable
+/// unregistrable, because a value under it could never be given a stable
 /// identity.
 pub fn check_identity_subtrees(schema: &Schema) -> Result<(), UniverseError> {
     for (name, node) in identity_subtrees(schema) {

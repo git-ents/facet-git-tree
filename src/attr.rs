@@ -42,7 +42,7 @@ pub(crate) fn renamed_from(field: &'static facet::Field) -> Option<&'static str>
     field
         .attributes
         .iter()
-        .find(|attr| attr.ns == NS && attr.key == "renamed_from")
+        .find(|attr| attr.ns() == NS && attr.key() == "renamed_from")
         .and_then(|attr| attr.get_as::<&'static str>())
         .copied()
 }
@@ -54,5 +54,5 @@ pub(crate) fn renamed_from(field: &'static facet::Field) -> Option<&'static str>
 pub(crate) fn is_identity_key(attributes: &'static [facet::Attr]) -> bool {
     attributes
         .iter()
-        .any(|attr| attr.ns == NS && attr.key == "identity_key")
+        .any(|attr| attr.ns() == NS && attr.key() == "identity_key")
 }
