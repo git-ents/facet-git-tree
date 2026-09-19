@@ -60,12 +60,39 @@ pub enum DecodeMode {
 /// keys) before emitting its entry, so none of these names can ever be
 /// written as data.
 pub fn check_key(key: &str) -> Result<(), KeyError> {
-    if key.contains('/') || key.contains('\0') || key == crate::marker::MARKER_KEY {
+    if let Some(_reason) = tree_entry_name_violation(key) {
         return Err(KeyError {
             key: key.to_owned(),
         });
     }
     Ok(())
+}
+
+/// The first rule `name` violates as a Git tree entry name, or `None` if it
+/// is usable.
+///
+/// The single statement of the rules every name-to-entry site shares —
+/// [`check_key`] (and through it both dynamic-key routes of both writers),
+/// [`crate::normal_form::Key::name`], and the identity normal form's struct
+/// fields — so the sites cannot drift the way canonical git's own rules
+/// (`fsck`'s `nullSha1`, `hasDot`, `hasDotdot`, zero-pad checks) once did.
+/// The rules: non-empty; not `.` or `..`; no `/` (path separator); no NUL
+/// (terminates the name in the on-disk tree format); not the reserved
+/// presence-marker name (`crate::marker::MARKER_KEY`).
+pub(crate) fn tree_entry_name_violation(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        Some("must not be empty")
+    } else if name == "." || name == ".." {
+        Some("must not be \".\" or \"..\"")
+    } else if name.contains('/') {
+        Some("must not contain '/'")
+    } else if name.contains('\0') {
+        Some("must not contain NUL")
+    } else if name == crate::marker::MARKER_KEY {
+        Some("must not equal the reserved presence-marker \"_\"")
+    } else {
+        None
+    }
 }
 
 /// Deserialize a [`facet::Facet`] value from a root tree stored in `store`.

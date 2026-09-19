@@ -11,8 +11,9 @@ use rstest::rstest;
 mod common;
 use common::WithMap;
 
-/// Names that are valid tree entry names and so are accepted. The encoding
-/// reserves no names, so leading-dot keys are ordinary data.
+/// Names that are valid tree entry names and so are accepted. Leading-dot
+/// keys are ordinary data — canonical git only refuses the exact names `.`
+/// and `..`, not names that merely begin with a dot.
 #[rstest]
 #[case("name")]
 #[case("field0")]
@@ -20,9 +21,22 @@ use common::WithMap;
 #[case(".env")]
 #[case(".schema")] // TODO remove: no longer reserved; the encoding stores no schema
 #[case(".variant")] // TODO remove: no longer reserved; enums are externally tagged, no sentinel
-#[case("")] // emptiness is not `check_key`'s concern
 fn accepts_valid_keys(#[case] key: &str) {
     assert!(check_key(key).is_ok(), "{key:?} should be accepted");
+}
+
+/// Names canonical git refuses outright when creating a tree — verified
+/// against `git mktree`/`git fsck` — rejected here so this codec can never
+/// emit a tree canonical git would call malformed.
+#[rstest]
+#[case("")] // empty filename: "error: empty filename in tree entry"
+#[case(".")] // fsck's hasDot
+#[case("..")] // fsck's hasDotdot
+fn rejects_names_canonical_git_refuses(#[case] key: &str) {
+    assert!(
+        matches!(check_key(key), Err(KeyError { key: k }) if k == key),
+        "{key:?} should be rejected as a name canonical git refuses"
+    );
 }
 
 /// Keys containing the path separator are rejected as [`KeyError`], which
@@ -114,5 +128,25 @@ fn serialize_rejects_map_key_with_nul() {
             Err(SerializeError::Key(KeyError { key })) if key == "a\0b"
         ),
         "a map key containing NUL must be rejected by serialize"
+    );
+}
+
+/// `serialize` rejects the empty key and the `.`/`..` names: canonical git
+/// refuses to create trees holding them, so a scalar map keyed by either
+/// must fail at the codec boundary instead of producing an object
+/// `git fsck` would call malformed.
+#[rstest]
+#[case("")]
+#[case(".")]
+#[case("..")]
+fn serialize_rejects_names_canonical_git_refuses(#[case] key: &str) {
+    let mut table = HashMap::new();
+    table.insert(key.to_string(), "v".to_string());
+    assert!(
+        matches!(
+            serialize(&WithMap { table }),
+            Err(SerializeError::Key(KeyError { key: k })) if k == key
+        ),
+        "map key {key:?} must be rejected by serialize"
     );
 }

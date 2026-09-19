@@ -21,7 +21,8 @@ use gix_hash::ObjectId;
 /// (map or dynamic-object) key.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "invalid key {key:?}: must not contain '/' or NUL and must not equal the reserved marker \"_\""
+    "invalid key {key:?}: not a usable git tree entry name (must be non-empty, must not contain \
+     '/' or NUL, must not be \".\" or \"..\", and must not equal the reserved marker \"_\")"
 )]
 pub struct KeyError {
     /// The offending key.
@@ -245,9 +246,11 @@ pub enum DeserializeError {
 #[derive(Debug, thiserror::Error)]
 pub enum NormalFormError {
     /// A map key's name form is not usable as a Git tree entry name.
-    #[error(
-        "invalid normal-form map key name {key:?}: must be non-empty and hold neither '/' nor NUL"
-    )]
+    ///
+    /// The rules are the shared tree-entry-name rules
+    /// ([`crate::check_key`]): non-empty, no `/` or NUL, not `.`/`..`, and
+    /// not the general codec's reserved presence-marker name.
+    #[error("invalid normal-form map key name {key:?}: not a usable git tree entry name")]
     InvalidKey {
         /// The offending name form.
         key: String,

@@ -60,7 +60,10 @@
 //! | [`Bytes`](Key::Bytes)/[`Hash`](Key::Hash) | lowercase hex of the bytes |
 //!
 //! A name must be non-empty and hold neither `/` nor NUL, since it is a git
-//! path segment; [`NormalFormError::InvalidKey`] reports one that is not. Two
+//! path segment, and is subject to the same remaining rules as the general
+//! codec's keys (not `.`/`..`, not the reserved marker name) — see
+//! [`crate::check_key`]. [`NormalFormError::InvalidKey`] reports one that is
+//! not. Two
 //! keys of *different* variants can share a name (`Key::Str("true")` and
 //! `Key::Bool(true)`), which is unambiguous in practice because a map's key
 //! type is fixed by its schema. The mapping is untagged for the same reason:
@@ -201,7 +204,12 @@ impl Key {
     /// The key's git tree entry name, per the frozen mapping.
     ///
     /// Fails with [`NormalFormError::InvalidKey`] when the name is not usable
-    /// as a git path segment.
+    /// as a git path segment, by the same rules [`crate::check_key`] enforces
+    /// for the general codec: non-empty, no `/` or NUL, not `.`/`..`, and not
+    /// the general codec's reserved presence-marker name — canonical git
+    /// refuses entries violating the first four outright, and the fifth keeps
+    /// a normal-form subtree legible to consumers that also read
+    /// general-codec trees.
     pub fn name(&self) -> Result<String, NormalFormError> {
         let name = match self {
             Key::Bool(v) => v.to_string(),
@@ -220,7 +228,7 @@ impl Key {
             Key::Bytes(v) => hex(v),
             Key::Hash(v) => v.to_string(),
         };
-        if name.is_empty() || name.contains('/') || name.contains('\0') {
+        if let Some(_reason) = crate::de::tree_entry_name_violation(&name) {
             return Err(NormalFormError::InvalidKey { key: name });
         }
         Ok(name)
