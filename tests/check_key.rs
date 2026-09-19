@@ -51,6 +51,22 @@ fn rejects_the_reserved_marker_key() {
     );
 }
 
+/// NUL-bearing keys are rejected here rather than at the object backend: NUL
+/// terminates a tree entry's name in the on-disk format, so `gix` can only
+/// report an opaque backend error (no key, no path, no hint), while
+/// [`check_key`] still has the name in hand as user data and can report it as
+/// a [`KeyError`].
+#[rstest]
+#[case("a\0b")]
+#[case("\0")]
+#[case("leading\0")]
+fn rejects_keys_with_nul(#[case] key: &str) {
+    assert!(
+        matches!(check_key(key), Err(KeyError { key: k }) if k == key),
+        "{key:?} should be rejected as KeyError carrying the offending key"
+    );
+}
+
 // --- integration: serialize must apply `check_key` to dynamic (map) keys ---
 
 /// `serialize` rejects a map key containing the path separator, surfacing it as
@@ -81,5 +97,22 @@ fn serialize_rejects_map_key_equal_to_marker() {
             Err(SerializeError::Key(KeyError { key })) if key == "_"
         ),
         "a map key equal to the reserved marker must be rejected by serialize"
+    );
+}
+
+/// `serialize` rejects a NUL-bearing map key as [`SerializeError::Key`] — the
+/// [`KeyError`] from [`check_key`] — rather than letting the name through to
+/// the object backend, which could only refuse it as an opaque encode-time
+/// error after the key's provenance was lost.
+#[test]
+fn serialize_rejects_map_key_with_nul() {
+    let mut table = HashMap::new();
+    table.insert("a\0b".to_string(), "v".to_string());
+    assert!(
+        matches!(
+            serialize(&WithMap { table }),
+            Err(SerializeError::Key(KeyError { key })) if key == "a\0b"
+        ),
+        "a map key containing NUL must be rejected by serialize"
     );
 }

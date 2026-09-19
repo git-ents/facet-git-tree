@@ -11,15 +11,18 @@ use gix_hash::ObjectId;
 /// A user-supplied key cannot be used as a Git tree entry name.
 ///
 /// Tree entry names double as path segments, so a key may not contain the
-/// path separator `/`; nor may it equal the reserved presence-marker name
-/// (`crate::marker::MARKER_KEY`, `"_"`) written in place of a literal empty
-/// tree for `None`, `Null`, and an empty collection — a real entry named
-/// exactly that would otherwise be indistinguishable, on read, from the
-/// marker. Returned by [`check_key`](crate::check_key) and carried by
-/// [`SerializeError::Key`] when serialization rejects a dynamic (map or
-/// dynamic-object) key.
+/// path separator `/` nor NUL (which terminates a name in the on-disk tree
+/// format, making such an entry unparsable); nor may it equal the reserved
+/// presence-marker name (`crate::marker::MARKER_KEY`, `"_"`) written in place
+/// of a literal empty tree for `None`, `Null`, and an empty collection — a
+/// real entry named exactly that would otherwise be indistinguishable, on
+/// read, from the marker. Returned by [`check_key`](crate::check_key) and
+/// carried by [`SerializeError::Key`] when serialization rejects a dynamic
+/// (map or dynamic-object) key.
 #[derive(Debug, thiserror::Error)]
-#[error("invalid key {key:?}: must not contain '/' and must not equal the reserved marker \"_\"")]
+#[error(
+    "invalid key {key:?}: must not contain '/' or NUL and must not equal the reserved marker \"_\""
+)]
 pub struct KeyError {
     /// The offending key.
     pub key: String,

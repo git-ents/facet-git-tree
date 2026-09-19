@@ -49,14 +49,18 @@ pub enum DecodeMode {
 
 /// Validate a user-supplied key for use as a Git tree entry name.
 ///
-/// Keys become tree entry names, which double as path segments, so a key may not
-/// contain the path separator `/`, nor equal the reserved presence-marker name
-/// (`crate::marker::MARKER_KEY`) written in place of a literal empty tree for
-/// `None`, `Null`, and an empty collection — see [`KeyError`]. Serialization is
-/// required to apply this to every dynamic key (such as map keys) before
-/// emitting its entry, so neither name can ever be written as data.
+/// Keys become tree entry names, which double as path segments, so a key may
+/// not contain the path separator `/` nor NUL, nor equal the reserved
+/// presence-marker name (`crate::marker::MARKER_KEY`) written in place of a
+/// literal empty tree for `None`, `Null`, and an empty collection — see
+/// [`KeyError`]. NUL is checked here rather than left to the object backend:
+/// `gix` can only reject a NUL-bearing name as an opaque encode-time error,
+/// with no key and no hint, while the name is still in hand as user data.
+/// Serialization is required to apply this to every dynamic key (such as map
+/// keys) before emitting its entry, so none of these names can ever be
+/// written as data.
 pub fn check_key(key: &str) -> Result<(), KeyError> {
-    if key.contains('/') || key == crate::marker::MARKER_KEY {
+    if key.contains('/') || key.contains('\0') || key == crate::marker::MARKER_KEY {
         return Err(KeyError {
             key: key.to_owned(),
         });
