@@ -11,3 +11,6 @@
 [branch "main"]
 	remote = origin
 	merge = refs/heads/main
+[branch "agent/fix/mvp"]
+	remote = origin
+	merge = refs/heads/agent/fix/mvp
