@@ -1,13 +1,10 @@
 //! Schema-driven deserialization: reading a tree into a full-fidelity
 //! [`facet_value::Value`] guided by a [`Schema`].
 //!
-//! Where the bare heuristic read is documented lossy (numbers come back as
-//! strings, enums as plain objects), a schema supplies the type information
-//! the schemaless encoding leaves off disk, so `deserialize_value_with_schema`
-//! recovers numbers as numbers, bools as bools, and enums as tagged objects.
-//!
-//! The normative mapping lives in `docs/specification.adoc` under
-//! `deserialization.schema-driven`.
+//! Where the bare heuristic read is documented lossy, a schema supplies the
+//! type information the schemaless encoding leaves off disk, so
+//! `deserialize_value_with_schema` recovers numbers as numbers, bools as
+//! bools, and enums as tagged objects.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -288,15 +285,11 @@ fn read_node<F: Find + ?Sized>(
             }
             Ok(Value::from(oid.to_string()))
         }
-        // A dynamic node carries no schema information by construction, so
-        // the bare heuristic read is exactly what applies here. Routed
-        // through `deserialize_at_depth` rather than the public
-        // `deserialize` (which always starts at depth 0): this read is
-        // already `depth` levels into the schema-driven walk, so the typed
-        // read underneath it must keep spending from that same budget rather
-        // than resetting it — otherwise a `Dynamic` node nested near
-        // `MAX_VALUE_DEPTH` could recurse further than an ordinary typed read of
-        // the same effective depth ever could.
+        // A dynamic node carries no schema information, so the bare
+        // heuristic read applies here, routed through
+        // `deserialize_at_depth_mode` (not the public `deserialize`) so the
+        // typed read keeps spending from this walk's depth budget instead
+        // of resetting it.
         Node::Dynamic => Ok(deserialize_at_depth_mode::<Value>(oid, store, depth, mode)?),
         Node::Ref(name) => {
             let Some(target) = doc.defs.get(name) else {
@@ -309,15 +302,10 @@ fn read_node<F: Find + ?Sized>(
 
 /// Read a name-keyed tree as a [`VObject`], requiring the tree's entries and
 /// the schema's fields to correspond exactly — except a field whose
-/// [`DefaultFieldNode::has_default`] is set, whose entry may be absent: the result
-/// simply omits it, since a schema-only read has no default value to
-/// invent, only the marker that one exists elsewhere.
-///
-/// Strictness (for every other field) is what makes this function usable as
-/// a conformance check ([`validate_with_schema`]): under the previous
-/// leniency a tree sharing no field name at all with the schema read as an
-/// empty object rather than an error, so every tree conformed to every
-/// struct schema.
+/// [`DefaultFieldNode::has_default`] is set, whose entry may be absent (the
+/// result simply omits it, a schema-only read having no default value to
+/// invent). Strictness is what makes this usable as a conformance check
+/// ([`validate_with_schema`]).
 fn read_struct<F: Find + ?Sized, T: DefaultFieldNode>(
     entries: &Entries,
     fields: &BTreeMap<String, T>,

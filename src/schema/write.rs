@@ -6,21 +6,17 @@
 //! field expects — a bare string cannot tell that its field is an `Option`
 //! whose `Some` payload must be wrapped in a `some` entry, and a bare number
 //! cannot tell that its field is `f64` rather than an integer. The schema
-//! supplies exactly that missing type information, so `serialize_value_with_schema`
-//! writes the same objects — byte-for-byte, and therefore the same object
-//! ids — that the equivalent typed value would produce through
-//! [`serialize`](crate::serialize).
+//! supplies exactly that missing type information, so
+//! `serialize_value_with_schema` writes the same objects — byte-for-byte,
+//! and therefore the same object ids — that the equivalent typed value would
+//! produce through [`serialize`](crate::serialize).
 //!
-//! Encoding is validation: the walk fails with the offending path the moment a
-//! value diverges from what its schema node accepts, so there is no separate
-//! validation pass to drift out of sync with the encoder. The accepted set is
-//! exactly the image of [`deserialize_value_with_schema`](crate::deserialize_value_with_schema)
-//! — every `Value` that read could produce round-trips — plus the two
-//! deterministic bridges a JSON-authored value forces: a lossless integer into
-//! a float field, and a string into a `Bytes` field.
-//!
-//! The normative mapping lives in `docs/specification.adoc` under
-//! `serialization.schema-directed`.
+//! Encoding is validation: the walk fails with the offending path the moment
+//! a value diverges from what its schema node accepts. The accepted set is
+//! exactly the image of
+//! [`deserialize_value_with_schema`](crate::deserialize_value_with_schema),
+//! plus the two deterministic bridges a JSON-authored value forces: a
+//! lossless integer into a float field, and a string into a `Bytes` field.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -287,11 +283,9 @@ fn write_named_tree<W: Write + ?Sized, T: DefaultFieldNode>(
     }
     let mut entries = Vec::with_capacity(fields.len());
     for (name, field) in fields {
-        // A `Schema` is data — `git store schema put` ingests one from
-        // hand-authored JSON — so a field name is untrusted input here, unlike
-        // a `#[derive(Facet)]` name which is always a Rust identifier. Without
-        // this, a field named exactly `crate::marker::MARKER_KEY` would encode
-        // to the very tree that means "empty", and read back as empty.
+        // A `Schema` is data (ingestible from hand-authored JSON), so a
+        // field name is untrusted input here — unlike a `#[derive(Facet)]`
+        // name, which is always a Rust identifier.
         check_key(name).map_err(SerializeError::from)?;
         match obj.get(name.as_str()) {
             Some(fv) => {
@@ -319,15 +313,10 @@ fn write_named_tree<W: Write + ?Sized, T: DefaultFieldNode>(
 /// Encode an array as an ordinal-named tree, one entry per element, drawing
 /// each element's schema from `schema_for`.
 ///
-/// `marker_empty` says whether an empty result takes the presence marker
-/// instead of a literal empty tree, per `crate::marker`. It is true for the
-/// variable-length sequences — [`Node::List`], [`Node::Array`] — whose
-/// emptiness is a property of the value and so is worth seeing in a diff.
-/// It is false for [`Node::Tuple`], whose length is fixed by the schema:
-/// a zero-element tuple encodes identically for every value, so there is
-/// nothing to diff, and marking it would both diverge from the typed encoder
-/// (which writes the empty tree for a zero-field tuple struct) and produce a
-/// tree [`read_tuple`](super::read) refuses to read back.
+/// `marker_empty` says whether an empty result takes the presence marker:
+/// true for the variable-length sequences whose emptiness is a property of
+/// the value, false for [`Node::Tuple`] (length fixed by the schema; nothing
+/// to diff, and the typed encoder writes the empty tree there too).
 fn write_seq<'s, W: Write + ?Sized>(
     arr: &VArray,
     schema_for: impl Fn(usize) -> &'s Node,
@@ -406,8 +395,7 @@ fn write_composite_map<W: Write + ?Sized>(
         entries.push(TreeEntry {
             mode: EntryMode::from(EntryKind::Tree),
             // Named by the pair's own object id, exactly as the typed
-            // encoder does — see `ser::serialize_map` for why content
-            // names beat ordinals.
+            // encoder does.
             filename: pair_oid.to_string().into(),
             oid: pair_oid,
         });

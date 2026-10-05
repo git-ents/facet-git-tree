@@ -59,7 +59,7 @@ impl<'a> Path<'a> {
                     s.push('.');
                     s.push_str(name);
                 }
-                // Writing to a String is infallible.
+                // Encoding to a String is infallible.
                 Seg::Index(i) => {
                     let _ = write!(s, "[{i}]");
                 }

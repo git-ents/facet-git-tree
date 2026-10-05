@@ -1,7 +1,7 @@
 //! Deserialization: decoding Git trees back into [`facet::Facet`] values.
 //!
-//! Typed targets are expected to round-trip faithfully. Schemaless dynamic-value
-//! reads use the lossy heuristic defined in `docs/specification.adoc`.
+//! Typed targets round-trip faithfully; schemaless dynamic-value reads are a
+//! documented lossy heuristic.
 
 use facet::{Def, Partial};
 use facet_value::Value;
@@ -39,16 +39,9 @@ pub enum DecodeMode {
 
 /// Validate a user-supplied key for use as a Git tree entry name.
 ///
-/// Keys become tree entry names, which double as path segments, so a key may
-/// not contain the path separator `/` nor NUL, nor equal the reserved
-/// presence-marker name (`crate::marker::MARKER_KEY`) written in place of a
-/// literal empty tree for `None`, `Null`, and an empty collection — see
-/// [`KeyError`]. NUL is checked here rather than left to the object backend:
-/// `gix` can only reject a NUL-bearing name as an opaque encode-time error,
-/// with no key and no hint, while the name is still in hand as user data.
-/// Serialization is required to apply this to every dynamic key (such as map
-/// keys) before emitting its entry, so none of these names can ever be
-/// written as data.
+/// NUL is checked here rather than left to the object backend, which can
+/// only reject such a name as an opaque encode-time error while the name
+/// is still in hand as user data.
 pub fn check_key(key: &str) -> Result<(), KeyError> {
     if !is_tree_entry_name(key) {
         return Err(KeyError {
@@ -60,14 +53,10 @@ pub fn check_key(key: &str) -> Result<(), KeyError> {
 
 /// Whether `name` is usable as a Git tree entry name.
 ///
-/// The single statement of the rules every name-to-entry site shares —
-/// [`check_key`] (and through it both dynamic-key routes of both writers),
-/// [`crate::normal_form::Key::name`], and the identity normal form's struct
-/// fields — so the sites cannot drift the way canonical git's own rules
-/// (`fsck`'s `nullSha1`, `hasDot`, `hasDotdot`, zero-pad checks) once did.
-/// The rules: non-empty; not `.` or `..`; no `/` (path separator); no NUL
-/// (terminates the name in the on-disk tree format); not the reserved
-/// presence-marker name (`crate::marker::MARKER_KEY`).
+/// The one statement of the rules shared by every name-to-entry site
+/// ([`check_key`], [`crate::normal_form::Key::name`], and the identity
+/// normal form's struct fields): non-empty; not `.` or `..`; no `/`; no NUL;
+/// not the reserved marker name.
 pub(crate) fn is_tree_entry_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
@@ -79,14 +68,10 @@ pub(crate) fn is_tree_entry_name(name: &str) -> bool {
 
 /// Deserialize a [`facet::Facet`] value from a root tree stored in `store`.
 ///
-/// Typed [`facet::Facet`] targets are expected to round-trip faithfully. A
-/// schemaless dynamic-value target is intentionally lossy and follows the
-/// heuristic in `docs/specification.adoc`.
+/// Typed targets round-trip faithfully; a schemaless dynamic-value target is
+/// intentionally lossy (see `deser_dynamic` in this module).
 ///
-/// `store` is any `gix` [`Find`] source — a real repository, an in-memory odb,
-/// or an [`ObjectStore`](crate::ObjectStore) — the read side of the backend
-/// contract documented on [`serialize_into`](crate::serialize_into). `?Sized`
-/// is permitted so a `&dyn Find` may be passed.
+/// `store` is any `gix` [`Find`] source; `?Sized` permits a `&dyn Find`.
 pub fn deserialize<T: for<'a> facet::Facet<'a>>(
     root: &ObjectId,
     store: &(impl Find + ?Sized),
@@ -105,15 +90,9 @@ pub fn deserialize_legacy_leaves<T: for<'a> facet::Facet<'a>>(
     deserialize_at_depth_mode(root, store, 0, DecodeMode::LegacyLeaves)
 }
 
-/// [`deserialize`], starting the recursion depth budget at `depth` instead of
-/// `0`.
-///
-/// For a caller that is itself already some number of levels deep in a larger
-/// deserialization — schema-driven reads route a [`Node::Dynamic`]
-/// (`crate::schema::Node`) node back through this crate's own typed
-/// [`deserialize`], and must hand off the depth already spent so the combined
-/// recursion still respects [`MAX_VALUE_DEPTH`] rather than resetting the budget.
-/// [`deserialize`] is this with `depth` fixed at `0`.
+/// [`deserialize`], but with the recursion-depth budget starting at `depth`
+/// instead of `0`, so a caller already inside a larger deserialization
+/// (schema-driven reads route back through here) continues the same budget.
 pub(crate) fn deserialize_at_depth<T: for<'a> facet::Facet<'a>>(
     root: &ObjectId,
     store: &(impl Find + ?Sized),
@@ -138,14 +117,8 @@ pub(crate) fn deserialize_at_depth_mode<T: for<'a> facet::Facet<'a>>(
         .map_err(|e| DeserializeError::Reflect(format!("materialize failed: {e}")))
 }
 
-/// Deserialize the tree at `root` into an existing [`Partial`].
-///
-/// The into-existing-[`Partial`] entry point, mirroring `facet`'s `*_into`
-/// convention: the caller owns allocation and `build`, so a value read from a
-/// Git tree can be slotted into a larger reflected construction. [`deserialize`]
-/// is this applied to a freshly-allocated `Partial`, then built and materialized.
-///
-/// `store` is any `gix` [`Find`] source, exactly as for [`deserialize`].
+/// Deserialize the tree at `root` into an existing [`Partial`], mirroring
+/// `facet`'s `*_into` convention: the caller owns allocation and `build`.
 pub fn deserialize_into<'facet>(
     partial: Partial<'facet, true>,
     root: &ObjectId,
@@ -165,12 +138,8 @@ pub(crate) fn find_object<'a, F: Find + ?Sized>(
         .ok_or_else(|| DeserializeError::NotFound(*id))
 }
 
-/// Parse an already-fetched object's [`Data`] as a tree's entries.
-///
-/// Factored out of [`find_tree_entries`] so a caller that must inspect an
-/// object's kind before deciding how to read it — [`deser_dynamic`], which
-/// branches on blob-vs-tree — can parse the same fetched buffer instead of
-/// fetching `id` from `store` a second time.
+/// Parse an already-fetched object's [`Data`] as tree entries, without
+/// re-fetching.
 pub(crate) fn tree_entries_from_data(
     data: &Data<'_>,
     id: &ObjectId,
@@ -212,18 +181,9 @@ pub(crate) fn find_blob_bytes_mode<F: Find + ?Sized>(
     strip_leaf_newline(id, data.data.to_owned(), mode)
 }
 
-/// Strip a leaf blob's trailing newline according to `mode`.
-///
-/// In [`DecodeMode::Strict`], the current format requires exactly one trailing
-/// newline and reports its absence as [`DeserializeError::MissingLeafNewline`].
-/// [`DecodeMode::LegacyLeaves`] explicitly accepts the historical no-newline
-/// spelling instead.
-///
-/// Shared by every site that reads a leaf blob's content: [`find_blob_bytes`]
-/// (scalars, byte sequences, `Bytes`) and the two sites that must branch on
-/// the fetched object's kind before they know they are looking at a blob at
-/// all — [`extract_enum_entry`]'s unit-variant name blob and
-/// [`deser_dynamic`]'s `String`/`Bytes` decode.
+/// Strip a leaf blob's trailing newline according to `mode`; strict mode
+/// reports absence as [`DeserializeError::MissingLeafNewline`], legacy mode
+/// also accepts the historical no-newline spelling.
 pub(crate) fn strip_leaf_newline(
     id: &ObjectId,
     mut bytes: Vec<u8>,
@@ -241,22 +201,15 @@ pub(crate) fn strip_leaf_newline(
     }
 }
 
-/// Sort sequence entries into ascending ordinal order, rejecting any entry whose
-/// name is not a decimal index or that repeats another entry's index.
-///
-/// Sequence elements are named by zero-based decimal index, so the order must be
-/// recovered numerically rather than lexically (`10000` sorts before `9999`). A
-/// non-numeric name can only come from a foreign tree and is reported as
-/// [`DeserializeError::InvalidOrdinal`]. Two entries naming the same index —
-/// e.g. `"0"` and `"0000"`, distinct strings that parse to the same
-/// number — leave the element order ambiguous and are reported as
-/// [`DeserializeError::DuplicateOrdinal`]; this also hardens the dynamic-value
-/// heuristic's all-ordinal classification, which shares this function.
+/// Sort sequence entries into ascending ordinal order, rejecting names that
+/// are not decimal indices or that repeat another entry's index (e.g. `"0"`
+/// and `"0000"`).
 pub(crate) fn sort_by_ordinal(
     entries: &mut [(String, ObjectId, EntryKind)],
 ) -> Result<(), DeserializeError> {
-    // Validate up front so the sort key and duplicate check below can use
-    // `expect` instead of re-reporting parse errors.
+    // Sequence entry names are validated up front so the sort key and
+    // duplicate check below can use `expect` instead of re-reporting
+    // parse errors.
     for (name, _, _) in entries.iter() {
         name.parse::<usize>()
             .map_err(|_| DeserializeError::InvalidOrdinal(name.clone()))?;
@@ -273,11 +226,8 @@ pub(crate) fn sort_by_ordinal(
     Ok(())
 }
 
-/// The `k`/`v` object ids of a composite-key map pair sub-tree.
-///
-/// Shared by this module's and [`crate::schema::read`]'s `Def::Map`/
-/// `Node::Map` branches, which decode the same `{ k, v }` layout that
-/// [`crate::ser`] writes for composite (non-scalar) map keys.
+/// The `k`/`v` object ids of a composite-key map pair sub-tree, shared by
+/// the typed and schema-driven `Map` branches.
 pub(crate) fn map_pair_entries(
     pair: &[(String, ObjectId, EntryKind)],
 ) -> Result<(ObjectId, ObjectId), DeserializeError> {
@@ -291,12 +241,7 @@ pub(crate) fn map_pair_entries(
 }
 
 /// Validate an `Option` tree's entries, returning the `some` entry's object
-/// id, or `None` for the marker (`crate::marker`) tree written for a
-/// `None`-valued `Option`.
-///
-/// Shared by this module's and [`crate::schema::read`]'s `Def::Option`/
-/// `Node::Optional` branches: `Some` is written as exactly one entry named
-/// `some` and current `None` as the marker tree. Legacy mode additionally
+/// id, or `None` for the marker tree written for `None`. Legacy mode also
 /// accepts the historical literal empty tree as `None`.
 pub(crate) fn validate_option_entries(
     entries: &[(String, ObjectId, EntryKind)],
@@ -319,19 +264,12 @@ pub(crate) fn validate_option_entries(
 }
 
 /// Extract an enum value's (variant-name, payload object id) pair from the
-/// object at `oid`.
+/// object at `oid`, shared by the typed and schema-driven enum branches.
 ///
-/// Shared by this module's and [`crate::schema::read`]'s enum branches. A
-/// unit variant's tag is a bare blob holding the variant name text — its
-/// entire information content, so it appears as ordinary content to git's
-/// blob-oriented diff and ls-tree tooling — and this returns `None` for its
-/// payload. Every other variant's tag is a single-entry tree, externally
-/// tagged the same way a struct field is (entry name = variant name, entry
-/// value = payload), and this returns `Some` of that entry's object id; any
-/// other arity is a malformed (necessarily foreign) tree. The caller is
-/// responsible for checking the returned form against what the named
-/// variant's own kind requires — this function does not have access to the
-/// variant table.
+/// A unit variant's tag is a bare blob holding the variant name (returning
+/// `None` for the payload); every other variant's tag is a single-entry tree
+/// (returning `Some` of the payload id). The caller checks the returned form
+/// against the named variant's own kind; this function has no variant table.
 pub(crate) fn extract_enum_entry_mode<F: Find + ?Sized>(
     oid: &ObjectId,
     store: &F,
@@ -359,17 +297,12 @@ pub(crate) fn extract_enum_entry_mode<F: Find + ?Sized>(
 
 /// Build a scalar-keyed map's key value from its entry name's textual form.
 ///
-/// [`collapse_shape`] may classify a key as scalar even though the key's own
-/// shape is still wrapped in a smart pointer or transparent newtype — an
-/// `Arc<str>` key, for instance, collapses to `str` for the scalar-vs-composite
-/// decision and is written under that collapsed scalar's textual form, but the
-/// `Partial` frame `begin_key()` opens is still shaped `Arc<str>`, whose own
-/// vtable has no parse function to call directly. This unwraps the same
-/// smart-pointer (`begin_smart_ptr`) and transparent-newtype (`begin_inner`)
-/// layers [`deser_into`]'s own `Def::Pointer` and inner-shape branches do,
-/// bottoming out in `parse_from_str` on the fully collapsed frame — the map
-/// analogue of those branches, except there is no separate key object to
-/// fetch: the entry's name already is the key's textual form.
+/// The key's shape may still be wrapped (an `Arc<str>` key collapses to
+/// `str` for the scalar-vs-composite decision but the `Partial` frame stays
+/// shaped `Arc<str>`, with no direct parse function), so this unwraps
+/// smart-pointer and transparent-newtype layers before `parse_from_str` —
+/// without a separate key object to fetch, since the entry name already is
+/// the key's textual form.
 fn parse_key_from_str<'facet>(
     partial: Partial<'facet, true>,
     text: &str,
@@ -395,9 +328,8 @@ fn parse_key_from_str<'facet>(
 }
 
 /// Whether an absent field of this shape reads as `None` rather than
-/// [`DeserializeError::MissingField`]. Checked on the field's own shape —
-/// the transparent-collapse [`classify`] applies would unwrap the `Option`
-/// itself.
+/// [`DeserializeError::MissingField`]; checked on the field's own shape,
+/// before any transparent collapse.
 ///
 /// [`classify`]: crate::classify::classify
 fn is_optional_shape(shape: &facet::Shape) -> bool {
@@ -432,10 +364,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
     let shape = partial.shape();
 
     // RawTree: capture the child entry's object id without decoding its
-    // contents — the caller walks it separately, by whatever means it was
-    // originally written. Still verified to be a tree, not a blob, so a
-    // malformed or foreign tree fails fast with `NotATree` rather than
-    // silently handing back a bogus tree id.
+    // contents; verify kind so a malformed or foreign tree fails fast.
     if matches!(classify(shape), ShapeClass::RawTree) {
         let mut buf = Vec::new();
         let data = find_object(oid, &mut buf, store)?;
@@ -445,9 +374,8 @@ fn deser_into<'facet, F: Find + ?Sized>(
         return partial.set(RawTree::new(*oid)).map_err(reflect);
     }
 
-    // RawBlob: capture the child entry's object id without decoding its
-    // contents. Verify that the referenced object is a blob so malformed or
-    // foreign trees fail fast with `NotABlob`.
+    // RawBlob: capture the child entry's object id; verify kind so a
+    // malformed or foreign tree fails fast.
     if matches!(classify(shape), ShapeClass::RawBlob) {
         let mut buf = Vec::new();
         let data = find_object(oid, &mut buf, store)?;
@@ -478,10 +406,8 @@ fn deser_into<'facet, F: Find + ?Sized>(
     }
 
     // Byte sequence (`Vec<u8>`, `[u8; N]`): read the single blob. An exact
-    // `Vec<u8>` target takes the whole buffer in one set — one reflection
-    // call instead of one per byte; every other byte-leaf shape (arrays,
-    // slice smart pointers) fills item by item below, mirroring the
-    // serializer's blob encoding.
+    // `Vec<u8>` target takes the whole buffer in one set; other byte-leaf
+    // shapes fill item by item below.
     if matches!(classify(shape), ShapeClass::Bytes) {
         let bytes = find_blob_bytes_mode(oid, store, mode)?;
         if shape.is_type::<Vec<u8>>() {
@@ -538,12 +464,10 @@ fn deser_into<'facet, F: Find + ?Sized>(
     }
 
     // Transparent newtype (`#[facet(transparent)]`, `NonZero<T>`, path
-    // wrappers): the object was written as the inner value's own encoding (via
-    // `Peek::innermost_peek`, which unwraps exactly when `try_borrow_inner` is
-    // present), so build that and let `begin_inner` reassemble the wrapper.
-    // Gated on `has_try_borrow_inner`, not just `shape.inner.is_some()`: plain
-    // collections like `Vec<T>` also carry an `inner` shape (for variance) but
-    // were never unwrapped on serialization, so must not be routed here.
+    // wrappers): the object was written as the inner value's own encoding, so
+    // build that and let `begin_inner` reassemble the wrapper. Gated on
+    // `has_try_borrow_inner` because plain collections like `Vec<T>` also
+    // carry an `inner` shape but were never unwrapped on serialization.
     if shape.inner.is_some() && shape.vtable.has_try_borrow_inner() {
         let partial = partial.begin_inner().map_err(reflect)?;
         let partial = deser_into(partial, oid, store, depth + 1, mode)?;
@@ -600,8 +524,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
     }
 
     // List (Vec): read tree with ordinal keys, sort numerically, push items.
-    // The marker tree (`crate::marker`), written for an empty list instead of
-    // a literal empty tree, is stripped before ordinal parsing.
+    // The marker tree written for an empty list is stripped first.
     if matches!(classify(shape), ShapeClass::Sequence) && matches!(shape.def, Def::List(_)) {
         let mut entries = find_tree_entries(oid, store)?;
         if crate::marker::is_marker(&entries) {
@@ -636,14 +559,11 @@ fn deser_into<'facet, F: Find + ?Sized>(
         return Ok(partial);
     }
 
-    // Map: mirror serialization. Scalar-keyed maps name each entry by the key's
-    // textual form (parsed back via `parse_from_str`); composite-keyed maps store
-    // each pair as a `{ k, v }` sub-tree, both children recovered by recursing.
-    // The scalar-vs-composite classification is decided from the key shape
-    // *after* transparency collapse (`collapse_shape`), matching what the
-    // encoder actually wrote: a smart-pointer or transparent-newtype key
-    // (`Arc<str>`, a `#[facet(transparent)]` wrapper, ...) is written
-    // name-keyed exactly as its collapsed scalar shape would be.
+    // Map: mirror serialization. Scalar-keyed maps name each entry by the
+    // key's textual form (parsed back via `parse_from_str`); composite-keyed
+    // maps store each pair as a `{ k, v }` sub-tree. The scalar-vs-composite
+    // decision uses the key shape after transparency collapse, matching what
+    // the encoder wrote.
     if matches!(classify(shape), ShapeClass::Map)
         && let Def::Map(md) = shape.def
     {
@@ -695,9 +615,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
 
     // Enum: externally tagged. A unit variant's tag is a bare blob holding
     // the variant name; every other variant's tag is a single-entry tree
-    // (variant name → payload). `extract_enum_entry` fetches `oid` itself and
-    // reports which form it found; `select_variant_named` (below) is the
-    // authority on whether `variant_name` even exists.
+    // (variant name → payload).
     if matches!(classify(shape), ShapeClass::Enum)
         && let facet::Type::User(facet::UserType::Enum(et)) = shape.ty
     {
@@ -724,9 +642,8 @@ fn deser_into<'facet, F: Find + ?Sized>(
         };
 
         let inner_oid = match (is_unit, inner_oid) {
-            // Unit variant, tagged with a blob: nothing further to read — the
-            // variant name (already consumed by `select_variant_named`) is
-            // the payload's entire content.
+            // Unit variant: the variant name already consumed by
+            // `select_variant_named` is the payload's entire content.
             (true, None) => return Ok(partial),
             (true, Some(_)) => {
                 return Err(DeserializeError::UnitVariantIsTree {
@@ -795,32 +712,20 @@ fn deser_into<'facet, F: Find + ?Sized>(
 
 /// Decode the object at `oid` into a dynamic value (`Def::DynamicValue`).
 ///
-/// The encoding writes no type markers, so the value's shape is recovered by
-/// a normative — and documented lossy — heuristic:
+/// The encoding writes no type markers, so the value's shape is recovered
+/// by a documented lossy heuristic:
 ///
-/// - a blob's trailing `\n` ([`strip_leaf_newline`]) is stripped in strict
-///   mode, while legacy mode also accepts the pre-newline spelling; the
-///   remaining bytes are a String when valid UTF-8, otherwise Bytes;
+/// - a blob is a `String` when valid UTF-8 (after stripping the mandatory
+///   trailing newline), otherwise `Bytes`;
 /// - a non-empty tree whose entry names are all decimal ordinals is an Array;
-/// - any other tree — including the presence-marker tree (`crate::marker`)
-///   written for `Null` and an empty `Array`/`Object` — is an Object; the
-///   explicit legacy mode additionally interprets a literal empty tree as null
-///   because historical `Option::None` used that shape.
+/// - any other tree — including the presence-marker tree written for `Null`
+///   and an empty `Array`/`Object` — is an Object; legacy mode additionally
+///   reads a literal empty tree as null.
 ///
-/// Scalar encodings that are not self-evident from the object alone (bool,
-/// numbers, char, datetime, ...) therefore come back as Strings of their
-/// textual form, and null (written as the marker tree) as an empty Object —
-/// the marker is stripped before the ordinal classification below, so it
-/// never surfaces as a phantom `"_"` member.
-///
-/// The caller ([`deser_into`]) has already applied the [`MAX_VALUE_DEPTH`] guard for
-/// this level; children recurse through `deser_into` at `depth + 1`, so the
-/// guard bounds heuristic recursion exactly as it bounds typed recursion.
-///
-/// Fetches `oid` exactly once: the blob-vs-tree classification and the tree
-/// parse both read the same fetched [`Data`], via [`tree_entries_from_data`],
-/// rather than fetching the object again to re-derive the entries a second
-/// `find_tree_entries` call would otherwise perform.
+/// So bool, numbers, char, datetime, … come back as `String`s of their
+/// textual form, and null as an empty `Object`. The depth guard is enforced
+/// by the caller ([`deser_into`]); children recurse through it at
+/// `depth + 1`.
 fn deser_dynamic<'facet, F: Find + ?Sized>(
     partial: Partial<'facet, true>,
     oid: &ObjectId,

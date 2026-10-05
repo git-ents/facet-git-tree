@@ -7,9 +7,6 @@
 //! exactly what serialization writes. With the `value` cargo feature, a
 //! schema drives [`deserialize_value_with_schema`](crate::schema::read)'s
 //! full-fidelity dynamic reads.
-//!
-//! The normative rules live in `docs/specification.adoc` under
-//! `schema.representation` and `schema.generation`.
 
 #[cfg(feature = "value")]
 pub(crate) mod path;
@@ -47,7 +44,7 @@ use facet_value::Value;
 ///
 /// This type carries no format-version field: a stored document instead pins
 /// the schema-schema tree it was written against as a `schema` entry spliced
-/// onto the tree at write time — see [`pin`](crate::schema::pin) — which is a
+/// onto the tree at write time — see `crate::schema::pin` — which is a
 /// storage-layer concern, not part of this Rust type.
 #[derive(Debug, Clone, PartialEq, Facet)]
 pub struct Schema {
@@ -97,10 +94,9 @@ pub(crate) struct LegacySchema {
 
 /// A single schema node: the shape of one value in the encoding.
 ///
-/// Scalar variants are per-width unit variants mirroring [`facet::ScalarType`],
-/// so each encodes as a trivially stable single-entry tree. The on-disk form
-/// of this type is a public contract (`schema.representation`): changing it is
-/// a semver-major break.
+/// Scalar variants are per-width unit variants mirroring [`facet::ScalarType`].
+/// The on-disk form of this type is a public contract; changing it is a
+/// semver-major break.
 #[derive(Debug, Clone, PartialEq, Facet)]
 #[repr(u8)]
 pub enum Node {
@@ -145,9 +141,7 @@ pub enum Node {
     /// A byte sequence (`Vec<u8>`, `[u8; N]`, `[u8]`): a single blob.
     Bytes,
     /// A named-field struct: a tree with one entry per field, keyed by field
-    /// name — the map key is the tree entry name (`schema.representation`).
-    /// A field whose [`StructField::has_default`] is set may have no entry
-    /// at all: a write may omit it, and a read finds it simply absent.
+    /// name. A field whose `has_default` is set may have no entry at all.
     Struct(BTreeMap<String, StructField>),
     /// A tuple or tuple struct: a tree with ordinal-named entries.
     Tuple(Vec<Node>),
@@ -191,10 +185,9 @@ pub enum Node {
 #[repr(u8)]
 pub enum VariantKind {
     /// No payload: the variant's entire encoding is a bare blob holding its
-    /// name (see `serialization.design.trees.variants`), not a tree — so it
-    /// appears as ordinary content to git's blob-oriented diff and ls-tree
-    /// tooling instead of vanishing as a tree-entry rename with no blob
-    /// content on either side.
+    /// name, so a variant flip appears as ordinary content to git's
+    /// blob-oriented diff and ls-tree tooling instead of vanishing as a
+    /// tree-entry rename with no content on either side.
     Unit,
     /// A single-field tuple variant: the field's own encoding directly.
     Newtype(Box<Node>),
@@ -397,14 +390,12 @@ fn is_valid_kind_name(name: &str) -> bool {
 impl Schema {
     /// Generate the [`Schema`] describing how values of `shape` are encoded.
     ///
-    /// The walker mirrors the encoder's dispatch order exactly
-    /// (`schema.generation`): transparency collapse, then
-    /// [`RawTree`](crate::RawTree), then
-    /// dynamic values, then the scalar table, then byte sequences, then
-    /// composites. Named user types (structs and enums) are deduplicated into
-    /// [`defs`](Schema::defs) and referenced by [`Node::Ref`]; names are
-    /// assigned deterministically in pre-order, so the same shape always
-    /// yields an identical — and identically-encoded — document.
+    /// The walker mirrors the encoder's dispatch order exactly:
+    /// transparency collapse, then [`RawTree`](crate::RawTree), then dynamic
+    /// values, then the scalar table, then byte sequences, then composites.
+    /// Named user types are deduplicated into [`defs`](Schema::defs) and
+    /// referenced by [`Node::Ref`]; names are assigned deterministically in
+    /// pre-order, so the same shape always yields an identical document.
     pub fn from_shape(shape: &'static Shape) -> Result<Self, SchemaError> {
         Self::from_shape_with_limit(shape, MAX_VALUE_DEPTH).map(|(doc, _hints)| doc)
     }

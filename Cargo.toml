@@ -8,17 +8,12 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/git-ents/facet-git-tree"
 
 [features]
-# The pin towers' codec fixture (`schema::codec`) needs a `Def::DynamicValue`
-# type reachable unconditionally — its generation id must not depend on which
-# features happen to be enabled — so `facet-value` is a plain dependency
-# below, not gated by this feature. `value` instead gates the QName / UUID
-# downcast fast paths and the schema-driven read/write modules; the
-# `facet_value::Value` number downcast is unconditional, so dynamic numbers
-# encode identically with and without it.
-#
-# NOTE (release notes): the unconditional number downcast can change object
-# ids for builds *without* the `value` feature that previously wrote very
-# large or float-backed dynamic numbers through the lossy vtable path.
+# `facet-value` is an unconditional dependency (not gated by this feature)
+# so that the pin towers' codec fixture (`schema::codec`) has a
+# `Def::DynamicValue` type reachable on every feature combination — its
+# generation id must not depend on which features are enabled. `value`
+# instead gates the QName/UUID downcast fast paths and the schema-driven
+# read/write modules. See src/schema/codec.rs for the full rationale.
 value = []
 
 [dependencies]

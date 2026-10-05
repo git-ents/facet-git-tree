@@ -2,29 +2,18 @@
 //! can encode, written into each pin tower's generation tree beside its own
 //! schema-schema/migration-schema document.
 //!
-//! [`Fixture`]'s schema only captures which [`Node`](crate::schema::Node)
-//! constructs exist — the shape language. It says nothing about how a
-//! construct is actually spelled on disk: an `f64`'s text, `Bytes`' framing,
-//! an empty `List`'s marker, `None`'s marker, and so on. A codec change that
-//! touches only spelling leaves the schema-schema tree byte-identical, so a
-//! generation pinned to it would not move — exactly the hole this fixture
-//! closes. [`fixture`]'s value, encoded through the ordinary serializer
-//! rather than hand-built, pins that spelling too: both the fixture's schema
-//! and its value live inside the generation's own tree, so either changing
-//! moves the generation id.
-//!
-//! `codec/schema/` is not itself pinned — it is inside the generation being
-//! defined, and pinning it would recurse. It is identified by containment.
+//! [`Fixture`]'s schema only captures the shape language — an `f64`'s text,
+//! `Bytes`' framing, an empty `List`'s marker, and so on are not in it. A
+//! codec change touching only spelling would otherwise leave a pinned
+//! generation byte-identical; the fixture value, encoded through the ordinary
+//! serializer, pins that spelling too, so either changing moves the
+//! generation id. `codec/schema/` is not itself pinned (pinning it would
+//! recurse); it is identified by containment.
 //!
 //! Every value in [`fixture`] must encode identically on every target and
-//! feature combination, since the generation id is a hash of them: two builds
-//! of one version that disagreed here would reject each other's documents.
-//! The fixture therefore holds its `isize`/`usize` fields at values
-//! representable on every target — platform-width extremes are
-//! target-dependent numbers, whatever the encoding says — while the encoding
-//! itself is target-independent by construction: platform-width integers are
-//! spec'd i64/u64-shaped. This is also why `facet-value` is an
-//! unconditional dependency rather than gated behind the `value` feature.
+//! feature combination, since the generation id is a hash of them; hence the
+//! target-independent `isize`/`usize` values and the unconditional
+//! `facet-value` dependency (see `Cargo.toml`).
 
 use std::collections::BTreeMap;
 
@@ -64,14 +53,9 @@ pub struct FixtureNested {
 #[derive(Debug, Clone, PartialEq, Facet)]
 pub struct FixtureUnit;
 
-/// An enum reaching all four `VariantKind` shapes.
-///
-/// A single instance only ever inhabits one variant, so [`Fixture`] carries
-/// four fields of this type — one instantiated per shape — to exercise every
-/// active-variant encoding in the fixture value, not just every shape in
-/// its schema (which a single field would already cover, since a schema
-/// describes the type's full variant set regardless of which one a given
-/// value picks).
+/// An enum reaching all four `VariantKind` shapes. A single instance only
+/// ever inhabits one variant, so [`Fixture`] carries four fields of this
+/// type — one instantiated per shape.
 #[derive(Debug, Clone, PartialEq, Facet)]
 #[repr(u8)]
 pub enum FixtureEnum {

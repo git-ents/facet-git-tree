@@ -1,24 +1,12 @@
-//! Error types, one per operation: [`KeyError`] for key validation,
-//! [`SerializeError`] for the write side, [`DeserializeError`] for the
-//! read side, [`SchemaError`] for schema generation, [`SchemaPinError`] for
-//! the schema-schema pin, [`SchemaReadError`] for schema-driven reads,
-//! [`SchemaWriteError`] for schema-directed writes, and
-//! [`NormalFormError`]/[`UniverseError`] for the identity normal form's
-//! mapping and its type-universe check.
+//! Error types for each crate operation.
 
 use gix_hash::ObjectId;
 
 /// A user-supplied key cannot be used as a Git tree entry name.
 ///
-/// Tree entry names double as path segments, so a key may not contain the
-/// path separator `/` nor NUL (which terminates a name in the on-disk tree
-/// format, making such an entry unparsable); nor may it equal the reserved
-/// presence-marker name (`crate::marker::MARKER_KEY`, `"_"`) written in place
-/// of a literal empty tree for `None`, `Null`, and an empty collection — a
-/// real entry named exactly that would otherwise be indistinguishable, on
-/// read, from the marker. Returned by [`check_key`](crate::check_key) and
-/// carried by [`SerializeError::Key`] when serialization rejects a dynamic
-/// (map or dynamic-object) key.
+/// Tree entry names double as path segments, so a key may not contain `/`
+/// or NUL, and may not equal the reserved presence-marker name (`"_"`):
+/// a real entry so named would be indistinguishable from the marker on read.
 #[derive(Debug, thiserror::Error)]
 #[error(
     "invalid key {key:?}: not a usable git tree entry name (must be non-empty, must not contain \
@@ -29,39 +17,32 @@ pub struct KeyError {
     pub key: String,
 }
 
-/// An error produced by serialization ([`serialize`](crate::serialize) and
-/// friends).
+/// An error produced by serialization.
 #[derive(Debug, thiserror::Error)]
 pub enum SerializeError {
-    /// A facet key cannot be represented as a Git tree entry name.
+    /// A key cannot be represented as a Git tree entry name.
     #[error(transparent)]
     Key(#[from] KeyError),
     /// An error from the underlying `gix` object backend.
-    ///
-    /// Wraps the backend's own error (from [`Write`](gix_object::Write)) as
-    /// the source rather than flattening it into a string.
     #[error("git object backend error")]
     Backend(#[source] gix_object::write::Error),
     /// A `facet` reflection operation failed.
     ///
-    /// `facet`'s reflection errors borrow from the reflected shape and are not
+    /// Reflection errors borrow from the reflected shape and are not
     /// `'static`-friendly, so they are collapsed to text at this boundary.
     #[error("reflection error: {0}")]
     Reflect(String),
-    /// A map key's textual form is not valid UTF-8, so it cannot become a Git
-    /// tree entry name.
+    /// A map key's textual form is not valid UTF-8, so it cannot become a
+    /// Git tree entry name.
     #[error("map key is not valid UTF-8")]
     NonUtf8MapKey,
     /// Two map pairs carry the same composite key.
     ///
-    /// Pair entries are named by their pair sub-tree's own object id, and the
-    /// pair sub-tree names its key, so two pairs sharing a key id would be
-    /// two entries for one key. Refused on write, where it can only mean the
-    /// map's key equality is broken (e.g. NaN float keys, which compare
-    /// unequal while encoding identically to `"nan"`) or two distinct keys
-    /// encode identically (e.g. `0.0` and `-0.0`, collapsed by the canonical
-    /// float spelling); a merged or foreign tree carrying two pairs for one
-    /// key is refused on read by [`DeserializeError::DuplicateKey`] instead.
+    /// Pair entries are named by the pair sub-tree's object id and the pair
+    /// names its key, so two entries for one key can only mean the map's key
+    /// equality is broken (e.g. NaN float keys). A merged or foreign tree
+    /// carrying two pairs for one key is refused on read by
+    /// [`DeserializeError::DuplicateKey`] instead.
     #[error(
         "two map pairs carry the same key (key object {oid}); the map's key equality is broken"
     )]
@@ -70,33 +51,22 @@ pub enum SerializeError {
         oid: ObjectId,
     },
     /// The value contains a type this encoding does not support.
-    ///
-    /// Holds the type identifier of the unsupported shape.
     #[error("unsupported type for serialization: {0}")]
     Unsupported(&'static str),
     /// The value contains a scalar type this encoding does not support.
-    ///
-    /// Holds the type identifier of the unsupported scalar.
     #[error("unsupported scalar type: {0}")]
     UnsupportedScalar(&'static str),
     /// A dynamic value holds a number with no exact textual rendering.
     ///
-    /// The generic dynamic-value vtable only surfaces 64-bit reads, so an
-    /// integer beyond the 64-bit range can only be observed as a lossy `f64`
-    /// approximation. Writing that approximation would silently change the
-    /// value — and therefore its object id — so it is refused instead. A
-    /// `facet_value::Value` is always downcast first (the crate is an
-    /// unconditional dependency), so it renders integers exactly at any
-    /// width; this error remains for dynamic values of other types whose
-    /// vtable cannot render their numbers exactly.
+    /// Writing a lossy `f64` approximation would change the value and its
+    /// object id, so it is refused. A `facet_value::Value` always downcasts
+    /// first and renders integers exactly at any width; this remains for
+    /// dynamic values of other types whose vtable cannot render exactly.
     #[error("dynamic number has no exact textual rendering")]
     UnrepresentableNumber,
     /// A dynamic value's runtime kind is not supported by this encoding.
     ///
-    /// Holds the kind's name. Produced for kinds with no generic textual
-    /// form (QName and UUID without the `value` feature) and for kinds this
-    /// crate does not know (`DynValueKind` is `#[non_exhaustive]`); refusing
-    /// them is preferred over guessing an encoding.
+    /// Refused rather than guessed at: `DynValueKind` is `#[non_exhaustive]`.
     #[error("unsupported dynamic value kind: {0}")]
     UnsupportedDynamicKind(String),
     /// Serialization exceeded the maximum supported nesting depth.
@@ -104,8 +74,7 @@ pub enum SerializeError {
     MaxDepth(usize),
 }
 
-/// An error produced by deserialization ([`deserialize`](crate::deserialize)
-/// and friends).
+/// An error produced by deserialization.
 #[derive(Debug, thiserror::Error)]
 pub enum DeserializeError {
     /// A referenced object was not present in its backing store.
@@ -114,61 +83,40 @@ pub enum DeserializeError {
     /// An object was expected to be a tree but was of another kind.
     #[error("object {0} is not a tree")]
     NotATree(ObjectId),
-    /// An object was expected to be a blob (a scalar leaf) but was of another
-    /// kind.
+    /// An object was expected to be a blob but was of another kind.
     #[error("object {0} is not a blob")]
     NotABlob(ObjectId),
-    /// A tree entry name (path segment) is not valid UTF-8.
+    /// A tree entry name is not valid UTF-8.
     ///
-    /// Holds the lossily-decoded name for diagnostics. Write-side names are
-    /// always UTF-8, so this can only arise from an externally-produced tree.
+    /// Write-side names are always UTF-8, so this can only arise from an
+    /// externally-produced tree.
     #[error("tree entry name {0:?} is not valid UTF-8")]
     NonUtf8Name(String),
-    /// A scalar blob's contents are not valid UTF-8, so no scalar can be
-    /// parsed from them.
+    /// A scalar blob's contents are not valid UTF-8.
     #[error("blob {0} is not valid UTF-8")]
     NonUtf8Blob(ObjectId),
     /// A leaf blob's final byte is not `\n`.
     ///
-    /// Every leaf blob (a scalar, a byte sequence, or a unit enum variant's
-    /// name blob) MUST carry exactly one trailing newline
-    /// (`serialization.design.leaves.encoding`); this is not "at most one",
-    /// so a leaf blob missing that byte can only be a foreign or corrupt
-    /// object, rejected here rather than accepted leniently. The presence
-    /// marker (`crate::marker`) is a separate, structural object and is never
-    /// checked against this rule.
+    /// Every leaf blob carries exactly one mandatory trailing newline; a
+    /// leaf missing it is foreign or corrupt and is rejected rather than
+    /// accepted leniently. The presence marker (`crate::marker`) is a
+    /// separate structural object and is never checked.
     #[error(
         "leaf blob {0} is missing its mandatory trailing newline — it predates \
          the trailing-newline leaf encoding and must be re-stored"
     )]
     MissingLeafNewline(ObjectId),
     /// Deserialization exceeded the maximum supported nesting depth.
-    ///
-    /// A guard against unbounded recursion — and thus stack overflow — when
-    /// reading a deeply nested, possibly externally-produced tree. The bundled
-    /// encoder never approaches this depth for ordinary values.
     #[error("maximum nesting depth ({0}) exceeded while deserializing")]
     MaxDepth(usize),
     /// A sequence entry name is not a valid decimal ordinal.
-    ///
-    /// Sequence (`Vec`/array) entries are named by their zero-based decimal
-    /// index on write, so a non-numeric name can only arise from an
-    /// externally-produced tree.
     #[error("invalid sequence ordinal {0:?}")]
     InvalidOrdinal(String),
     /// Two sequence entries name the same numeric ordinal (e.g. `"0"` and
     /// `"0000"`).
-    ///
-    /// Each element must occupy a distinct index; a foreign tree with two
-    /// entries naming the same index leaves the element order ambiguous, so
-    /// it is rejected rather than silently resolved by insertion or lexical
-    /// order.
     #[error("duplicate sequence ordinal {0}: two entries name the same index")]
     DuplicateOrdinal(usize),
     /// An error from the underlying `gix` object backend.
-    ///
-    /// Wraps the backend's own error (from [`Find`](gix_object::Find)) as the
-    /// source rather than flattening it into a string.
     #[error("git object backend error")]
     Backend(#[source] gix_object::find::Error),
     /// A stored tree object's bytes could not be decoded as a Git tree.
@@ -180,10 +128,7 @@ pub enum DeserializeError {
         #[source]
         source: gix_object::decode::Error,
     },
-    /// A `facet` reflection operation failed.
-    ///
-    /// `facet`'s reflection errors borrow from the reflected shape and are not
-    /// `'static`-friendly, so they are collapsed to text at this boundary.
+    /// A `facet` reflection operation failed (see [`SerializeError::Reflect`]).
     #[error("reflection error: {0}")]
     Reflect(String),
     /// A scalar blob's text failed to parse as the target type.
@@ -193,17 +138,14 @@ pub enum DeserializeError {
         shape: &'static str,
         /// The text that failed to parse.
         text: String,
-        /// The parse failure, collapsed to text (`facet`'s reflection errors
-        /// are not `'static`-friendly).
+        /// The parse failure, collapsed to text (reflection errors are not
+        /// `'static`-friendly).
         reason: String,
     },
-    /// An `Option` tree does not hold exactly the shape one of its two valid
-    /// forms requires.
+    /// An `Option` tree does not hold exactly one entry.
     ///
-    /// `Some` is written as exactly one entry named `some`, and `None` as the
-    /// marker tree (`crate::marker`) — never a literal empty tree — so any
-    /// other arity (including a literal empty tree, with `found: 0`) is a
-    /// malformed (necessarily foreign) tree.
+    /// `Some` is exactly one entry named `some`; `None` is the marker tree,
+    /// never a literal empty tree.
     #[error("malformed Option tree: expected a single \"some\" entry, found {found} entries")]
     MalformedOption {
         /// How many entries the tree actually holds.
@@ -215,27 +157,19 @@ pub enum DeserializeError {
         /// The entry name actually found.
         name: String,
     },
-    /// A non-unit enum variant's tag object is a tree but does not hold
-    /// exactly one (variant-named) entry.
+    /// A non-unit enum variant's tag tree does not hold exactly one entry.
     #[error("malformed enum tree: expected exactly one entry, found {found}")]
     MalformedEnum {
         /// How many entries the tree actually holds.
         found: usize,
     },
-    /// A unit enum variant's tag object was a tree instead of the blob its
-    /// payload-free encoding requires.
-    ///
-    /// A unit variant tags with a bare blob holding the variant name (so it
-    /// appears as ordinary content to git's blob-oriented diff and ls-tree
-    /// tooling); a tree there can only come from a foreign encoder or a stale
-    /// pre-blob-collapse object.
+    /// A unit enum variant's tag object is a tree instead of a blob.
     #[error("enum variant {variant:?} is unit but its tag object is a tree, not a blob")]
     UnitVariantIsTree {
         /// The variant name.
         variant: String,
     },
-    /// A non-unit enum variant's tag object was a blob instead of the tree
-    /// its payload requires.
+    /// A non-unit enum variant's tag object is a blob instead of a tree.
     #[error("enum variant {variant:?} has a payload and must be a tree, found a blob")]
     VariantPayloadIsBlob {
         /// The variant name.
@@ -249,11 +183,8 @@ pub enum DeserializeError {
     },
     /// A composite-key map tree holds two pairs for the same key.
     ///
-    /// Content-named pair entries merge cleanly — two branches editing the
-    /// same key produce two pair entries rather than a name conflict — so a
-    /// merged tree can carry two pairs for one key, and a foreign tree can
-    /// carry them for any reason. Either pair could be "the" value, so
-    /// accepting both would silently pick one; the read refuses instead.
+    /// Either pair could be "the" value, so accepting both would silently
+    /// pick one.
     #[error("map holds two pairs for the same key (key object {oid})")]
     DuplicateKey {
         /// The shared key object id.
@@ -261,14 +192,9 @@ pub enum DeserializeError {
     },
     /// A struct tree lacks the entry a non-defaulted field requires.
     ///
-    /// Fields carrying a `facet` default may be absent — that is the
-    /// documented leniency for defaults — and a field of `Option` type is
-    /// defaulted to `None` for the same reason: absent and unset are
-    /// indistinguishable for an optional value. Any other missing field
-    /// means the tree does not describe this type, reported here with the
-    /// entry name rather than as an opaque reflection error. Schema changes
-    /// beyond that (renamed or removed fields) are the migration
-    /// machinery's job — see `crate::migration`.
+    /// Fields with a `facet` default may be absent; an `Option` field reads
+    /// as `None` when absent. Any other missing field means the tree does
+    /// not describe this type.
     #[error("struct field {field:?} is missing from the tree")]
     MissingField {
         /// The field (or positional-ordinal name) the tree omits.
@@ -276,53 +202,30 @@ pub enum DeserializeError {
     },
     /// A tree entry has no counterpart field in the target type.
     ///
-    /// The other half of the strict field-matching policy
-    /// ([`MissingField`](Self::MissingField)). Without this check, a foreign
-    /// tree sharing even one field name would read "successfully" while its
-    /// remaining entries were silently dropped — indistinguishable from a
-    /// value the tree never described. Old readers therefore do not
-    /// transparently read data written by a schema that added fields; such
-    /// evolution goes through the migration machinery (`crate::migration`),
-    /// which pairs a source schema with rename hints and explicit change
-    /// operations.
+    /// Without this check a foreign tree sharing even one field name would
+    /// read "successfully" while dropping its remaining entries. Schema
+    /// evolution (renames, additions, removals) goes through
+    /// `crate::migration`.
     #[error("tree entry {entry:?} has no counterpart in the target type")]
     UnexpectedEntry {
         /// The entry name found in the tree.
         entry: String,
     },
     /// The target type is not supported by this encoding.
-    ///
-    /// Holds the type identifier of the unsupported shape.
     #[error("unsupported type for deserialization: {0}")]
     Unsupported(&'static str),
 }
 
-/// An error produced by writing a value through the identity normal form
-/// ([`hash_into`](crate::normal_form::hash_into) and
-/// [`hash`](crate::normal_form::hash)).
-///
-/// The frozen mapping has no shape errors to report —
-/// [`NormalForm`](crate::normal_form::NormalForm) is the universe, so an
-/// out-of-universe value cannot be constructed — leaving only the two
-/// conditions the data itself can produce.
+/// An error produced by writing a value through the identity normal form.
 #[derive(Debug, thiserror::Error)]
 pub enum NormalFormError {
     /// A map key's name form is not usable as a Git tree entry name.
-    ///
-    /// The rules are the shared tree-entry-name rules
-    /// ([`crate::check_key`]): non-empty, no `/` or NUL, not `.`/`..`, and
-    /// not the general codec's reserved presence-marker name.
     #[error("invalid normal-form map key name {key:?}: not a usable git tree entry name")]
     InvalidKey {
         /// The offending name form.
         key: String,
     },
     /// A struct's field name is not usable as a Git tree entry name.
-    ///
-    /// A `NormalForm::Struct` is public data, so its entry names are only
-    /// fixed by the type when the type itself is trusted; `hash_into` is the
-    /// boundary that refuses names canonical git would refuse, by the same
-    /// shared rules as [`crate::check_key`].
     #[error("invalid normal-form struct field name {field:?}: not a usable git tree entry name")]
     InvalidFieldName {
         /// The offending field name.
@@ -346,17 +249,12 @@ pub enum NormalFormError {
     Backend(#[source] gix_object::write::Error),
 }
 
-/// An error produced by the identity normal form's type-universe check
-/// ([`check_universe`](crate::normal_form::check_universe) and
-/// [`check_identity_subtrees`](crate::normal_form::check_identity_subtrees)).
+/// An error produced by the identity normal form's type-universe check.
 ///
-/// Every variant names the `path` within the checked subtree, so a refused
-/// schema says which field left the universe, not merely that one did.
+/// Every variant names the `path` within the checked subtree.
 #[derive(Debug, thiserror::Error)]
 pub enum UniverseError {
     /// A node the universe excludes.
-    ///
-    /// Holds the offending [`Node`](crate::Node) variant's name.
     #[error("at {path}: {found} is outside the identity normal form's universe")]
     Excluded {
         /// The location within the checked subtree.
@@ -364,8 +262,7 @@ pub enum UniverseError {
         /// The excluded node variant's name.
         found: &'static str,
     },
-    /// A [`Node::Ref`](crate::Node::Ref) names a definition absent from the
-    /// schema document.
+    /// A `Node::Ref` names a definition absent from the schema document.
     #[error("at {path}: schema ref {name:?} has no definition in the document")]
     UnknownRef {
         /// The location within the checked subtree.
@@ -374,9 +271,6 @@ pub enum UniverseError {
         name: String,
     },
     /// The check exceeded the maximum supported nesting depth.
-    ///
-    /// A recursive type reaches this rather than recursing unboundedly; an
-    /// identity subtree that deep could not be hashed stably in any case.
     #[error("at {path}: maximum nesting depth ({depth}) exceeded while checking the universe")]
     MaxDepth {
         /// The location reached when the limit tripped.
@@ -386,28 +280,16 @@ pub enum UniverseError {
     },
 }
 
-/// An error produced by schema generation ([`schema_of`](crate::schema_of) and
-/// [`Schema::from_shape`](crate::Schema::from_shape)).
+/// An error produced by schema generation.
 #[derive(Debug, thiserror::Error)]
 pub enum SchemaError {
     /// The shape contains a scalar type this encoding does not support.
-    ///
-    /// Holds the type identifier of the unsupported scalar. Mirrors
-    /// [`SerializeError::UnsupportedScalar`]: a shape that cannot be encoded
-    /// cannot be described by a schema either.
     #[error("unsupported scalar type in schema: {0}")]
     UnsupportedScalar(&'static str),
     /// The shape contains a type this encoding does not support.
-    ///
-    /// Holds the type identifier of the unsupported shape. Mirrors
-    /// [`SerializeError::Unsupported`].
     #[error("unsupported type in schema: {0}")]
     UnsupportedShape(&'static str),
     /// A smart pointer shape carries no pointee shape to collapse to.
-    ///
-    /// Holds the pointer type's identifier. Transparency collapse resolves a
-    /// pointer to its pointee's schema; a pointer without one (an opaque
-    /// pointer shape) has no schema.
     #[error("smart pointer {0} has no pointee shape")]
     MissingPointee(&'static str),
     /// The embedded kind name is not a valid Git ref-name segment.
@@ -418,37 +300,26 @@ pub enum SchemaError {
         /// The first violated ref-name rule.
         reason: &'static str,
     },
-    /// The schema document's embedded kind is the anonymous-root sentinel.
-    ///
-    /// Two structurally different anonymous roots both carry the
-    /// anonymous-root sentinel ([`Schema::ANONYMOUS_KIND`](crate::Schema::ANONYMOUS_KIND)),
-    /// so publishing it would silently lose
-    /// provenance; name the document with
-    /// [`Schema::with_kind`](crate::Schema::with_kind) instead.
+    /// The schema document's embedded kind is the anonymous-root sentinel,
+    /// which must be named with [`Schema::with_kind`](crate::Schema::with_kind)
+    /// before publication.
     #[error(
         "schema kind is the anonymous-root sentinel; name it with `Schema::with_kind` before \
          publication"
     )]
     AnonymousKind,
     /// Schema generation exceeded the maximum supported nesting depth.
-    ///
-    /// Mirrors [`DeserializeError::MaxDepth`]: data nested deeper than the
-    /// limit could never be read back regardless, so describing it is
-    /// refused rather than recursing unboundedly.
     #[error("maximum nesting depth ({0}) exceeded while generating schema")]
     MaxDepth(usize),
 }
 
-/// An error produced by the schema-schema pin
-/// ([`Schema::write_pinned`](crate::Schema::write_pinned) and
-/// [`Schema::read_pinned`](crate::Schema::read_pinned)/[`read_pin`](crate::Schema::read_pin)).
+/// An error produced by the schema-schema pin.
 #[derive(Debug, thiserror::Error)]
 pub enum SchemaPinError {
-    /// The document pins a schema-schema this build does not speak.
+    /// The document pins a schema-schema generation this build does not speak.
     ///
     /// An oid pin gives equality only, never ordering, so this cannot
-    /// distinguish an older generation from a newer one — it can only say
-    /// which generations this build recognizes.
+    /// distinguish older from newer — only unrecognized.
     #[error(
         "schema tree {tree} was written against schema-schema {pinned}, which this build does \
          not recognize; it speaks {}",
@@ -460,21 +331,18 @@ pub enum SchemaPinError {
         /// The pinned schema-schema tree id.
         pinned: ObjectId,
     },
-    /// The document carries no `schema` pin entry, and is not itself a known
+    /// The document carries no `schema` pin entry and is not itself a known
     /// schema-schema root.
-    ///
-    /// A truncated or hand-written document must be rejected here, not read
-    /// as though it were the genesis generation.
     #[error("schema tree {0} carries no schema-schema pin and is not itself a known root")]
     Unpinned(ObjectId),
-    /// Writing the document, or the schema-schema tree it pins, failed.
+    /// Writing the document or its pinned schema-schema tree failed.
     #[error(transparent)]
     Serialize(#[from] SerializeError),
-    /// The embedded kind name failed the Git ref-segment validation.
+    /// The embedded kind name failed Git ref-segment validation.
     #[error(transparent)]
     Schema(#[from] SchemaError),
-    /// A tree identified as the pre-`kind` generation does not have the exact
-    /// historical `{root, defs}` representation expected by that reader.
+    /// A pre-`kind` generation tree lacks the exact historical representation
+    /// that reader expects.
     #[error("legacy schema tree {tree} has invalid pre-kind representation: {reason}")]
     LegacyFormat {
         /// The schema tree that failed the compatibility check.
@@ -482,8 +350,7 @@ pub enum SchemaPinError {
         /// The violated compatibility invariant.
         reason: &'static str,
     },
-    /// Reading the pin entry, or the document itself, failed exactly as
-    /// an ordinary typed deserialize would.
+    /// Reading the pin entry or the document itself failed.
     #[error(transparent)]
     Deserialize(#[from] DeserializeError),
     /// The canonical schema document did not survive the fixed-point check.
@@ -509,20 +376,17 @@ pub enum SchemaPinError {
     },
 }
 
-/// An error produced by the migration-schema pin
-/// ([`Migration::write_pinned`](crate::Migration::write_pinned) and
-/// [`Migration::read_pinned`](crate::Migration::read_pinned)/[`read_pin`](crate::Migration::read_pin)).
+/// An error produced by the migration-schema pin.
 ///
-/// The migration tower is separate from the schema-schema tower, so this is a
-/// separate error: a build may speak one generation of `Schema` and a
-/// different generation of `Migration`.
+/// Separate from [`SchemaPinError`] because a build may speak one generation
+/// of `Schema` and a different generation of `Migration`.
 #[derive(Debug, thiserror::Error)]
 pub enum MigrationPinError {
-    /// The migration pins a migration-schema this build does not speak.
+    /// The migration pins a migration-schema generation this build does not
+    /// speak.
     ///
-    /// Refusing here is what stops an unrecognized operator from being
-    /// silently skipped, which would not fail the read — it would produce a
-    /// value that looks conformant and is not.
+    /// Refusing here stops an unrecognized operator from being silently
+    /// skipped, which would produce a value that looks conformant and is not.
     #[error(
         "migration tree {tree} was written against migration-schema {pinned}, which this build \
          does not recognize; it speaks {}",
@@ -534,32 +398,25 @@ pub enum MigrationPinError {
         /// The pinned migration-schema tree id.
         pinned: ObjectId,
     },
-    /// The migration carries no `schema` pin entry, and is not itself a known
+    /// The migration carries no `schema` pin entry and is not itself a known
     /// migration-schema root.
     #[error("migration tree {0} carries no migration-schema pin and is not itself a known root")]
     Unpinned(ObjectId),
-    /// Writing the migration, or the migration-schema tree it pins, failed.
+    /// Writing the migration or its pinned migration-schema tree failed.
     #[error(transparent)]
     Serialize(#[from] SerializeError),
-    /// Reading the pin entry, or the migration itself, failed exactly as an
-    /// ordinary typed deserialize would.
+    /// Reading the pin entry or the migration itself failed.
     #[error(transparent)]
     Deserialize(#[from] DeserializeError),
 }
 
-/// An error produced by schema-driven deserialization
-/// (`deserialize_value_with_schema` and `validate_with_schema`, available with
-/// the `value` feature).
+/// An error produced by schema-driven deserialization (`value` feature).
 #[derive(Debug, thiserror::Error)]
 pub enum SchemaReadError {
     /// The underlying tree walk failed exactly as a typed read would.
-    ///
-    /// Covers missing objects, malformed trees, depth exhaustion, and every
-    /// other condition [`DeserializeError`] describes.
     #[error(transparent)]
     Deserialize(#[from] DeserializeError),
-    /// A `Node::Ref` names a definition absent from the document's `defs`
-    /// table.
+    /// A `Node::Ref` names a definition absent from the document's `defs`.
     #[error("schema ref {0:?} has no definition in the document")]
     UnknownRef(String),
     /// An enum tree's variant name is not present in the schema.
@@ -571,9 +428,6 @@ pub enum SchemaReadError {
         expected: Vec<String>,
     },
     /// A fixed-length sequence's entry count does not match the schema.
-    ///
-    /// Produced for `Node::Array` (whose `len` is part of the schema) and
-    /// `Node::Tuple` (whose element count is).
     #[error("sequence length mismatch: schema expects {expected} elements, tree holds {found}")]
     ArrayLenMismatch {
         /// The element count the schema requires.
@@ -589,8 +443,7 @@ pub enum SchemaReadError {
         /// The text that failed to parse.
         text: String,
     },
-    /// A tree that the schema requires to be empty (a `Unit` value or a unit
-    /// enum variant payload) holds entries.
+    /// A tree the schema requires to be empty holds entries.
     #[error("malformed unit tree: expected no entries, found {found}")]
     MalformedUnit {
         /// How many entries the tree actually holds.
@@ -598,9 +451,8 @@ pub enum SchemaReadError {
     },
     /// A struct tree lacks an entry for a field the schema defines.
     ///
-    /// An `Optional` field is still a present entry — the presence marker
-    /// encodes `None` — so an absent entry always means the tree does not
-    /// describe this schema, never that the field is simply unset.
+    /// An `Optional` field still has a present entry (the presence marker
+    /// encodes `None`), so an absent entry is always an error.
     #[error("struct field {field:?} is missing from the tree")]
     MissingField {
         /// The field the schema defines and the tree omits.
@@ -614,20 +466,17 @@ pub enum SchemaReadError {
     },
 }
 
-/// An error produced by schema-directed serialization
-/// (`serialize_value_with_schema`, available with the `value` feature).
+/// An error produced by schema-directed serialization (`value` feature).
 ///
-/// The write-side mirror of [`SchemaReadError`]: it validates a dynamic value
-/// against a schema while encoding it, so every variant beyond the backend
-/// pass-through names the `path` in the value where the value diverged from
-/// what the schema accepts. The accepted set is exactly the image of
-/// [`deserialize_value_with_schema`](crate::deserialize_value_with_schema),
-/// plus the deterministic bridges a JSON-authored value needs (an integer into
-/// a float field; a string into a `Bytes` field).
+/// Every variant beyond the backend pass-through names the `path` in the
+/// value where it diverged from the schema. The accepted set is exactly the
+/// image of [`deserialize_value_with_schema`](crate::deserialize_value_with_schema),
+/// plus the bridges a JSON-authored value needs (integer into a float field;
+/// string into a `Bytes` field).
 #[derive(Debug, thiserror::Error)]
 pub enum SchemaWriteError {
     /// The underlying object write, key validation, or `Dynamic`-node
-    /// encoding failed exactly as an ordinary serialization would.
+    /// encoding failed.
     #[error(transparent)]
     Serialize(#[from] SerializeError),
     /// The value's runtime kind does not match the schema node.
@@ -652,9 +501,8 @@ pub enum SchemaWriteError {
     },
     /// An integer has no exact representation in the schema's float type.
     ///
-    /// The float-field bridge is lossless by design: an integer that cannot be
-    /// represented exactly at the target width is refused rather than rounded,
-    /// the same posture [`SerializeError::UnrepresentableNumber`] takes.
+    /// The float-field bridge is lossless: unrepresentable integers are
+    /// refused rather than rounded.
     #[error("at {path}: number has no exact {schema} representation")]
     UnrepresentableNumber {
         /// The location within the value.
@@ -663,10 +511,6 @@ pub enum SchemaWriteError {
         schema: &'static str,
     },
     /// An object holds a key the struct schema does not define.
-    ///
-    /// The accepted set is exactly the image of the schema-driven read, which
-    /// only ever emits the schema's own fields, so an extra key is rejected
-    /// rather than silently dropped.
     #[error("at {path}: unknown field {field:?}")]
     UnknownField {
         /// The location of the object.
@@ -676,10 +520,9 @@ pub enum SchemaWriteError {
     },
     /// An object lacks a key a struct field requires.
     ///
-    /// [`SchemaReadError::MissingField`] requires a tree entry for every
-    /// field a schema names, `Optional` included; a write that silently
-    /// dropped an absent field would produce exactly that unreadable tree, so
-    /// this is refused here instead, before anything is written.
+    /// The schema-driven read requires a tree entry for every field,
+    /// `Optional` included; a silent drop here would produce an unreadable
+    /// tree, so it is refused before anything is written.
     #[error("at {path}: missing field {field:?}")]
     MissingField {
         /// The location of the object.
@@ -734,9 +577,8 @@ pub enum SchemaWriteError {
     },
     /// Serialization exceeded the maximum supported nesting depth.
     ///
-    /// Mirrors [`DeserializeError::MaxDepth`]: since every hop — including
-    /// `Ref` resolution — counts against the limit, a `Ref`-to-`Ref` cycle in
-    /// the schema fails here rather than recursing unboundedly.
+    /// Every hop, including `Ref` resolution, counts against the limit, so a
+    /// `Ref`-to-`Ref` cycle fails here rather than recursing unboundedly.
     #[error("at {path}: maximum nesting depth ({depth}) exceeded while serializing")]
     MaxDepth {
         /// The location reached when the limit tripped.
@@ -746,13 +588,10 @@ pub enum SchemaWriteError {
     },
 }
 
-/// An error produced by read-time migration application
-/// (`apply` and `apply_chain`, available with the `value` feature).
+/// An error produced by read-time migration application (`value` feature).
 ///
-/// The migration-walk mirror of [`SchemaReadError`]/[`SchemaWriteError`]: it
-/// walks an already-read `facet_value::Value` guided by the source
-/// `Schema`, so every variant names the `path` at which the value
-/// diverged from what that document describes.
+/// Walks an already-read `facet_value::Value` guided by the source `Schema`;
+/// every variant names the `path` where the value diverged from that document.
 #[derive(Debug, thiserror::Error)]
 pub enum MigrationError {
     /// The value does not match the source schema at `path`.
@@ -769,8 +608,8 @@ pub enum MigrationError {
     /// schema.
     ///
     /// Refused rather than truncated: an upcast that silently dropped
-    /// elements would produce a value that conforms to the target schema and
-    /// is not the value that was stored.
+    /// elements would produce a value conforming to the target schema that
+    /// is not the stored value.
     #[error("at {path}: expected {expected} elements, found {found}")]
     LengthMismatch {
         /// The location within the value.
@@ -789,10 +628,6 @@ pub enum MigrationError {
         name: String,
     },
     /// Recursion exceeded the maximum supported nesting depth.
-    ///
-    /// Mirrors [`DeserializeError::MaxDepth`]: since every hop — including
-    /// `Ref` resolution — counts against the limit, a `Ref`-to-`Ref` cycle in
-    /// the source schema fails here rather than recursing unboundedly.
     #[error("at {path}: maximum nesting depth ({depth}) exceeded while applying a migration")]
     MaxDepth {
         /// The location reached when the limit tripped.

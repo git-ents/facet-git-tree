@@ -5,22 +5,13 @@ use facet::Facet;
 use crate::ObjectId;
 
 /// A Git blob already written into the backing store, embedded by object id
-/// rather than walked field-by-field.
-///
-/// `serialize_node` and `deser_into` special-case this type ahead of the
-/// generic scalar branch: a `RawBlob` field passes its wrapped object id
-/// straight through as a blob entry (no recursion, no write), and reading one
-/// back captures the child entry's object id without decoding its contents.
-/// The referenced object is verified to be a blob during deserialization.
-///
-/// The wrapped blob must already exist in the store the caller serializes into;
-/// `RawBlob` carries no content of its own to write. Sha-1 only, like the rest
-/// of this crate.
+/// rather than walked field-by-field: the serializer and deserializer
+/// intercept this type by shape identity, pass the wrapped object id
+/// straight through as a blob entry, and the referenced object must already
+/// exist in the store being written to. Sha-1 only, like the rest of this
+/// crate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Facet)]
 pub struct RawBlob {
-    // Opaque to the normal field-by-field encoding: `serialize_node`/
-    // `deser_into` intercept `RawBlob` by shape identity before this field is
-    // ever visited.
     hash: [u8; 20],
 }
 

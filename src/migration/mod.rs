@@ -1,12 +1,12 @@
-//! The lens vocabulary: the data describing one schema edge (schema A -> schema B).
+//! The lens vocabulary: the data describing one schema edge
+//! (schema A → schema B).
 //!
-//! A migration is DATA, never Rust code: it is an ordinary [`Facet`] value
-//! storable through this crate's own tree encoding, exactly as
-//! [`Schema`](crate::Schema) is self-hosted. The vocabulary is
-//! tiny — every operator here is semantics every consumer, in
-//! every language, must implement forever. Migration is read-time upcast,
-//! never rewrite: nothing here ever produces a new stored value tree from an
-//! old one.
+//! A migration is DATA, never Rust code: an ordinary [`Facet`] value storable
+//! through this crate's own tree encoding, exactly as [`Schema`](crate::Schema)
+//! is self-hosted. The vocabulary is tiny — every operator here is semantics
+//! every consumer, in every language, must implement forever. Migration is
+//! read-time upcast, never rewrite: nothing here produces a new stored value
+//! tree from an old one.
 
 #[cfg(feature = "value")]
 pub mod apply;

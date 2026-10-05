@@ -13,11 +13,8 @@ use crate::schema::scalar_node;
 use crate::store::ObjectStore;
 use crate::{EntryKind, EntryMode, ObjectId, RawBlob, RawTree, TreeEntry};
 
-/// Collapse a `facet` reflection error to [`SerializeError::Reflect`].
-///
-/// `facet`'s `Peek` operations return their own non-`'static` error types;
-/// this collapses them to the dedicated text-carrying variant at the call site
-/// without a bespoke closure every time.
+/// Collapse a `facet` reflection error to [`SerializeError::Reflect`]
+/// (reflection errors are not `'static`-friendly).
 fn reflect(e: impl std::fmt::Display) -> SerializeError {
     SerializeError::Reflect(e.to_string())
 }
@@ -194,18 +191,12 @@ fn serialize_sequence<W: Write + ?Sized>(
 
 /// Serialize a map: scalar keys name their entries directly; composite keys
 /// are written as `{ k, v }` pair sub-trees, each named by the pair tree's
-/// own object id.
+/// own object id (hex, so the name-sorted tree is content-ordered).
 ///
-/// Composite pairs are content-named rather than ordinal-named because a map
-/// is unordered data — ordinals would imply an ordering the type does not
-/// have and pay renumbering churn on every insertion. Content names make a
-/// `git diff` show only the pairs that changed, and let a tree merge add or
-/// remove one pair without touching the rest. Duplicate keys are refused on
-/// write ([`SerializeError::DuplicateKey`]) and read
-/// ([`DeserializeError::DuplicateKey`]), so a merge cannot silently collapse
-/// two pairs into one. The read side is name-agnostic (it iterates entries
-/// and recurses into each as a pair sub-tree), so naming is a writer-side
-/// spelling only.
+/// Content names rather than ordinals because a map is unordered data and a
+/// `git diff` should show only the pairs that changed; a tree merge can add
+/// or remove one pair without touching the rest. Duplicate keys are refused
+/// on write ([`SerializeError::DuplicateKey`]) and read.
 fn serialize_map<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
@@ -253,13 +244,6 @@ fn serialize_map<W: Write + ?Sized>(
             let pair_oid = write_sorted_tree(store, pair)?;
             entries.push(TreeEntry {
                 mode: EntryMode::from(EntryKind::Tree),
-                // The pair's own object id, as hex: a map is unordered data,
-                // so entry names carry no ordering to preserve — naming them
-                // by content instead makes a diff show only the pairs that
-                // changed and lets a tree-merge add or remove one pair
-                // without renumbering the rest. Hex of a fixed-width oid
-                // sorts in oid order, so the name-sorted tree is
-                // content-ordered too.
                 filename: pair_oid.to_string().into(),
                 oid: pair_oid,
             });
@@ -365,17 +349,13 @@ fn write_tree_or_presence_marker<W: Write + ?Sized>(
     }
 }
 
-/// Serialize a dynamic value (`Def::DynamicValue`, e.g. `facet_value::Value`)
-/// by dispatching on its runtime kind.
+/// Serialize a dynamic value (`Def::DynamicValue`) by dispatching on its
+/// runtime kind.
 ///
-/// Dynamic kinds use the same encodings as equivalent typed values whenever
-/// they can be rendered. Empty dynamic containers and `Null` use the presence
-/// marker so Git tooling can observe their presence instead of treating them
-/// as absent empty trees.
-///
-/// If the runtime interface cannot recover an exact representation—especially
-/// for out-of-range integers—the value is rejected rather than serialized
-/// lossily, which would change its object id.
+/// Dynamic kinds use the same encodings as equivalent typed values wherever
+/// they can be rendered; an exact representation the runtime cannot recover
+/// is rejected rather than serialized lossily (which would change the
+/// object id).
 fn serialize_dynamic<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
@@ -418,22 +398,19 @@ fn serialize_dynamic<W: Write + ?Sized>(
             blob(b)
         }
         DynValueKind::Number => {
-            // Resolve values beyond the generic vtable's 64-bit accessors
-            // without changing the encoding of values those accessors handle.
-            // The `facet_value::Value` downcast is unconditional — the crate
-            // is an unconditional dependency — so an exact integer or a
-            // genuinely float-backed whole number encodes identically with
-            // and without the `value` feature: the same input must not
-            // succeed or fail depending on a feature flag.
+            // `facet_value::Value` is an unconditional dependency, so its
+            // downcast is tried unconditionally: the same input must not
+            // encode differently with or without the `value` feature. It
+            // resolves values beyond the generic vtable's 64-bit accessors.
             if peek.shape().is_type::<facet_value::Value>()
                 && dv.as_i64().is_none()
                 && dv.as_u64().is_none()
             {
                 let v = peek.get::<facet_value::Value>().map_err(reflect)?;
                 if let Some(n) = v.as_number() {
-                    // Preserve float-backed values as floats: integer
-                    // accessors can expose an exact integer while changing
-                    // the shortest-round-tripping decimal representation.
+                    // Float-backed values stay floats: the integer accessors
+                    // can expose an exact integer while changing the
+                    // shortest-round-tripping decimal representation.
                     if n.is_float() {
                         return blob(&float_text(n.to_f64_lossy()));
                     }
@@ -515,11 +492,9 @@ fn serialize_dynamic<W: Write + ?Sized>(
     }
 }
 
-/// Render a dynamic datetime as RFC 3339-style text.
-///
-/// Render the vtable's datetime tuple in the format specified for dynamic
-/// datetimes. Negative years pad the magnitude separately so `-5` becomes
-/// `-0005`; years at least `10000` are not truncated.
+/// Render a dynamic datetime as RFC 3339-style text; negative years pad the
+/// magnitude separately (`-5` becomes `-0005`), years `10000`+ are not
+/// truncated.
 #[allow(clippy::type_complexity)] // the vtable's datetime tuple, taken as-is
 fn datetime_text(
     parts: (i32, u8, u8, u8, u8, u8, u32, DynDateTimeKind),
@@ -631,12 +606,8 @@ pub(crate) fn float_text<F: FloatScalar>(v: F) -> Vec<u8> {
     v.to_string().into_bytes()
 }
 
-/// Write `content` as a leaf blob, with exactly one trailing `\n` appended.
-///
-/// Appends exactly one newline to every value leaf, unconditionally. This
-/// preserves the distinction between content ending in `\n` and content that
-/// does not; the structural presence marker is intentionally excluded and
-/// remains the empty blob.
+/// Write `content` as a leaf blob with exactly one trailing `\n`, so
+/// content ending in `\n` stays distinguishable from content that does not.
 pub(crate) fn write_leaf_blob<W: Write + ?Sized>(
     store: &W,
     content: &[u8],
@@ -691,12 +662,10 @@ fn scalar_bytes(peek: Peek<'_, '_>) -> Result<Vec<u8>, SerializeError> {
                 }
             }
             PrimitiveType::Numeric(NumericType::Integer { .. }) => {
-                // Platform-width integers are spec'd i64/u64-shaped: they are
-                // encoded as their decimal text, exactly as the same value's
-                // fixed-width encoding would be, so object ids never depend
-                // on pointer width. The bounded conversions are infallible on
-                // every target where `usize` fits `u64`; a hypothetical wider
-                // target is refused rather than re-spelled per platform.
+                // Platform-width integers encode as their decimal text, the
+                // same bytes their i64/u64 encoding would have, so object
+                // ids never depend on pointer width. Refused on a
+                // hypothetical wider target.
                 if let Ok(v) = peek.get::<isize>() {
                     let v = i64::try_from(*v)
                         .map_err(|_| SerializeError::UnsupportedScalar(shape.type_identifier))?;

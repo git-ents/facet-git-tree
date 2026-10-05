@@ -2,21 +2,15 @@
 //! [`MigrationSchema::ENTRY`] entry spliced onto its tree at write time, the
 //! generation of `schema_of::<Migration>()` it was written against.
 //!
-//! A `Migration` is a stored, self-hosted document exactly as [`Schema`]
-//! is, and its own shape will evolve — a future generation may add a
-//! [`Change`](crate::migration::Change) variant. A reader that silently
-//! ignored an operation it did not understand would produce a wrong value,
-//! which is strictly worse than the schema case, so a stored migration
-//! carries the same out-of-band pin: checked with one `ls-tree` lookup
-//! before any deserialize.
+//! A migration from a newer binary may contain a [`Change`] the reader has
+//! never heard of, and a reader that silently ignored it would produce a
+//! wrong value — so the pin is checked with one `ls-tree` lookup before any
+//! deserialize. This tower is separate from the schema-schema tower
+//! ([`crate::schema::pin`]) because the two documents evolve independently.
+//! Each generation's own tree also carries the codec fixture, shared with
+//! the schema-schema tower under the same name.
 //!
-//! This tower is separate from the schema-schema tower
-//! ([`crate::schema::pin`]): the two documents evolve independently, and
-//! adding a `Change` variant must not invalidate every stored `Schema`.
-//!
-//! Each generation's own tree also carries a [`codec`] entry, exactly as the
-//! schema-schema tower's does — the same fixture, spliced under the same
-//! name, so the two towers share one content-addressed `codec` object.
+//! [`Change`]: crate::migration::Change
 
 use gix_object::{Find, Write};
 

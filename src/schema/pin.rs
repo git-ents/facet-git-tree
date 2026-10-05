@@ -3,16 +3,11 @@
 //! generation of the schema-schema it was written against.
 //!
 //! The pin is a storage-layer splice, not a Rust field — a `schema:` field on
-//! `Schema` would make [`schema_of::<Schema>()`](crate::schema_of)
-//! describe the pin and recurse forever. It works the same way `gix-store`'s
-//! subtree schema binding splices `{value/, schema/}` onto a data commit's
-//! tree: the pinned tree sits beside the document it governs, reachable by
-//! ordinary tree walking, with nothing to deserialize to find it.
-//!
-//! Each generation's own tree also carries a [`codec`] entry: a fixture value
-//! exercising every construct the codec can encode, so a change to how a
-//! value is spelled — not just to `Schema`'s own shape — moves the
-//! generation id too.
+//! `Schema` would make [`schema_of::<Schema>()`](crate::schema_of) describe
+//! the pin and recurse forever. Each generation's own tree also carries a
+//! [`codec`] entry: a fixture value exercising every construct the codec can
+//! encode, so a spelling change — not just a `Schema` shape change — moves
+//! the generation id too.
 
 use std::collections::BTreeMap;
 

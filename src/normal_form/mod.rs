@@ -1,85 +1,47 @@
 //! The identity normal form: a frozen mini-codec over a closed primitive
-//! universe, plus the check that decides whether a schema subtree lives in
-//! that universe.
+//! universe, plus the check deciding whether a schema subtree lives in it.
 //!
-//! Identity- and key-bearing subtrees (an anchor id, an action key) are hashed
-//! through this mapping rather than through the general codec, so that codec
-//! stays free to evolve: a grammar or encoder change must never move an
-//! identity. Only this mapping is frozen. It lives in `facet-git-tree`
-//! because that crate owns the pure codec, and the normal form is a second,
-//! smaller codec over the same [`Node`] universe — not a storage
-//! or authority concern.
-//!
-//! # The universe
-//!
-//! [`NormalForm`] is closed by construction: there is no variant that can hold
-//! an enum tag, a dynamic facet value, a `RawTree`, an `Option`, or anything
-//! else schema-rich, so an out-of-universe value is unrepresentable rather
-//! than merely rejected. [`Key`] is closed the same way, over scalars only.
-//!
-//! Platform-width integers (`isize`/`usize`) are absent: their
-//! width is a property of the machine that captured the value, and a frozen
-//! mapping cannot depend on that. Floats are present, encoded verbatim from
-//! their IEEE-754 bits with no canonicalization, so `-0.0` and `0.0` — and two
-//! NaNs with different payloads — are distinct identities; identity coordinates
-//! are better expressed without them.
+//! Identity- and key-bearing subtrees (an anchor id, an action key) are
+//! hashed through this mapping rather than the general codec, so that codec
+//! stays free to evolve without moving an identity. [`NormalForm`] is closed
+//! by construction — no enum tag, dynamic value, option, or raw tree is
+//! representable — and `isize`/`usize` are absent because a frozen mapping
+//! cannot depend on platform width. Floats encode verbatim from their
+//! IEEE-754 bits, so `-0.0`, `0.0`, and differently-payloaded NaNs are
+//! distinct identities.
 //!
 //! # The frozen mapping
 //!
-//! Every leaf is a blob holding exactly the bytes below — no trailing newline,
-//! unlike the general codec, whose newline is a readability affordance of an
-//! evolving format. Every composite is a tree; git's own name-sorted entries
-//! supply the ordering, and no presence marker is used, so an empty list,
-//! struct, or map is the literal empty tree.
+//! Leaves are blobs of exactly the bytes below (no trailing newline);
+//! composites are trees with git's own name-sorted ordering and no presence
+//! marker (an empty list, struct, or map is the literal empty tree).
 //!
-//! | value | git object | bytes |
-//! |---|---|---|
-//! | [`Bool`](NormalForm::Bool) | blob | one byte, `0x01` for true, `0x00` for false |
-//! | [`I8`](NormalForm::I8)…[`I128`](NormalForm::I128) | blob | two's complement, big-endian, 1/2/4/8/16 bytes |
-//! | [`U8`](NormalForm::U8)…[`U128`](NormalForm::U128) | blob | unsigned big-endian, 1/2/4/8/16 bytes |
-//! | [`F32`](NormalForm::F32)/[`F64`](NormalForm::F64) | blob | IEEE-754 bits, big-endian, 4/8 bytes |
-//! | [`Char`](NormalForm::Char) | blob | the character's UTF-8 encoding, 1–4 bytes |
-//! | [`Str`](NormalForm::Str) | blob | the string's UTF-8 bytes, verbatim |
-//! | [`Bytes`](NormalForm::Bytes) | blob | the bytes, verbatim |
-//! | [`Hash`](NormalForm::Hash) | blob | the object id's raw hash bytes (20 for SHA-1) |
-//! | [`List`](NormalForm::List) | tree | one entry per element, named by its zero-based index as exactly eight zero-padded ASCII decimal digits (`00000000`) |
-//! | [`Struct`](NormalForm::Struct) | tree | one entry per field, named by the field name verbatim |
-//! | [`Map`](NormalForm::Map) | tree | one entry per pair, named by the key's name form below |
+//! - Bool: one byte, `0x01`/`0x00`. Integers: two's-complement (signed) or
+//!   unsigned big-endian, 1/2/4/8/16 bytes. Floats: IEEE-754 bits,
+//!   big-endian. Char: UTF-8. Str/Bytes: verbatim. Hash: raw hash bytes.
+//! - List: one entry per element, named by zero-based eight-digit
+//!   zero-padded decimal ordinal.
+//! - Struct: one entry per field, named verbatim.
+//! - Map: one entry per pair, named by the key's name form (below).
 //!
-//! Tree entry modes are `40000` for a tree child and `100644` for a blob
-//! child; no other mode occurs.
-//!
-//! A [`Key`]'s name form is:
-//!
-//! | key | name |
-//! |---|---|
-//! | [`Bool`](Key::Bool) | `true` or `false` |
-//! | [`I8`](Key::I8)…[`U128`](Key::U128) | ASCII decimal, `-` prefixed when negative, no leading zeros |
-//! | [`Char`](Key::Char) | the character's UTF-8 encoding |
-//! | [`Str`](Key::Str) | the string's UTF-8 bytes, verbatim |
-//! | [`Bytes`](Key::Bytes)/[`Hash`](Key::Hash) | lowercase hex of the bytes |
-//!
-//! A name must be non-empty and hold neither `/` nor NUL, since it is a git
-//! path segment, and is subject to the same remaining rules as the general
-//! codec's keys (not `.`/`..`, not the reserved marker name) — see
-//! [`crate::check_key`]. [`NormalFormError::InvalidKey`] reports one that is
-//! not. Two
-//! keys of different variants can share a name (`Key::Str("true")` and
-//! `Key::Bool(true)`), which is unambiguous in practice because a map's key
-//! type is fixed by its schema. The mapping is untagged for the same reason:
-//! the hash identifies a value under a known shape, exactly as a git tree
-//! identifies content under a known layout.
+//! Tree modes are `40000` for a tree child, `100644` for a blob child. A
+//! [`Key`]'s name form: `true`/`false`; ASCII decimal for integers
+//! (`-`-prefixed, no leading zeros); UTF-8 for char/string; lowercase hex
+//! for bytes/hash. A name must satisfy [`crate::check_key`]'s rules.
+//! Two keys of different variants may share a name (`Key::Str("true")` and
+//! `Key::Bool(true)`) — unambiguous since a map's key type is fixed by its
+//! schema — and the mapping is untagged for the same reason: the hash
+//! identifies a value under a known shape.
 //!
 //! # Marking a subtree
 //!
-//! `#[facet(facet_git_tree::identity_key)]` on a field or a type marks its
-//! subtree (see [`crate::attr`]). [`schema_of`](crate::schema_of) compiles the mark into the schema
-//! document as a definition whose name carries the reserved
-//! [`IDENTITY_DEF_PREFIX`], referenced by an ordinary [`Node::Ref`] — which
-//! adds no tree level, so a marked type's encoding is byte-identical to an
-//! unmarked one's. [`identity_subtrees`] recovers the marked nodes from a
-//! schema document, and [`check_identity_subtrees`] checks every one of them,
-//! which is what a schema registration refuses on.
+//! `#[facet(facet_git_tree::identity_key)]` on a field or type marks its
+//! subtree (see [`crate::attr`]). [`schema_of`](crate::schema_of) compiles
+//! the mark into a definition named with the reserved [`IDENTITY_DEF_PREFIX`]
+//! (referenced by an ordinary [`Node::Ref`], adding no tree level);
+//! [`identity_subtrees`] recovers the marked nodes and
+//! [`check_identity_subtrees`] checks each — the gate schema registration
+//! refuses on.
 
 use std::collections::BTreeMap;
 
@@ -104,12 +66,10 @@ pub const IDENTITY_DEF_PREFIX: &str = "identity:";
 /// exactly this many elements is the largest accepted.
 const MAX_LIST_LEN: usize = 100_000_000;
 
-/// A value in the identity normal form's closed universe.
-///
-/// Every variant maps to git bytes by the frozen mapping in the [module
-/// docs](self). The type is the universe: no variant can hold an enum tag, a
-/// dynamic value, an option, or a raw tree, so
-/// [`hash_into`] needs no validation step.
+/// A value in the identity normal form's closed universe, mapping to git
+/// bytes by the frozen mapping in the [module docs](self). The type is the
+/// universe: no variant can hold an enum tag, dynamic value, option, or raw
+/// tree, so [`hash_into`] needs no validation step.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NormalForm {
     /// A boolean.
@@ -148,15 +108,10 @@ pub enum NormalForm {
     Hash(ObjectId),
     /// An ordered sequence.
     List(Vec<NormalForm>),
-    /// A fixed-name-field composite: the shape a struct with named fields
-    /// (`Action.key`'s `executor`/`inputs`/`params`) takes.
-    ///
-    /// First-class beside [`Map`](Self::Map) because named-field composites are
-    /// the dominant identity shape and their keys come from the schema, not
-    /// from the data: a `Struct`'s entry names are fixed by the type. They are
-    /// still checked against the shared tree-entry-name rules at write time
-    /// ([`NormalFormError::InvalidFieldName`]), because the type is public
-    /// data and a hand-constructed map can carry any name at all.
+    /// A fixed-name-field composite; first-class beside
+    /// [`Map`](Self::Map) because its entry names come from the schema, not
+    /// the data, and are still checked against the shared tree-entry-name
+    /// rules at write time ([`NormalFormError::InvalidFieldName`]).
     Struct(BTreeMap<String, NormalForm>),
     /// A keyed map, whose keys come from the data.
     Map(BTreeMap<Key, NormalForm>),
@@ -199,15 +154,8 @@ pub enum Key {
 }
 
 impl Key {
-    /// The key's git tree entry name, per the frozen mapping.
-    ///
-    /// Fails with [`NormalFormError::InvalidKey`] when the name is not usable
-    /// as a git path segment, by the same rules [`crate::check_key`] enforces
-    /// for the general codec: non-empty, no `/` or NUL, not `.`/`..`, and not
-    /// the general codec's reserved presence-marker name — canonical git
-    /// refuses entries violating the first four outright, and the fifth keeps
-    /// a normal-form subtree legible to consumers that also read
-    /// general-codec trees.
+    /// The key's git tree entry name, per the frozen mapping; fails with
+    /// [`NormalFormError::InvalidKey`] when unusable as a git path segment.
     pub fn name(&self) -> Result<String, NormalFormError> {
         let name = match self {
             Key::Bool(v) => v.to_string(),
@@ -238,13 +186,9 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Write `value`'s git objects into `store` and return the root object id: the
-/// identity, or the key, of whatever the value describes.
-///
-/// The object is a genuine git object — the root of a real tree, or a blob for
-/// a scalar value — so the returned id is fetchable, attestable, and
-/// diffable like any other. `store` is the same backend contract the rest of
-/// the crate takes: any `gix` [`Write`] sink, `?Sized` so a `&dyn Write` works.
+/// Write `value`'s git objects into `store` and return the root object id —
+/// the identity, or key, of whatever the value describes. `store` is any
+/// `gix` [`Write`] sink; `?Sized` so a `&dyn Write` works.
 pub fn hash_into<W: Write + ?Sized>(
     value: &NormalForm,
     store: &W,
@@ -367,12 +311,8 @@ fn write_tree<W: Write + ?Sized>(
     Ok((oid, EntryKind::Tree))
 }
 
-/// Every identity- or key-bearing subtree of `schema`: its definition name and
-/// the marked node.
-///
-/// A subtree is marked by `#[facet(identity::key)]` on the field or type it
-/// describes, which [`schema_of`](crate::schema_of) compiles into a definition
-/// named with the reserved [`IDENTITY_DEF_PREFIX`].
+/// Every identity- or key-bearing subtree of `schema`: its definition name
+/// and the marked node.
 pub fn identity_subtrees(schema: &Schema) -> impl Iterator<Item = (&str, &Node)> {
     schema
         .defs
@@ -381,13 +321,8 @@ pub fn identity_subtrees(schema: &Schema) -> impl Iterator<Item = (&str, &Node)>
         .map(|(name, node)| (name.as_str(), node))
 }
 
-/// Check every identity- or key-bearing subtree of `schema` against the normal
-/// form's universe.
-///
-/// The gate a schema registration runs: a marked subtree that reaches an enum,
-/// a dynamic value, an option, or any other excluded node makes the schema
-/// unregistrable, because a value under it could never be given a stable
-/// identity.
+/// Check every identity- or key-bearing subtree of `schema` against the
+/// normal form's universe; the gate a schema registration runs.
 pub fn check_identity_subtrees(schema: &Schema) -> Result<(), UniverseError> {
     for (name, node) in identity_subtrees(schema) {
         check_universe_at(node, &schema.defs, name)?;
@@ -398,16 +333,10 @@ pub fn check_identity_subtrees(schema: &Schema) -> Result<(), UniverseError> {
 /// Whether `node`, resolved through `defs`, lies in the normal form's
 /// universe.
 ///
-/// Accepted: the scalar nodes the universe names, [`Node::Bytes`],
-/// [`Node::Struct`], [`Node::Tuple`], [`Node::List`], [`Node::Array`],
-/// [`Node::Map`] with a scalar or byte-string key, and [`Node::Ref`] to any of
-/// those. Everything else is refused with the path at which it was found:
-/// [`Node::Enum`] and [`Node::Dynamic`] because they are schema-rich,
-/// [`Node::RawTree`] because it names a tree this mapping did not write,
-/// [`Node::Optional`] because absence is not in the universe — an identity
-/// coordinate that may be missing is a different identity, not the same one
-/// with a hole — and [`Node::Unit`], [`Node::ISize`], and [`Node::USize`]
-/// because they have no frozen encoding (see the [module docs](self)).
+/// Refused: [`Node::Enum`] and [`Node::Dynamic`] (schema-rich),
+/// [`Node::RawTree`] (names a tree this mapping did not write),
+/// [`Node::Optional`] (absence is not in the universe), and
+/// [`Node::Unit`]/[`Node::ISize`]/[`Node::USize`] (no frozen encoding).
 pub fn check_universe(node: &Node, defs: &BTreeMap<String, Node>) -> Result<(), UniverseError> {
     check_universe_at(node, defs, "")
 }

@@ -6,55 +6,12 @@
 //! the entry points are generic over `gix`'s `Find` and `Write` traits, so a
 //! real `gix` repository or object database works just as well.
 //!
-//! The normative encoding rules live in `docs/specification.adoc`.
+//! # Field matching
 //!
-//! # Design notes
-//!
-//! Three consequences of encoding into Git's object model rather than a
-//! custom container format:
-//!
-//! * **Unit enum variants are bare blobs** holding the variant name — their
-//!   entire information content — rather than trees wrapping it. Git's
-//!   `ls-tree -r` and `diff` are blob-oriented, so a variant flip shows up
-//!   as an ordinary one-line content change instead of vanishing as a
-//!   tree-entry rename with no content on either side.
-//!
-//! * **Emptiness is a blob, not an absence**: `None`, dynamic `Null`, and
-//!   empty collections are written as a one-entry presence-marker tree
-//!   (see `marker`) instead of a literal empty tree, which contributes
-//!   nothing to `ls-tree -r` or `diff` — so a field going empty is
-//!   visible in exactly the way a field never existing is not.
-//!
-//! * **Every `Some` costs a tree level** (`field/some/blob`): the `some`
-//!   wrapper keeps a defaulted field's absence (no entry at all)
-//!   distinguishable from an explicit `None` (the marker), at one tree
-//!   level per optional value.
-//!
-//! One asymmetry: a dynamic `DateTime` is written as RFC 3339 text, but the
-//! schema language has no `Node::DateTime`, so a schema-directed read
-//! recovers it as a `String` — the schema cannot describe a value the
-//! codec writes. Lossy by design.
-//!
-//! # Field-matching policy
-//!
-//! Typed field matching is strict in both directions:
-//!
-//! * **A missing field is an error** — except when the field carries a
-//!   `facet` default (filled by the type's own default machinery) or is of
-//!   `Option` type (read as `None`). Those are the only cases where
-//!   "absent" has an unambiguous reading. Every other missing field fails
-//!   with [`DeserializeError::MissingField`].
-//! * **An extra tree entry with no counterpart field is an error**
-//!   ([`DeserializeError::UnexpectedEntry`]). Old readers do not
-//!   transparently read data written by a schema that has gained fields;
-//!   schema evolution — additions, renames, removals — goes through the
-//!   `migration` machinery (`crate::migration`), which pairs a source
-//!   schema with rename hints and explicit change operations.
-//! * **A composite-key map may not hold two pairs for one key.** Content-
-//!   named pair entries merge without conflicts, so a merged tree can carry
-//!   two pairs for the same key; both write ([`SerializeError::DuplicateKey`])
-//!   and read ([`DeserializeError::DuplicateKey`]) refuse it, since either
-//!   pair could be "the" value.
+//! Typed reads are strict: a missing field errors unless it has a `facet`
+//! default or is an `Option`; an unmatched tree entry errors with
+//! [`DeserializeError::UnexpectedEntry`]; a duplicated composite map key
+//! errors on both write ([`SerializeError::DuplicateKey`]) and read.
 #![forbid(unsafe_code)]
 
 pub mod attr;

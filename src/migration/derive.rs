@@ -1,6 +1,6 @@
 //! Derive a [`Migration`] from a pair of [`Schema`]s.
 //!
-//! [`derive`] classifies every difference it can express in the lens
+//! [`derive()`] classifies every difference it can express in the lens
 //! vocabulary (`crate::migration`) and reports the rest as [`Divergence`]s —
 //! it never fails, since "I cannot classify this edge" is itself the honest
 //! answer for a document pair (or hint set) the vocabulary cannot cover. The
@@ -15,7 +15,7 @@ use crate::error::SchemaError;
 use crate::migration::{Change, Constant, Hints, Migration, Op, Target};
 use crate::schema::{FieldNode, Node, Schema, VariantKind};
 
-/// The outcome of [`derive`].
+/// The outcome of [`derive()`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Derivation {
     /// Every difference between the two documents was classified.
@@ -152,7 +152,7 @@ pub fn derive(from: &Schema, to: &Schema, hints: &Hints) -> Derivation {
     }
 }
 
-/// [`derive`] onto the schema of `T`, taking the rename hints `T`'s
+/// [`derive()`] onto the schema of `T`, taking the rename hints `T`'s
 /// `#[facet(migrate::renamed_from = …)]` attributes declare.
 pub fn derive_to<T: for<'a> Facet<'a>>(
     from: &Schema,
