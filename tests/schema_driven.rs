@@ -161,9 +161,6 @@ fn composite_key_map_reads_as_pair_array() -> anyhow::Result<()> {
 /// `schema_of` — matching what the encoder actually writes after
 /// transparency collapse (`collapse_shape`) — rather than composite, which is
 /// what the raw, uncollapsed `Def::Pointer` key shape would otherwise suggest.
-/// Before that collapse happened at the same altitude as the encoder, this
-/// combination (composite bytes, scalar schema) made
-/// `deserialize_value_with_schema` fail with `NotABlob`.
 #[test]
 fn arc_str_key_map_schema_is_scalar_and_reads() -> anyhow::Result<()> {
     let mut table: HashMap<Arc<str>, u32> = HashMap::new();
@@ -276,10 +273,8 @@ fn nest_some(store: &ObjectStore, oid: ObjectId, wraps: usize, leaf_is_blob: boo
 /// surrounding schema-driven read is already spending from, rather than
 /// resetting it to `0`. Neither half of this tree — 20 `Node::Optional`
 /// levels, then 20 more levels the dynamic heuristic itself must walk —
-/// exceeds `MAX_DEPTH` (32) alone, but their sum (40) does. Before the
-/// hand-off carried the depth across, the inner heuristic read restarted at
-/// depth `0` and this tree would have been read successfully instead of
-/// rejected.
+/// exceeds the codec depth bound (32) alone, but their sum (40) does, so the
+/// tree is only rejected if the depth carries across the hand-off.
 #[test]
 fn dynamic_schema_node_shares_the_surrounding_depth_budget() -> anyhow::Result<()> {
     let store = ObjectStore::default();
@@ -392,7 +387,7 @@ fn struct_read_requires_every_schema_field() -> anyhow::Result<()> {
 }
 
 /// A field marked `has_default` whose tree entry is absent reads as simply
-/// missing from the result object: a schema-only read has no default *value*
+/// missing from the result object: a schema-only read has no default value
 /// to invent, only the marker that one exists elsewhere.
 #[test]
 fn omitted_defaulted_field_is_absent_from_the_read_value() -> anyhow::Result<()> {

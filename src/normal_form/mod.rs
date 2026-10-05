@@ -5,9 +5,9 @@
 //! Identity- and key-bearing subtrees (an anchor id, an action key) are hashed
 //! through this mapping rather than through the general codec, so that codec
 //! stays free to evolve: a grammar or encoder change must never move an
-//! identity. Only *this* mapping is frozen. It lives in `facet-git-tree`
+//! identity. Only this mapping is frozen. It lives in `facet-git-tree`
 //! because that crate owns the pure codec, and the normal form is a second,
-//! deliberately smaller codec over the same [`Node`] universe — not a storage
+//! smaller codec over the same [`Node`] universe — not a storage
 //! or authority concern.
 //!
 //! # The universe
@@ -17,7 +17,7 @@
 //! else schema-rich, so an out-of-universe value is unrepresentable rather
 //! than merely rejected. [`Key`] is closed the same way, over scalars only.
 //!
-//! Platform-width integers (`isize`/`usize`) are deliberately absent: their
+//! Platform-width integers (`isize`/`usize`) are absent: their
 //! width is a property of the machine that captured the value, and a frozen
 //! mapping cannot depend on that. Floats are present, encoded verbatim from
 //! their IEEE-754 bits with no canonicalization, so `-0.0` and `0.0` — and two
@@ -60,8 +60,11 @@
 //! | [`Bytes`](Key::Bytes)/[`Hash`](Key::Hash) | lowercase hex of the bytes |
 //!
 //! A name must be non-empty and hold neither `/` nor NUL, since it is a git
-//! path segment; [`NormalFormError::InvalidKey`] reports one that is not. Two
-//! keys of *different* variants can share a name (`Key::Str("true")` and
+//! path segment, and is subject to the same remaining rules as the general
+//! codec's keys (not `.`/`..`, not the reserved marker name) — see
+//! [`crate::check_key`]. [`NormalFormError::InvalidKey`] reports one that is
+//! not. Two
+//! keys of different variants can share a name (`Key::Str("true")` and
 //! `Key::Bool(true)`), which is unambiguous in practice because a map's key
 //! type is fixed by its schema. The mapping is untagged for the same reason:
 //! the hash identifies a value under a known shape, exactly as a git tree
@@ -82,7 +85,9 @@ use std::collections::BTreeMap;
 
 use gix_object::{Kind, Write};
 
+use crate::de::is_tree_entry_name;
 use crate::error::{NormalFormError, UniverseError};
+use crate::limits::MAX_UNIVERSE_DEPTH;
 use crate::schema::{Node, Schema};
 use crate::store::ObjectStore;
 use crate::{EntryKind, EntryMode, ObjectId, TreeEntry};
@@ -94,15 +99,9 @@ use crate::{EntryKind, EntryMode, ObjectId, TreeEntry};
 /// collide with a name [`schema_of`](crate::schema_of) assigns to a user type.
 pub const IDENTITY_DEF_PREFIX: &str = "identity:";
 
-/// The maximum nesting depth [`check_universe`] walks before refusing.
-///
-/// A schema may be recursive, so the check is bounded rather than relying on
-/// the graph being finite. The bound matches the codec's own
-/// [`MAX_DEPTH`](crate::schema::Schema::from_shape) in spirit: a value nested
-/// deeper could not be read back regardless.
-const MAX_DEPTH: usize = 64;
-
-/// How many elements a list may hold, given eight-digit ordinals.
+/// How many elements a list may hold, given eight-digit ordinals: index
+/// `99_999_999` is the largest an eight-digit ordinal names, so a list of
+/// exactly this many elements is the largest accepted.
 const MAX_LIST_LEN: usize = 100_000_000;
 
 /// A value in the identity normal form's closed universe.
@@ -154,8 +153,10 @@ pub enum NormalForm {
     ///
     /// First-class beside [`Map`](Self::Map) because named-field composites are
     /// the dominant identity shape and their keys come from the schema, not
-    /// from the data: a `Struct`'s entry names are fixed by the type, so they
-    /// need neither the key-name mapping nor its validation.
+    /// from the data: a `Struct`'s entry names are fixed by the type. They are
+    /// still checked against the shared tree-entry-name rules at write time
+    /// ([`NormalFormError::InvalidFieldName`]), because the type is public
+    /// data and a hand-constructed map can carry any name at all.
     Struct(BTreeMap<String, NormalForm>),
     /// A keyed map, whose keys come from the data.
     Map(BTreeMap<Key, NormalForm>),
@@ -201,7 +202,12 @@ impl Key {
     /// The key's git tree entry name, per the frozen mapping.
     ///
     /// Fails with [`NormalFormError::InvalidKey`] when the name is not usable
-    /// as a git path segment.
+    /// as a git path segment, by the same rules [`crate::check_key`] enforces
+    /// for the general codec: non-empty, no `/` or NUL, not `.`/`..`, and not
+    /// the general codec's reserved presence-marker name — canonical git
+    /// refuses entries violating the first four outright, and the fifth keeps
+    /// a normal-form subtree legible to consumers that also read
+    /// general-codec trees.
     pub fn name(&self) -> Result<String, NormalFormError> {
         let name = match self {
             Key::Bool(v) => v.to_string(),
@@ -220,7 +226,7 @@ impl Key {
             Key::Bytes(v) => hex(v),
             Key::Hash(v) => v.to_string(),
         };
-        if name.is_empty() || name.contains('/') || name.contains('\0') {
+        if !crate::de::is_tree_entry_name(&name) {
             return Err(NormalFormError::InvalidKey { key: name });
         }
         Ok(name)
@@ -265,10 +271,10 @@ fn write_node<W: Write + ?Sized>(
 ) -> Result<(ObjectId, EntryKind), NormalFormError> {
     match value {
         NormalForm::List(items) => {
-            if items.len() >= MAX_LIST_LEN {
+            if items.len() > MAX_LIST_LEN {
                 return Err(NormalFormError::ListTooLong {
                     len: items.len(),
-                    max: MAX_LIST_LEN - 1,
+                    max: MAX_LIST_LEN,
                 });
             }
             let entries = items
@@ -281,7 +287,17 @@ fn write_node<W: Write + ?Sized>(
         NormalForm::Struct(fields) => {
             let entries = fields
                 .iter()
-                .map(|(name, field)| entry(name.clone(), field, store))
+                .map(|(name, field)| {
+                    // `NormalForm` is public, so a `Struct` can be constructed
+                    // with names that are not usable entry names; the write is
+                    // the boundary that must refuse them.
+                    if !is_tree_entry_name(name) {
+                        return Err(NormalFormError::InvalidFieldName {
+                            field: name.clone(),
+                        });
+                    }
+                    entry(name.clone(), field, store)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             write_tree(entries, store)
         }
@@ -411,10 +427,10 @@ fn walk(
     path: String,
     depth: usize,
 ) -> Result<(), UniverseError> {
-    if depth > MAX_DEPTH {
+    if depth > MAX_UNIVERSE_DEPTH {
         return Err(UniverseError::MaxDepth {
             path,
-            depth: MAX_DEPTH,
+            depth: MAX_UNIVERSE_DEPTH,
         });
     }
     let excluded = |found: &'static str| UniverseError::Excluded {
@@ -531,5 +547,24 @@ fn node_name(node: &Node) -> &'static str {
         Node::RawTree => "RawTree",
         Node::Dynamic => "Dynamic",
         Node::Ref(_) => "Ref",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The ordinal boundary the list length check is derived from: index
+    /// `99_999_999` is the largest an eight-digit ordinal names, so a list of
+    /// exactly `MAX_LIST_LEN` elements occupies exactly the nameable indices
+    /// and must be accepted — the check refuses `len > MAX_LIST_LEN`, not
+    /// `>=`. (`MAX_LIST_LEN` itself is too large to materialize in a test;
+    /// the guard is `ordinal(MAX_LIST_LEN - 1)` being exactly eight digits,
+    /// and this assertion is the arithmetic it rests on.)
+    #[test]
+    fn the_last_nameable_ordinal_is_eight_digits() {
+        assert_eq!(ordinal(0), "00000000");
+        assert_eq!(ordinal(99_999_999), "99999999");
+        assert_eq!(ordinal(MAX_LIST_LEN).len(), 9);
     }
 }

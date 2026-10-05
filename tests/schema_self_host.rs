@@ -27,7 +27,10 @@ mod common;
 use common::{Event, Nested, Person, TreeNode, find_entry, splice_codec};
 
 fn splice_empty_schema(store: &ObjectStore, tree: &ObjectId) -> ObjectId {
-    let mut entries = store.get_tree(tree).expect("tree present");
+    let mut entries = store
+        .get_tree(tree)
+        .expect("read object")
+        .expect("tree present");
     entries.push(TreeEntry {
         mode: EntryMode::from(EntryKind::Tree),
         filename: "schema".into(),
@@ -59,9 +62,8 @@ fn enum_schema_doc_roundtrips() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The wire shape used before `Schema.kind` existed. Keeping this fixture in
-/// the test makes the compatibility test independent of the current writer's
-/// `Schema` shape while retaining the historical `Node` representation.
+/// The legacy `{root, defs}` wire shape, pinned here independently of the
+/// current writer's `Schema` shape.
 #[derive(Debug, Facet)]
 struct LegacySchemaDocument {
     root: Node,
@@ -69,7 +71,10 @@ struct LegacySchemaDocument {
 }
 
 fn splice_legacy_pin(store: &ObjectStore, tree: &ObjectId) -> ObjectId {
-    let mut entries = store.get_tree(tree).expect("tree present");
+    let mut entries = store
+        .get_tree(tree)
+        .expect("read object")
+        .expect("tree present");
     entries.push(TreeEntry {
         mode: EntryMode::from(EntryKind::Tree),
         filename: SchemaSchema::ENTRY.into(),
@@ -82,7 +87,10 @@ fn splice_legacy_pin(store: &ObjectStore, tree: &ObjectId) -> ObjectId {
 }
 
 fn splice_migration_metadata(store: &ObjectStore, tree: &ObjectId) -> ObjectId {
-    let mut entries = store.get_tree(tree).expect("tree present");
+    let mut entries = store
+        .get_tree(tree)
+        .expect("read object")
+        .expect("tree present");
     entries.push(TreeEntry {
         mode: EntryMode::from(EntryKind::Tree),
         filename: "migration".into(),
@@ -95,7 +103,10 @@ fn splice_migration_metadata(store: &ObjectStore, tree: &ObjectId) -> ObjectId {
 }
 
 fn splice_unexpected_metadata(store: &ObjectStore, tree: &ObjectId) -> ObjectId {
-    let mut entries = store.get_tree(tree).expect("tree present");
+    let mut entries = store
+        .get_tree(tree)
+        .expect("read object")
+        .expect("tree present");
     entries.push(TreeEntry {
         mode: EntryMode::from(EntryKind::Tree),
         filename: "unexpected".into(),
@@ -107,9 +118,8 @@ fn splice_unexpected_metadata(store: &ObjectStore, tree: &ObjectId) -> ObjectId 
         .expect("tree write")
 }
 
-/// A schema written against the generation immediately before `kind` is
-/// decoded through the historical `{root, defs}` shape and gets an explicit
-/// sentinel rather than failing as a missing-field reflection error.
+/// A legacy `{root, defs}` document — no `kind` entry — decodes with an
+/// explicit sentinel kind rather than a missing-field reflection error.
 #[test]
 fn pre_kind_schema_reads_with_explicit_legacy_kind() -> anyhow::Result<()> {
     let current = schema_of::<Nested>()?;
@@ -221,37 +231,9 @@ fn recursive_schema_doc_roundtrips() -> anyhow::Result<()> {
 /// published schema in every downstream repository would stop resolving. Do
 /// not update the literal without releasing accordingly.
 ///
-/// Updated for the unit-enum-variant blob collapse (issue 8d109650): a
-/// `Node` unit variant such as `String`/`U32`/`Bool` now tags with a bare
-/// blob holding its name instead of a tree wrapping an empty tree, so
-/// `Person`'s schema — three unit-variant scalar fields — reproduces to a
-/// different, but still deterministic, root id.
-///
-/// Updated again for the leaf trailing-newline rule (issue 5b39f084): every
-/// leaf blob, including a unit variant's name blob, now carries a mandatory
-/// trailing `\n`, which changes every blob (and therefore every containing
-/// tree) in the document.
-///
-/// Updated again for name-keyed struct/enum schema nodes: `Node::Struct`
-/// and `Node::Enum` are now `BTreeMap`s keyed by field/variant name rather
-/// than ordinal-indexed lists of `FieldSchema`/`VariantSchema` pairs, so a
-/// struct's fields serialize directly under their own names (`Struct/name`)
-/// instead of behind an ordinal directory holding separate `name`/`schema`
-/// entries (`Struct/0000/{name,schema}`). Declaration order is no longer
-/// recorded — it was never load-bearing for the codec — so `Person`'s schema
-/// reproduces to a different, but still deterministic, root id.
-///
-/// Updated again for the schema-schema pin: `Schema::version` is gone —
-/// `schema_of::<Person>()` itself is unpinned, so this golden id covers the
-/// bare document (`kind`/`root`/`defs`, no storage pin). The pin is a
-/// storage-layer splice [`Schema::write_pinned`] adds on top, covered
-/// separately by `genesis_constant_is_real`.
-///
-/// Updated again for the field-level default-presence marker:
-/// `Node::Struct`'s field map now holds `StructField { node, has_default }`
-/// instead of a bare `Node`, so each field's own entry is a small tree
-/// (`node`, `has_default`) rather than the field's schema directly, moving
-/// every struct field's encoding and therefore this root id.
+/// The id covers the bare document (`kind`/`root`/`defs`): `schema_of` is
+/// unpinned, and the storage pin is a splice [`Schema::write_pinned`] adds
+/// on top, covered separately by `genesis_constant_is_real`.
 #[test]
 fn person_schema_golden_oid() -> anyhow::Result<()> {
     let doc = schema_of::<Person>()?;
@@ -262,7 +244,7 @@ fn person_schema_golden_oid() -> anyhow::Result<()> {
 
 /// Regression for issue 8d109650's second repro: changing a schema field's
 /// type (`U32` → `String`, mirroring `refs/schema/recipe~1` vs.
-/// `refs/schema/recipe`) must change a *blob*, at a stable path, not just an
+/// `refs/schema/recipe`) must change a blob, at a stable path, not just an
 /// empty tree's entry name — otherwise `git diff` on the schema ref sees
 /// nothing, exactly the bug this issue reports.
 ///
@@ -299,9 +281,8 @@ fn schema_field_type_change_is_a_blob_level_diff() -> anyhow::Result<()> {
     );
 
     // Walk the same path in both trees: defs → Recipe → Struct → servings →
-    // node — the field is name-keyed rather than living under an ordinal, and
-    // `servings` is itself a `StructField` tree (`node`, `has_default`) since
-    // the default-presence marker was added.
+    // node — the field is name-keyed, and `servings` is itself a
+    // `StructField` tree (`node`, `has_default`).
     let walk = |store: &facet_git_tree::ObjectStore, root: &facet_git_tree::ObjectId| {
         let defs = find_entry(store, root, "defs");
         let recipe = find_entry(store, &defs.oid, "Recipe");
@@ -323,11 +304,17 @@ fn schema_field_type_change_is_a_blob_level_diff() -> anyhow::Result<()> {
         "the `schema` entry's oid must differ at this stable path"
     );
     assert_eq!(
-        before_store.get_blob(&before_schema.oid).expect("blob"),
+        before_store
+            .get_blob(&before_schema.oid)
+            .expect("read object")
+            .expect("blob"),
         b"U32\n"
     );
     assert_eq!(
-        after_store.get_blob(&after_schema.oid).expect("blob"),
+        after_store
+            .get_blob(&after_schema.oid)
+            .expect("read object")
+            .expect("blob"),
         b"String\n"
     );
     Ok(())
@@ -340,11 +327,11 @@ fn schema_field_type_change_is_a_blob_level_diff() -> anyhow::Result<()> {
 /// `codec` and no pin spliced in — the value the compiled-in hex constant in
 /// `pin.rs` must match.
 ///
-/// This is the golden-oid guard for the whole format, one level above
-/// [`person_schema_golden_oid`]: if this id changes, `Schema`'s own shape
+/// The top-level golden-oid guard, above [`person_schema_golden_oid`]: if
+/// this id changes, `Schema`'s own shape
 /// changed, the encoding did, or the codec fixture did, and every schema tree
-/// in every downstream repository pins a generation that no longer exists.
-/// Do not update the compiled-in constant without releasing accordingly.
+/// in every downstream repository would pin a generation this build does not
+/// speak. Do not update the compiled-in constant without releasing accordingly.
 #[test]
 fn genesis_constant_is_real() -> anyhow::Result<()> {
     let store = ObjectStore::default();
@@ -381,7 +368,7 @@ fn write_pinned_document_has_a_resolvable_pin() -> anyhow::Result<()> {
     assert_eq!(&pin_entry.oid, SchemaSchema::CURRENT.tree());
     assert!(
         matches!(
-            store.get(&pin_entry.oid),
+            store.get(&pin_entry.oid).expect("read object"),
             Some(facet_git_tree::GitObject::Tree(_))
         ),
         "the pinned schema-schema tree must actually be present in the store"
@@ -409,7 +396,7 @@ fn empty_schema_pin_on_the_meta_schema_reads_as_genesis() -> anyhow::Result<()> 
     Ok(())
 }
 
-/// No pin entry, and the tree's own id is *not* a known root generation: a
+/// No pin entry, and the tree's own id is not a known root generation: a
 /// truncated or hand-written document, rejected as
 /// [`SchemaPinError::Unpinned`] rather than read as though it were genesis.
 #[test]
@@ -420,6 +407,7 @@ fn absent_pin_on_an_unknown_tree_is_rejected() -> anyhow::Result<()> {
 
     let entries: Vec<_> = store
         .get_tree(&root)
+        .expect("read object")
         .expect("root is a tree")
         .into_iter()
         .filter(|e| e.filename != SchemaSchema::ENTRY)
@@ -434,14 +422,13 @@ fn absent_pin_on_an_unknown_tree_is_rejected() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The whole point of reading the pin out of band: an unrecognized pin is
-/// caught *before* a full typed deserialize is attempted, which is exactly
-/// what lets it catch a document a full deserialize could not otherwise get
-/// through. Simulated here exactly as the old version-marker tests did: the
-/// pin is repointed at some other, non-schema-schema tree (the genesis
-/// document's own `defs` subtree), and `root` is separately corrupted into a
-/// bogus blob tagged with a hypothetical `DateTime` variant `Node` does not
-/// define.
+/// Reading the pin out of band catches an unrecognized pin before a full
+/// typed deserialize is attempted — the only way to reject a document whose
+/// unknown `Node` variant would otherwise surface as an opaque reflection
+/// error. Simulated here by repointing the pin at some other,
+/// non-schema-schema tree (the genesis document's own `defs` subtree), and
+/// separately corrupting `root` into a bogus blob tagged with a hypothetical
+/// `DateTime` variant `Node` does not define.
 #[test]
 fn unrecognized_pin_is_rejected_before_a_full_deserialize_is_attempted() -> anyhow::Result<()> {
     let doc = schema_of::<Nested>()?;
@@ -456,7 +443,10 @@ fn unrecognized_pin_is_rejected_before_a_full_deserialize_is_attempted() -> anyh
         .write_buf(gix_object::Kind::Blob, b"DateTime\n")
         .unwrap();
 
-    let mut entries = store.get_tree(&root).expect("root is a tree");
+    let mut entries = store
+        .get_tree(&root)
+        .expect("read object")
+        .expect("root is a tree");
     for entry in &mut entries {
         if entry.filename == SchemaSchema::ENTRY {
             entry.oid = bogus_pin;
@@ -477,9 +467,9 @@ fn unrecognized_pin_is_rejected_before_a_full_deserialize_is_attempted() -> anyh
         "{err:?}"
     );
 
-    // A full typed deserialize, in contrast, cannot get past the unknown
-    // variant — a reflection error, not a pin error — confirming the check
-    // really did land before a deserialize that could not have completed.
+    // A full typed deserialize, in contrast, fails on the unknown variant —
+    // a reflection error, not a pin error — confirming the pin check runs
+    // first.
     let err = deserialize::<Schema>(&corrupt, &store).unwrap_err();
     assert!(
         matches!(&err, DeserializeError::Reflect(msg) if msg.contains("DateTime")),
@@ -548,12 +538,19 @@ fn walk_blobs(
     prefix: &str,
     out: &mut Vec<(String, Vec<u8>)>,
 ) {
-    for entry in store.get_tree(root).expect("tree present") {
+    for entry in store
+        .get_tree(root)
+        .expect("read object")
+        .expect("tree present")
+    {
         let name = String::from_utf8_lossy(&entry.filename);
         let path = format!("{prefix}/{name}");
         match entry.mode.kind() {
             EntryKind::Blob => {
-                let content = store.get_blob(&entry.oid).expect("blob present");
+                let content = store
+                    .get_blob(&entry.oid)
+                    .expect("read object")
+                    .expect("blob present");
                 out.push((path, content));
             }
             _ => walk_blobs(store, &entry.oid, &path, out),

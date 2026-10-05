@@ -1,5 +1,5 @@
-//! Explicit compatibility coverage for objects written before the current
-//! leaf framing and schema document shape.
+//! Compatibility coverage for objects in the legacy leaf framing and schema
+//! document shape.
 
 use std::collections::BTreeMap;
 
@@ -48,7 +48,11 @@ fn tree(store: &ObjectStore, entries: Vec<(&str, EntryKind, ObjectId)>) -> Objec
 /// Rewrite a current-format object graph with the historical no-newline blob
 /// spelling. This stays in-memory and leaves the ordinary writer untouched.
 fn remove_leaf_newlines(store: &ObjectStore, oid: ObjectId) -> ObjectId {
-    match store.get(&oid).expect("fixture object") {
+    match store
+        .get(&oid)
+        .expect("read object")
+        .expect("fixture object")
+    {
         facet_git_tree::GitObject::Blob(blob) => {
             let bytes = blob.data.strip_suffix(b"\n").unwrap_or(&blob.data);
             store
@@ -89,7 +93,10 @@ fn legacy_schema(store: &ObjectStore) -> (ObjectId, Schema) {
     };
     let wire_tree = serialize_into(&wire, store).expect("legacy schema wire tree");
     let legacy_tree = remove_leaf_newlines(store, wire_tree);
-    let mut entries = store.get_tree(&legacy_tree).expect("legacy schema tree");
+    let mut entries = store
+        .get_tree(&legacy_tree)
+        .expect("read object")
+        .expect("legacy schema tree");
     entries.push(TreeEntry {
         mode: EntryMode::from(EntryKind::Tree),
         filename: "migration".into(),
@@ -103,7 +110,10 @@ fn legacy_schema(store: &ObjectStore) -> (ObjectId, Schema) {
 }
 
 fn pin_legacy_schema(store: &ObjectStore, tree: ObjectId) -> ObjectId {
-    let mut entries = store.get_tree(&tree).expect("legacy schema tree");
+    let mut entries = store
+        .get_tree(&tree)
+        .expect("read object")
+        .expect("legacy schema tree");
     entries.push(TreeEntry {
         mode: EntryMode::from(EntryKind::Tree),
         filename: SchemaSchema::ENTRY.into(),

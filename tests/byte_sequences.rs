@@ -71,7 +71,10 @@ fn vec_u8_is_a_single_blob() {
     assert_eq!(kind, EntryKind::Blob, "byte sequence must be a blob");
     let mut expected = bytes;
     expected.push(b'\n');
-    assert_eq!(store.get_blob(&oid).expect("blob"), expected);
+    assert_eq!(
+        store.get_blob(&oid).expect("read object").expect("blob"),
+        expected
+    );
 }
 
 /// Two byte-identical buffers deduplicate to the same blob object.

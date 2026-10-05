@@ -69,7 +69,7 @@ fn write_pinned_then_read_pinned_roundtrips() -> anyhow::Result<()> {
     assert_eq!(&pin_entry.oid, MigrationSchema::CURRENT.tree());
     assert!(
         matches!(
-            store.get(&pin_entry.oid),
+            store.get(&pin_entry.oid).expect("read object"),
             Some(facet_git_tree::GitObject::Tree(_))
         ),
         "the pinned migration-schema tree must actually be present in the store"
@@ -99,7 +99,7 @@ fn unpinned_tree_is_rejected() -> anyhow::Result<()> {
 }
 
 /// A tree carrying a pin entry that names an unrecognized migration-schema
-/// tree is rejected with [`MigrationPinError::Unrecognized`] *before* a full
+/// tree is rejected with [`MigrationPinError::Unrecognized`] before a full
 /// typed deserialize is attempted.
 #[test]
 fn unrecognized_pin_is_rejected_before_a_full_deserialize_is_attempted() -> anyhow::Result<()> {
@@ -111,7 +111,10 @@ fn unrecognized_pin_is_rejected_before_a_full_deserialize_is_attempted() -> anyh
     // migration document's own `ops` subtree.
     let bogus_pin = find_entry(&store, &root, "ops").oid;
 
-    let mut entries = store.get_tree(&root).expect("root is a tree");
+    let mut entries = store
+        .get_tree(&root)
+        .expect("read object")
+        .expect("root is a tree");
     for entry in &mut entries {
         if entry.filename == MigrationSchema::ENTRY {
             entry.oid = bogus_pin;

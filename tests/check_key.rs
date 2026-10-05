@@ -11,18 +11,32 @@ use rstest::rstest;
 mod common;
 use common::WithMap;
 
-/// Names that are valid tree entry names and so are accepted. The encoding
-/// reserves no names, so leading-dot keys are ordinary data.
+/// Names that are valid tree entry names and so are accepted. Leading-dot
+/// keys are ordinary data — canonical git only refuses the exact names `.`
+/// and `..`, not names that merely begin with a dot.
 #[rstest]
 #[case("name")]
 #[case("field0")]
 #[case("0001")] // a zero-padded ordinal name is a perfectly ordinary key
 #[case(".env")]
-#[case(".schema")] // TODO remove: no longer reserved; the encoding stores no schema
-#[case(".variant")] // TODO remove: no longer reserved; enums are externally tagged, no sentinel
-#[case("")] // emptiness is not `check_key`'s concern
+#[case(".schema")]
+#[case(".variant")]
 fn accepts_valid_keys(#[case] key: &str) {
     assert!(check_key(key).is_ok(), "{key:?} should be accepted");
+}
+
+/// Names canonical git refuses outright when creating a tree — verified
+/// against `git mktree`/`git fsck` — rejected here so this codec can never
+/// emit a tree canonical git would call malformed.
+#[rstest]
+#[case("")] // empty filename: "error: empty filename in tree entry"
+#[case(".")] // fsck's hasDot
+#[case("..")] // fsck's hasDotdot
+fn rejects_names_canonical_git_refuses(#[case] key: &str) {
+    assert!(
+        matches!(check_key(key), Err(KeyError { key: k }) if k == key),
+        "{key:?} should be rejected as a name canonical git refuses"
+    );
 }
 
 /// Keys containing the path separator are rejected as [`KeyError`], which
@@ -48,6 +62,22 @@ fn rejects_the_reserved_marker_key() {
     assert!(
         matches!(check_key("_"), Err(KeyError { key }) if key == "_"),
         "\"_\" must be rejected as the reserved presence-marker key"
+    );
+}
+
+/// NUL-bearing keys are rejected here rather than at the object backend: NUL
+/// terminates a tree entry's name in the on-disk format, so `gix` can only
+/// report an opaque backend error (no key, no path, no hint), while
+/// [`check_key`] still has the name in hand as user data and can report it as
+/// a [`KeyError`].
+#[rstest]
+#[case("a\0b")]
+#[case("\0")]
+#[case("leading\0")]
+fn rejects_keys_with_nul(#[case] key: &str) {
+    assert!(
+        matches!(check_key(key), Err(KeyError { key: k }) if k == key),
+        "{key:?} should be rejected as KeyError carrying the offending key"
     );
 }
 
@@ -81,5 +111,42 @@ fn serialize_rejects_map_key_equal_to_marker() {
             Err(SerializeError::Key(KeyError { key })) if key == "_"
         ),
         "a map key equal to the reserved marker must be rejected by serialize"
+    );
+}
+
+/// `serialize` rejects a NUL-bearing map key as [`SerializeError::Key`] — the
+/// [`KeyError`] from [`check_key`] — rather than letting the name through to
+/// the object backend, which could only refuse it as an opaque encode-time
+/// error after the key's provenance was lost.
+#[test]
+fn serialize_rejects_map_key_with_nul() {
+    let mut table = HashMap::new();
+    table.insert("a\0b".to_string(), "v".to_string());
+    assert!(
+        matches!(
+            serialize(&WithMap { table }),
+            Err(SerializeError::Key(KeyError { key })) if key == "a\0b"
+        ),
+        "a map key containing NUL must be rejected by serialize"
+    );
+}
+
+/// `serialize` rejects the empty key and the `.`/`..` names: canonical git
+/// refuses to create trees holding them, so a scalar map keyed by either
+/// must fail at the codec boundary instead of producing an object
+/// `git fsck` would call malformed.
+#[rstest]
+#[case("")]
+#[case(".")]
+#[case("..")]
+fn serialize_rejects_names_canonical_git_refuses(#[case] key: &str) {
+    let mut table = HashMap::new();
+    table.insert(key.to_string(), "v".to_string());
+    assert!(
+        matches!(
+            serialize(&WithMap { table }),
+            Err(SerializeError::Key(KeyError { key: k })) if k == key
+        ),
+        "map key {key:?} must be rejected by serialize"
     );
 }

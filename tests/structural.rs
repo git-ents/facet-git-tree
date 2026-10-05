@@ -115,7 +115,10 @@ fn leaf_blob_id_matches_git() {
     })
     .expect("serialize ok");
 
-    let entries = store.get_tree(&root_id).expect("root must be a tree");
+    let entries = store
+        .get_tree(&root_id)
+        .expect("read object")
+        .expect("root must be a tree");
     let name_entry = entries
         .iter()
         .find(|e| e.filename == "name")

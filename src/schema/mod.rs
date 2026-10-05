@@ -11,6 +11,9 @@
 //! The normative rules live in `docs/specification.adoc` under
 //! `schema.representation` and `schema.generation`.
 
+#[cfg(feature = "value")]
+pub(crate) mod path;
+
 pub mod codec;
 pub mod pin;
 #[cfg(feature = "value")]
@@ -24,10 +27,14 @@ use facet::{ConstTypeId, Def, Facet, ScalarType, Shape};
 
 use crate::attr;
 use crate::classify::{ShapeClass, classify};
-use crate::de::{MAX_DEPTH, collapse_shape};
+use crate::de::collapse_shape;
 use crate::error::SchemaError;
+use crate::limits::MAX_VALUE_DEPTH;
 use crate::migration::{Hints, Target};
 use crate::normal_form::IDENTITY_DEF_PREFIX;
+
+#[cfg(feature = "value")]
+use facet_value::Value;
 
 /// A complete, self-contained schema document.
 ///
@@ -64,11 +71,22 @@ impl Schema {
     /// [`schema_of`]. Compatibility callers that require a publication name
     /// should replace it with [`Self::with_kind`] before writing.
     pub const LEGACY_KIND: &'static str = "legacy-unknown";
+
+    /// The kind embedded in a schema generated for a root with no valid
+    /// publication name (an anonymous tuple or container).
+    ///
+    /// Deterministic so equal shapes still share an object id, but it is a
+    /// placeholder, not a publication name: two structurally different
+    /// anonymous roots both carry it, so publishing one would silently lose
+    /// provenance. [`Schema::validate_publishable`] refuses it at the
+    /// publication boundary, and a publisher must replace it via
+    /// [`Self::with_kind`] — the omission is a checked error, not a silent
+    /// default.
+    pub const ANONYMOUS_KIND: &'static str = "anonymous";
 }
 
-/// The historical schema document, before [`Schema::kind`] was part of the
-/// self-hosted representation. It is private because it exists only as a
-/// reader-side wire compatibility shape; new code must use [`Schema`].
+/// The legacy `{root, defs}` wire shape — a schema document without `kind` —
+/// read for compatibility only; new code must use [`Schema`].
 #[derive(Debug, Clone, PartialEq, Facet)]
 pub(crate) struct LegacySchema {
     /// The schema of the value itself.
@@ -104,7 +122,8 @@ pub enum Node {
     I64,
     /// `i128`.
     I128,
-    /// `isize`.
+    /// `isize`, spec'd i64-shaped: encoded as its decimal text within the
+    /// i64 range, so object ids never depend on pointer width.
     ISize,
     /// `u8`.
     U8,
@@ -116,7 +135,8 @@ pub enum Node {
     U64,
     /// `u128`.
     U128,
-    /// `usize`.
+    /// `usize`, spec'd u64-shaped: encoded as its decimal text within the
+    /// u64 range, so object ids never depend on pointer width.
     USize,
     /// `f32`.
     F32,
@@ -125,7 +145,7 @@ pub enum Node {
     /// A byte sequence (`Vec<u8>`, `[u8; N]`, `[u8]`): a single blob.
     Bytes,
     /// A named-field struct: a tree with one entry per field, keyed by field
-    /// name — the map key *is* the tree entry name (`schema.representation`).
+    /// name — the map key is the tree entry name (`schema.representation`).
     /// A field whose [`StructField::has_default`] is set may have no entry
     /// at all: a write may omit it, and a read finds it simply absent.
     Struct(BTreeMap<String, StructField>),
@@ -141,8 +161,8 @@ pub enum Node {
         /// The exact element count.
         len: usize,
     },
-    /// A map: a name-keyed tree for scalar keys, or ordinal-named `{ k, v }`
-    /// pair sub-trees for composite keys.
+    /// A map: a name-keyed tree for scalar keys, or `{ k, v }` pair
+    /// sub-trees named by their own object id for composite keys.
     Map {
         /// The key schema; whether it is a scalar variant decides the layout.
         key: Box<Node>,
@@ -157,7 +177,7 @@ pub enum Node {
     /// single-entry tree naming it for every other variant. Keyed by variant
     /// name, which is also the tag.
     Enum(BTreeMap<String, VariantKind>),
-    /// A [`RawTree`]: a verbatim tree reference.
+    /// A [`RawTree`](crate::RawTree): a verbatim tree reference.
     RawTree,
     /// A dynamic value (`facet_value::Value`): shape decided at runtime.
     Dynamic,
@@ -197,7 +217,7 @@ pub struct StructField {
     /// Whether a write may omit this field's tree entry, per
     /// `facet_core::Field::has_default()`. A schema-driven read finds an
     /// omitted defaulted field simply absent from the result — a schema
-    /// carries no snapshot of the default *value*, since one (`created_at`
+    /// carries no snapshot of the default value, since one (`created_at`
     /// wanting `now_nanos()`) can be computed only at write time. A typed
     /// read is unaffected: it recovers `T`'s real default through `facet`'s
     /// own reflection machinery, independent of this marker.
@@ -241,6 +261,68 @@ impl DefaultFieldNode for Node {
 impl DefaultFieldNode for StructField {
     fn has_default(&self) -> bool {
         self.has_default
+    }
+}
+
+/// Whether `schema` is a scalar node — the classification that decides map
+/// layout identically on the read side ([`Node::Map`]), the schema-directed
+/// writer, and the migration walk. One home: the layout decision must not
+/// be able to drift between the walks that must agree on it.
+#[cfg(feature = "value")]
+pub(crate) fn is_scalar_schema(schema: &Node) -> bool {
+    matches!(
+        schema,
+        Node::Bool
+            | Node::Char
+            | Node::String
+            | Node::I8
+            | Node::I16
+            | Node::I32
+            | Node::I64
+            | Node::I128
+            | Node::ISize
+            | Node::U8
+            | Node::U16
+            | Node::U32
+            | Node::U64
+            | Node::U128
+            | Node::USize
+            | Node::F32
+            | Node::F64
+    )
+}
+
+/// A dynamic value's runtime kind, for mismatch diagnostics in the
+/// schema-directed writer and the migration walk.
+///
+/// One home with the full arm set, so the value's kind is reported the same
+/// way from every walk that can reject it.
+#[cfg(feature = "value")]
+pub(crate) fn value_kind(v: &Value) -> &'static str {
+    if v.is_null() {
+        "null"
+    } else if v.is_bool() {
+        "bool"
+    } else if v.is_number() {
+        "number"
+    } else if v.is_string() {
+        "string"
+    } else if v.is_bytes() {
+        "bytes"
+    } else if v.is_array() {
+        "array"
+    } else if v.is_object() {
+        "object"
+    } else if v.is_char() {
+        "char"
+    } else if v.is_datetime() {
+        "datetime"
+    } else if v.is_qname() {
+        "qname"
+    } else if v.is_uuid() {
+        "uuid"
+    } else {
+        "value"
     }
 }
 
@@ -316,25 +398,26 @@ impl Schema {
     /// Generate the [`Schema`] describing how values of `shape` are encoded.
     ///
     /// The walker mirrors the encoder's dispatch order exactly
-    /// (`schema.generation`): transparency collapse, then [`RawTree`], then
+    /// (`schema.generation`): transparency collapse, then
+    /// [`RawTree`](crate::RawTree), then
     /// dynamic values, then the scalar table, then byte sequences, then
     /// composites. Named user types (structs and enums) are deduplicated into
     /// [`defs`](Schema::defs) and referenced by [`Node::Ref`]; names are
     /// assigned deterministically in pre-order, so the same shape always
     /// yields an identical — and identically-encoded — document.
     pub fn from_shape(shape: &'static Shape) -> Result<Self, SchemaError> {
-        Self::from_shape_with_limit(shape, MAX_DEPTH).map(|(doc, _hints)| doc)
+        Self::from_shape_with_limit(shape, MAX_VALUE_DEPTH).map(|(doc, _hints)| doc)
     }
 
     /// [`from_shape`](Self::from_shape), additionally returning the rename
     /// [`Hints`] collected from `#[facet(migrate::renamed_from = …)]`
     /// attributes on named struct fields and struct enum variant fields.
     pub fn from_shape_with_hints(shape: &'static Shape) -> Result<(Self, Hints), SchemaError> {
-        Self::from_shape_with_limit(shape, MAX_DEPTH)
+        Self::from_shape_with_limit(shape, MAX_VALUE_DEPTH)
     }
 
     /// [`from_shape`](Self::from_shape) with a custom nesting bound in place
-    /// of [`MAX_DEPTH`], also returning the collected [`Hints`].
+    /// of [`MAX_VALUE_DEPTH`], also returning the collected [`Hints`].
     ///
     /// Exists so tests can exercise the depth guard without a pathologically
     /// deep type (whose `SHAPE` evaluation is prohibitively expensive to
@@ -351,10 +434,11 @@ impl Schema {
             kind
         } else {
             // A schema generated for an anonymous/container root has no
-            // publication name to derive. Keep generation deterministic; a
-            // storage layer should replace this sentinel with its kind name
-            // through [`Schema::with_kind`] before publication.
-            "anonymous".to_owned()
+            // publication name to derive. Keep generation deterministic;
+            // [`Schema::validate_publishable`] refuses this sentinel at the
+            // publication boundary, so a storage layer cannot forget to
+            // replace it with its kind name through [`Schema::with_kind`].
+            Self::ANONYMOUS_KIND.to_owned()
         };
         Ok((
             Schema {
@@ -386,8 +470,30 @@ impl Schema {
     }
 
     /// Validate the schema document's embedded kind name.
+    ///
+    /// This is the well-formedness check, applied on both write and read: it
+    /// says only that the document's kind is a usable ref-name segment.
+    /// Publishability — refusing the
+    /// [`ANONYMOUS_KIND`](Self::ANONYMOUS_KIND) sentinel, which carries no
+    /// provenance — is the publication boundary's job
+    /// ([`write_pinned`](Self::write_pinned)), not this function's, so
+    /// documents that predate that rule remain readable.
     pub fn validate(&self) -> Result<(), SchemaError> {
         validate_kind_name(&self.kind)
+    }
+
+    /// Whether this document is publishable: its kind is a valid ref-name
+    /// segment and not the anonymous-root sentinel.
+    ///
+    /// The anonymous sentinel is a deterministic placeholder for roots with
+    /// no publication name; publishing one would silently lose provenance.
+    /// Name the schema with [`Self::with_kind`] before publication.
+    pub fn validate_publishable(&self) -> Result<(), SchemaError> {
+        self.validate()?;
+        if self.kind == Self::ANONYMOUS_KIND {
+            return Err(SchemaError::AnonymousKind);
+        }
+        Ok(())
     }
 }
 
@@ -401,7 +507,7 @@ struct Walker {
     /// How many types have claimed each identifier, for `_2`, `_3`, …
     /// disambiguation.
     claimed: HashMap<&'static str, usize>,
-    /// The nesting bound `node` enforces — [`MAX_DEPTH`] outside of tests.
+    /// The nesting bound `node` enforces — [`MAX_VALUE_DEPTH`] outside of tests.
     limit: usize,
     /// Rename hints collected from named-field structs' and struct enum
     /// variants' fields as they are visited.
@@ -433,6 +539,10 @@ impl Walker {
     /// reference adds no tree level, so a marked subtree encodes exactly as
     /// an unmarked one does. Bodies are deduplicated, and an already-marked
     /// node is returned untouched, so marking is idempotent.
+    ///
+    /// Dedup is a linear scan of `defs`, which is fine for the handful of
+    /// marked subtrees a schema carries; index by body if marked subtrees
+    /// ever number in the thousands.
     fn mark_identity(&mut self, node: Node, marked: bool) -> Node {
         if !marked {
             return node;
@@ -462,7 +572,7 @@ impl Walker {
 
     /// The schema of one shape, mirroring `serialize_node`'s dispatch order.
     ///
-    /// `depth` counts nesting levels against [`MAX_DEPTH`], the same bound
+    /// `depth` counts nesting levels against [`MAX_VALUE_DEPTH`], the same bound
     /// typed deserialization enforces on reads: a shape nested deeper than
     /// that could never be read back regardless of what schema described it,
     /// so generation is refused here rather than recursing unboundedly on a
@@ -639,7 +749,7 @@ impl Walker {
     /// Register `shape` as a named definition and return the [`Node::Ref`]
     /// to it, computing the body via `body` on first encounter.
     ///
-    /// The name is claimed *before* the body is computed, so a recursive type
+    /// The name is claimed before the body is computed, so a recursive type
     /// (`struct Node { children: Vec<Node> }`) resolves its own occurrences to
     /// the already-assigned `Ref` instead of recursing forever. Distinct types
     /// sharing an identifier get `_2`, `_3`, … suffixes in pre-order, keeping

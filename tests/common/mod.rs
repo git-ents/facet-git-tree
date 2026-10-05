@@ -129,6 +129,7 @@ pub const HELLO_LEAF_BLOB_OID: [u8; 20] = [
 pub fn find_entry(store: &ObjectStore, tree_id: &ObjectId, name: &str) -> TreeEntry {
     let entries = store
         .get_tree(tree_id)
+        .expect("read object")
         .unwrap_or_else(|| panic!("expected tree at {tree_id:?}"));
     entries
         .into_iter()
@@ -151,6 +152,7 @@ pub fn get_tree_entry_mode(
 pub fn tree_entries(store: &ObjectStore, tree_id: &ObjectId) -> Vec<TreeEntry> {
     store
         .get_tree(tree_id)
+        .expect("read object")
         .unwrap_or_else(|| panic!("expected tree at {tree_id:?}"))
 }
 
@@ -160,7 +162,10 @@ pub fn tree_entries(store: &ObjectStore, tree_id: &ObjectId) -> Vec<TreeEntry> {
 /// generation's own tree rather than trusting the towers' private wiring.
 pub fn splice_codec(store: &ObjectStore, tree: &ObjectId) -> ObjectId {
     let codec_tree = codec::codec_tree(store).expect("codec fixture writes");
-    let mut entries = store.get_tree(tree).expect("tree present");
+    let mut entries = store
+        .get_tree(tree)
+        .expect("read object")
+        .expect("tree present");
     entries.push(TreeEntry {
         mode: EntryMode::from(EntryKind::Tree),
         filename: "codec".into(),

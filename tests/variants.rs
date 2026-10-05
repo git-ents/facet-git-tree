@@ -65,6 +65,7 @@ fn unit_variant_is_a_bare_name_blob() {
     assert_eq!(
         store
             .get_blob(&root_id)
+            .expect("read object")
             .expect("unit variant must serialize to a blob"),
         b"Unit\n",
         "a unit variant's entire encoding is a blob holding the variant name, \
@@ -90,16 +91,18 @@ fn unit_variant_field_is_a_bare_name_blob() {
         "a unit-variant field's entry must be a blob, not a tree"
     );
     assert_eq!(
-        store.get_blob(&entry.oid).expect("blob"),
+        store
+            .get_blob(&entry.oid)
+            .expect("read object")
+            .expect("blob"),
         b"High\n",
         "the blob content must be the variant name plus the mandatory trailing newline"
     );
 }
 
 /// Flipping a unit-variant field between two variants changes that field's
-/// blob content — the regression this crate exists to prevent: previously
-/// the variant name lived only in a tree-entry name, so the diff between two
-/// unit-variant values was silently empty.
+/// blob content, not merely its tree-entry name — the property that keeps
+/// `git diff` non-empty.
 #[test]
 fn unit_variant_field_change_changes_the_blob() {
     let (low_root, low_store) = serialize(&WithPriority {
@@ -120,9 +123,18 @@ fn unit_variant_field_change_changes_the_blob() {
         low_entry.oid, high_entry.oid,
         "the `priority` entry's own oid must differ, not just the root"
     );
-    assert_eq!(low_store.get_blob(&low_entry.oid).expect("blob"), b"Low\n");
     assert_eq!(
-        high_store.get_blob(&high_entry.oid).expect("blob"),
+        low_store
+            .get_blob(&low_entry.oid)
+            .expect("read object")
+            .expect("blob"),
+        b"Low\n"
+    );
+    assert_eq!(
+        high_store
+            .get_blob(&high_entry.oid)
+            .expect("read object")
+            .expect("blob"),
         b"High\n"
     );
 }

@@ -23,7 +23,13 @@ fn string_blob_matches_typed_string() -> anyhow::Result<()> {
     let (typed_root, _) = serialize(&"hello".to_string())?;
     assert_eq!(dyn_root, typed_root);
     assert_eq!(dyn_root.as_bytes(), HELLO_LEAF_BLOB_OID.as_slice());
-    assert_eq!(dyn_store.get_blob(&dyn_root).expect("blob"), b"hello\n");
+    assert_eq!(
+        dyn_store
+            .get_blob(&dyn_root)
+            .expect("read object")
+            .expect("blob"),
+        b"hello\n"
+    );
     Ok(())
 }
 
@@ -31,7 +37,10 @@ fn string_blob_matches_typed_string() -> anyhow::Result<()> {
 #[test]
 fn bool_is_textual_blob() -> anyhow::Result<()> {
     let (root, store) = serialize(&Value::from(true))?;
-    assert_eq!(store.get_blob(&root).expect("blob"), b"true\n");
+    assert_eq!(
+        store.get_blob(&root).expect("read object").expect("blob"),
+        b"true\n"
+    );
     Ok(())
 }
 
@@ -40,14 +49,20 @@ fn bool_is_textual_blob() -> anyhow::Result<()> {
 #[test]
 fn numbers_are_decimal_blobs() -> anyhow::Result<()> {
     let (root, store) = serialize(&Value::from(42i64))?;
-    assert_eq!(store.get_blob(&root).expect("blob"), b"42\n");
+    assert_eq!(
+        store.get_blob(&root).expect("read object").expect("blob"),
+        b"42\n"
+    );
 
     let (root, store) = serialize(&Value::from(-7i64))?;
-    assert_eq!(store.get_blob(&root).expect("blob"), b"-7\n");
+    assert_eq!(
+        store.get_blob(&root).expect("read object").expect("blob"),
+        b"-7\n"
+    );
 
     let (root, store) = serialize(&Value::from(u64::MAX))?;
     assert_eq!(
-        store.get_blob(&root).expect("blob"),
+        store.get_blob(&root).expect("read object").expect("blob"),
         b"18446744073709551615\n"
     );
     Ok(())
@@ -56,9 +71,9 @@ fn numbers_are_decimal_blobs() -> anyhow::Result<()> {
 /// Null is the presence-marker tree (`crate::marker`): a single blob entry
 /// named `"_"`, not a literal empty tree, which would be invisible to
 /// `git ls-tree -r`/`diff` — exactly the invisibility the marker exists to
-/// avoid. The empty blob is now the marker's alone: every leaf blob carries
-/// a mandatory trailing newline, so `""` and empty bytes can no longer
-/// collide with it.
+/// avoid. The empty blob is the marker's alone: every leaf blob carries
+/// a mandatory trailing newline, so `""` and empty bytes do not collide
+/// with it.
 #[test]
 fn null_is_marker_tree() -> anyhow::Result<()> {
     let (root, store) = serialize(&Value::NULL)?;
@@ -71,7 +86,10 @@ fn null_is_marker_tree() -> anyhow::Result<()> {
     assert_eq!(entries[0].filename, "_");
     assert_eq!(entries[0].mode.kind(), EntryKind::Blob);
     assert_eq!(
-        store.get_blob(&entries[0].oid).expect("marker blob"),
+        store
+            .get_blob(&entries[0].oid)
+            .expect("read object")
+            .expect("marker blob"),
         b"",
         "the marker blob must be empty"
     );
@@ -90,7 +108,13 @@ fn array_is_ordinal_tree() -> anyhow::Result<()> {
         .collect();
     assert_eq!(names, ["0000", "0001", "0002"]);
     let first = find_entry(&store, &root, "0000");
-    assert_eq!(store.get_blob(&first.oid).expect("blob"), b"a\n");
+    assert_eq!(
+        store
+            .get_blob(&first.oid)
+            .expect("read object")
+            .expect("blob"),
+        b"a\n"
+    );
     Ok(())
 }
 
@@ -108,7 +132,13 @@ fn object_is_sorted_name_keyed_tree() -> anyhow::Result<()> {
         .collect();
     assert_eq!(names, ["alpha", "zeta"]);
     let alpha = find_entry(&store, &root, "alpha");
-    assert_eq!(store.get_blob(&alpha.oid).expect("blob"), b"a\n");
+    assert_eq!(
+        store
+            .get_blob(&alpha.oid)
+            .expect("read object")
+            .expect("blob"),
+        b"a\n"
+    );
     Ok(())
 }
 
@@ -150,50 +180,64 @@ fn value_nested_in_typed_struct() -> anyhow::Result<()> {
     let (standalone_root, _) = serialize(&meta)?;
     assert_eq!(entry.oid, standalone_root);
     let k = find_entry(&store, &entry.oid, "k");
-    assert_eq!(store.get_blob(&k.oid).expect("blob"), b"v\n");
+    assert_eq!(
+        store.get_blob(&k.oid).expect("read object").expect("blob"),
+        b"v\n"
+    );
     Ok(())
 }
 
-// --- floats beyond 64/128 bits (`value` feature) ---
+// --- floats beyond 64/128 bits ---
 
 /// A finite float whose magnitude exceeds both `i128::MAX` and `u128::MAX`
-/// still serializes: the `value`-feature fast path can tell — via
-/// `VNumber::to_i128`/`to_u128` both returning `None` — that the value is
+/// still serializes: the `facet_value::Value` downcast — unconditional, so
+/// this holds with and without the `value` feature — can tell, via
+/// `VNumber::to_i128`/`to_u128` both returning `None`, that the value is
 /// genuinely float-backed rather than the lossy image of an out-of-range
 /// integer, so it renders through the same float encoding a typed `f64`
 /// would use, producing an identical blob and OID.
-#[cfg(feature = "value")]
 #[test]
 fn large_finite_float_matches_typed_f64() -> anyhow::Result<()> {
     let (dyn_root, dyn_store) = serialize(&Value::from(1e40_f64))?;
     let (typed_root, typed_store) = serialize(&1e40_f64)?;
     assert_eq!(dyn_root, typed_root);
     assert_eq!(
-        dyn_store.get_blob(&dyn_root).expect("blob"),
-        typed_store.get_blob(&typed_root).expect("blob"),
+        dyn_store
+            .get_blob(&dyn_root)
+            .expect("read object")
+            .expect("blob"),
+        typed_store
+            .get_blob(&typed_root)
+            .expect("read object")
+            .expect("blob"),
     );
     Ok(())
 }
 
 /// A whole-valued float that fits `u128` (unlike `1e40` above) exercises the
-/// same fast path through its other branch — `to_u128` succeeds — and must
+/// same downcast through its other branch — `to_u128` succeeds — and must
 /// still match the typed encoding exactly.
-#[cfg(feature = "value")]
 #[test]
 fn avogadro_float_matches_typed_f64() -> anyhow::Result<()> {
     let (dyn_root, dyn_store) = serialize(&Value::from(6.022e23_f64))?;
     let (typed_root, typed_store) = serialize(&6.022e23_f64)?;
     assert_eq!(dyn_root, typed_root);
     assert_eq!(
-        dyn_store.get_blob(&dyn_root).expect("blob"),
-        typed_store.get_blob(&typed_root).expect("blob"),
+        dyn_store
+            .get_blob(&dyn_root)
+            .expect("read object")
+            .expect("blob"),
+        typed_store
+            .get_blob(&typed_root)
+            .expect("read object")
+            .expect("blob"),
     );
     Ok(())
 }
 
 // --- datetime ---
 
-/// A negative (BCE) year renders as `-` followed by its *magnitude*
+/// A negative (BCE) year renders as `-` followed by its magnitude
 /// zero-padded to four digits. Zero-padding the whole signed value instead
 /// (`format!("{year:04}", ...)` with `year: i32`) would count the sign
 /// character toward the width and under-pad the magnitude by one digit.
@@ -201,7 +245,10 @@ fn avogadro_float_matches_typed_f64() -> anyhow::Result<()> {
 fn datetime_negative_year_is_zero_padded_by_magnitude() -> anyhow::Result<()> {
     let dt = VDateTime::new_local_date(-5, 6, 15);
     let (root, store) = serialize(&Value::from(dt))?;
-    assert_eq!(store.get_blob(&root).expect("blob"), b"-0005-06-15\n");
+    assert_eq!(
+        store.get_blob(&root).expect("read object").expect("blob"),
+        b"-0005-06-15\n"
+    );
     Ok(())
 }
 

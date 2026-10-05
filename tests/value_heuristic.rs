@@ -105,7 +105,7 @@ fn typed_person_reads_as_object_of_strings() -> anyhow::Result<()> {
 
 // --- recursion guard ---
 
-/// Heuristic recursion is bounded by the same `MAX_DEPTH` guard as typed
+/// Heuristic recursion is bounded by the same depth guard as typed
 /// recursion: a tree nested deeper fails rather than overflowing the stack.
 #[test]
 fn depth_beyond_max_is_rejected() -> anyhow::Result<()> {

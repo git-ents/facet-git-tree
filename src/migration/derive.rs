@@ -41,7 +41,7 @@ impl Incomplete {
         &self.unclassified
     }
 
-    /// The operations that *were* classified, as a starting point for hand
+    /// The operations that were classified, as a starting point for hand
     /// authoring — never a substitute for the edge itself.
     pub fn into_draft(self) -> Migration {
         Migration { ops: self.ops }
@@ -51,7 +51,7 @@ impl Incomplete {
 /// A difference between two documents that the lens vocabulary cannot
 /// express.
 ///
-/// A report type, not a stored artifact — deliberately does not derive
+/// A report type, not a stored artifact, so it does not derive
 /// [`Facet`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum Divergence {
@@ -266,7 +266,7 @@ fn classify_retype(
 /// Compare the fields of a struct or struct variant at `at`, emitting ops in
 /// `Rename`, `Remove`, `Wrap`, `Add` order — `Rename` first so later phases
 /// address target-side names, and a `Wrap` on a renamed field therefore names
-/// the *target* field.
+/// the target field.
 ///
 /// Compares each field's [`FieldNode::node`] only: [`StructField::has_default`]
 /// (`crate::schema::StructField`) governs write-time omission, not the

@@ -19,7 +19,7 @@ use common::{Nested, Person, Point, find_entry, tree_entries};
 fn serialize_returns_non_empty_store() {
     let (root_id, store) = serialize(&Point { x: 1.0, y: 2.0 }).expect("serialize should succeed");
     assert!(
-        store.get(&root_id).is_some(),
+        store.get(&root_id).expect("read object").is_some(),
         "root id must resolve in the store"
     );
 }
@@ -57,6 +57,7 @@ fn blob_content_is_utf8() {
         let entry = find_entry(&store, &root_id, field);
         let bytes = store
             .get_blob(&entry.oid)
+            .expect("read object")
             .unwrap_or_else(|| panic!("blob missing for field {field}"));
         std::str::from_utf8(&bytes)
             .unwrap_or_else(|_| panic!("field {field} blob is not valid UTF-8"));
@@ -77,6 +78,7 @@ fn string_field_blob_content() {
     let entry = find_entry(&store, &root_id, "name");
     let bytes = store
         .get_blob(&entry.oid)
+        .expect("read object")
         .expect("name blob must be present");
     assert_eq!(
         bytes, b"Alice\n",

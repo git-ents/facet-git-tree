@@ -43,7 +43,7 @@ fn sample() -> TreeNode {
 fn recursive_type_serializes() {
     let (root_id, store) = serialize(&sample()).expect("recursive type must serialize");
     assert!(
-        store.get(&root_id).is_some(),
+        store.get(&root_id).expect("read object").is_some(),
         "root id must resolve in the store"
     );
 }

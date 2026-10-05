@@ -21,7 +21,10 @@ struct WithF64 {
 /// Retrieve the blob bytes for the single-field wrapper struct's `v` entry.
 fn serialize_scalar_f64(value: f64) -> Vec<u8> {
     let (root_id, store) = serialize(&WithF64 { v: value }).expect("serialize should succeed");
-    let entries = store.get_tree(&root_id).expect("root must be a tree");
+    let entries = store
+        .get_tree(&root_id)
+        .expect("read object")
+        .expect("root must be a tree");
     let v_entry = entries
         .iter()
         .find(|e| e.filename == "v")
@@ -33,19 +36,24 @@ fn serialize_scalar_f64(value: f64) -> Vec<u8> {
     );
     store
         .get_blob(&v_entry.oid)
+        .expect("read object")
         .expect("blob must be in store")
         .to_vec()
 }
 
 fn serialize_scalar_f32(value: f32) -> Vec<u8> {
     let (root_id, store) = serialize(&WithF32 { v: value }).expect("serialize should succeed");
-    let entries = store.get_tree(&root_id).expect("root must be a tree");
+    let entries = store
+        .get_tree(&root_id)
+        .expect("read object")
+        .expect("root must be a tree");
     let v_entry = entries
         .iter()
         .find(|e| e.filename == "v")
         .expect("struct must have field `v`");
     store
         .get_blob(&v_entry.oid)
+        .expect("read object")
         .expect("blob must be in store")
         .to_vec()
 }

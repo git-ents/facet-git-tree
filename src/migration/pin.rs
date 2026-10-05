@@ -5,17 +5,17 @@
 //! A `Migration` is a stored, self-hosted document exactly as [`Schema`]
 //! is, and its own shape will evolve — a future generation may add a
 //! [`Change`](crate::migration::Change) variant. A reader that silently
-//! ignored an operation it did not understand would produce a *wrong* value,
+//! ignored an operation it did not understand would produce a wrong value,
 //! which is strictly worse than the schema case, so a stored migration
 //! carries the same out-of-band pin: checked with one `ls-tree` lookup
-//! *before* any deserialize.
+//! before any deserialize.
 //!
 //! This tower is separate from the schema-schema tower
 //! ([`crate::schema::pin`]): the two documents evolve independently, and
 //! adding a `Change` variant must not invalidate every stored `Schema`.
 //!
 //! Each generation's own tree also carries a [`codec`] entry, exactly as the
-//! schema-schema tower's does — the *same* fixture, spliced under the same
+//! schema-schema tower's does — the same fixture, spliced under the same
 //! name, so the two towers share one content-addressed `codec` object.
 
 use gix_object::{Find, Write};
@@ -54,15 +54,10 @@ impl MigrationSchema {
     /// `genesis_constant_is_real` in `tests/migration_pin.rs`, which pins it
     /// against the actual serialization.
     ///
-    /// Updated for the field-level default-presence marker: `Migration`'s own
-    /// shape does not reference `Node`, but this generation's tree also
-    /// splices the [`codec`] fixture shared with the schema-schema tower, and
-    /// that fixture's *schema* half (`schema_of::<codec::Fixture>()`) does —
-    /// `Fixture` is itself a named struct, so its `Node::Struct` now carries
-    /// `StructField` too, moving the shared `codec` tree id and therefore
-    /// this one, exactly as the doc comment on [`codec`] says a shape-only
-    /// change elsewhere in the schema-schema can. No prior generation existed
-    /// to chain from, so the constant is replaced in place.
+    /// This generation's tree also splices the [`codec`] fixture shared with
+    /// the schema-schema tower, so a shape-only change to that fixture's
+    /// schema (it is a named struct, and its fields carry the default-
+    /// presence marker) moves this id too.
     pub const GENESIS: MigrationSchema = MigrationSchema {
         tree: decode_oid(GENESIS_HEX),
         parent: None,
@@ -156,7 +151,7 @@ impl Migration {
     }
 
     /// Read a stored migration, refusing one this build does not speak
-    /// *before* deserializing it.
+    /// before deserializing it.
     ///
     /// A migration from a newer binary may contain a `Change` variant this
     /// build has never heard of, and a typed deserialize attempted first

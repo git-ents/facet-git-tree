@@ -7,7 +7,7 @@
 //! whose `Some` payload must be wrapped in a `some` entry, and a bare number
 //! cannot tell that its field is `f64` rather than an integer. The schema
 //! supplies exactly that missing type information, so `serialize_value_with_schema`
-//! writes the *same* objects — byte-for-byte, and therefore the same object
+//! writes the same objects — byte-for-byte, and therefore the same object
 //! ids — that the equivalent typed value would produce through
 //! [`serialize`](crate::serialize).
 //!
@@ -22,16 +22,16 @@
 //! The normative mapping lives in `docs/specification.adoc` under
 //! `serialization.schema-directed`.
 
-use core::fmt::Write as _;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use facet::Peek;
 use facet_value::{VArray, VNumber, Value};
 use gix_object::Write;
 
-use crate::de::MAX_DEPTH;
 use crate::error::{SchemaWriteError, SerializeError};
-use crate::schema::{DefaultFieldNode, Node, Schema, VariantKind};
+use crate::limits::MAX_VALUE_DEPTH;
+use crate::schema::path::Path;
+use crate::schema::{DefaultFieldNode, Node, Schema, VariantKind, is_scalar_schema, value_kind};
 use crate::ser::{float_text, serialize_node, write_leaf_blob};
 use crate::{EntryKind, EntryMode, ObjectId, TreeEntry, check_key};
 
@@ -72,68 +72,6 @@ pub fn serialize_value_with_schema<W: Write + ?Sized>(
     Ok(oid)
 }
 
-/// A location within the value being written, threaded through the walk so a
-/// mismatch can name exactly where it happened.
-///
-/// Borrowed and stack-linked, so the happy path allocates nothing; only
-/// [`Path::show`] materializes a string, at the point an error is built.
-struct Path<'a> {
-    parent: Option<&'a Path<'a>>,
-    seg: Seg<'a>,
-}
-
-enum Seg<'a> {
-    Root,
-    Field(&'a str),
-    Index(usize),
-}
-
-impl<'a> Path<'a> {
-    const ROOT: Path<'static> = Path {
-        parent: None,
-        seg: Seg::Root,
-    };
-
-    fn field<'b>(&'b self, name: &'b str) -> Path<'b> {
-        Path {
-            parent: Some(self),
-            seg: Seg::Field(name),
-        }
-    }
-
-    fn index<'b>(&'b self, i: usize) -> Path<'b> {
-        Path {
-            parent: Some(self),
-            seg: Seg::Index(i),
-        }
-    }
-
-    /// Render the path from the root as `$.field[0].inner`.
-    fn show(&self) -> String {
-        let mut segs = Vec::new();
-        let mut cur = Some(self);
-        while let Some(p) = cur {
-            segs.push(&p.seg);
-            cur = p.parent;
-        }
-        let mut s = String::from("$");
-        for seg in segs.into_iter().rev() {
-            match seg {
-                Seg::Root => {}
-                Seg::Field(name) => {
-                    s.push('.');
-                    s.push_str(name);
-                }
-                // Writing to a String is infallible.
-                Seg::Index(i) => {
-                    let _ = write!(s, "[{i}]");
-                }
-            }
-        }
-        s
-    }
-}
-
 /// Write one schema node's value from `value`.
 ///
 /// Returns the encoded object's id and its entry kind (blob vs. tree), so a
@@ -141,7 +79,7 @@ impl<'a> Path<'a> {
 /// typed encoder does.
 ///
 /// `depth` counts every hop — including [`Node::Ref`] resolution — against
-/// the same [`MAX_DEPTH`] limit that bounds deserialization, so a `Ref`-to-`Ref`
+/// the same [`MAX_VALUE_DEPTH`] limit that bounds deserialization, so a `Ref`-to-`Ref`
 /// cycle in the schema fails rather than recursing unboundedly.
 fn write_node<W: Write + ?Sized>(
     value: &Value,
@@ -151,10 +89,10 @@ fn write_node<W: Write + ?Sized>(
     path: &Path,
     depth: usize,
 ) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
-    if depth > MAX_DEPTH {
+    if depth > MAX_VALUE_DEPTH {
         return Err(SchemaWriteError::MaxDepth {
             path: path.show(),
-            depth: MAX_DEPTH,
+            depth: MAX_VALUE_DEPTH,
         });
     }
     match schema {
@@ -189,13 +127,16 @@ fn write_node<W: Write + ?Sized>(
         Node::I32 => signed_blob::<i32, W>(value, "I32", path, store),
         Node::I64 => signed_blob::<i64, W>(value, "I64", path, store),
         Node::I128 => signed_blob::<i128, W>(value, "I128", path, store),
-        Node::ISize => signed_blob::<isize, W>(value, "ISize", path, store),
+        // `isize`/`usize` are spec'd i64/u64-shaped, so the schema-directed
+        // writer renders them at the fixed width: the blob is target-
+        // independent by construction, not by fixture discipline.
+        Node::ISize => signed_blob::<i64, W>(value, "ISize", path, store),
         Node::U8 => unsigned_blob::<u8, W>(value, "U8", path, store),
         Node::U16 => unsigned_blob::<u16, W>(value, "U16", path, store),
         Node::U32 => unsigned_blob::<u32, W>(value, "U32", path, store),
         Node::U64 => unsigned_blob::<u64, W>(value, "U64", path, store),
         Node::U128 => unsigned_blob::<u128, W>(value, "U128", path, store),
-        Node::USize => unsigned_blob::<usize, W>(value, "USize", path, store),
+        Node::USize => unsigned_blob::<u64, W>(value, "USize", path, store),
         Node::F64 => {
             let n = as_number(value, path)?;
             // A float-backed number is rendered at any magnitude; an
@@ -381,7 +322,7 @@ fn write_named_tree<W: Write + ?Sized, T: DefaultFieldNode>(
 /// `marker_empty` says whether an empty result takes the presence marker
 /// instead of a literal empty tree, per `crate::marker`. It is true for the
 /// variable-length sequences — [`Node::List`], [`Node::Array`] — whose
-/// emptiness is a property of the *value* and so is worth seeing in a diff.
+/// emptiness is a property of the value and so is worth seeing in a diff.
 /// It is false for [`Node::Tuple`], whose length is fixed by the schema:
 /// a zero-element tuple encodes identically for every value, so there is
 /// nothing to diff, and marking it would both diverge from the typed encoder
@@ -412,12 +353,14 @@ fn write_seq<'s, W: Write + ?Sized>(
     tree(store, entries)
 }
 
-/// Encode a composite-key map as ordinal-named `{ k, v }` pair sub-trees.
+/// Encode a composite-key map as `{ k, v }` pair sub-trees named by each
+/// pair tree's own object id.
 ///
 /// The value is the pair array the read path produces: an [`Array`] of
-/// two-member objects `{ "k": …, "v": … }`. Pair sub-trees are sorted by their
-/// own object id before ordinal assignment, exactly as the typed encoder does,
-/// so the map stays content-addressed independent of array order.
+/// two-member objects `{ "k": …, "v": … }`. Pair entries are named by the
+/// pair sub-tree's own object id — exactly as the typed encoder does (see
+/// [`crate::ser`]'s map serialization for why content names beat ordinals) —
+/// so the map is content-addressed independent of array order.
 ///
 /// [`Array`]: facet_value::Value::as_array
 fn write_composite_map<W: Write + ?Sized>(
@@ -430,7 +373,8 @@ fn write_composite_map<W: Write + ?Sized>(
     depth: usize,
 ) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
     let arr = as_array(value, path)?;
-    let mut pair_oids: Vec<ObjectId> = Vec::with_capacity(arr.len());
+    let mut entries = Vec::with_capacity(arr.len());
+    let mut key_oids = BTreeSet::new();
     for (i, item) in arr.as_slice().iter().enumerate() {
         let ipath = path.index(i);
         let obj = as_object(item, &ipath)?;
@@ -441,6 +385,9 @@ fn write_composite_map<W: Write + ?Sized>(
             .get("v")
             .ok_or_else(|| expected(&ipath, "object with \"k\" and \"v\"", item))?;
         let (k_oid, k_kind) = write_node(k, key, doc, store, &ipath.field("k"), depth + 1)?;
+        if !key_oids.insert(k_oid) {
+            return Err(SerializeError::DuplicateKey { oid: k_oid }.into());
+        }
         let (v_oid, v_kind) = write_node(v, val, doc, store, &ipath.field("v"), depth + 1)?;
         let mut pair = vec![
             TreeEntry {
@@ -456,14 +403,12 @@ fn write_composite_map<W: Write + ?Sized>(
         ];
         pair.sort();
         let (pair_oid, _) = tree(store, pair)?;
-        pair_oids.push(pair_oid);
-    }
-    pair_oids.sort();
-    let mut entries = Vec::with_capacity(pair_oids.len());
-    for (i, pair_oid) in pair_oids.into_iter().enumerate() {
         entries.push(TreeEntry {
             mode: EntryMode::from(EntryKind::Tree),
-            filename: format!("{i:04}").into(),
+            // Named by the pair's own object id, exactly as the typed
+            // encoder does — see `ser::serialize_map` for why content
+            // names beat ordinals.
+            filename: pair_oid.to_string().into(),
             oid: pair_oid,
         });
     }
@@ -694,58 +639,4 @@ fn number_text(n: &VNumber) -> String {
     } else {
         n.to_f64_lossy().to_string()
     }
-}
-
-/// A value's runtime kind, for mismatch messages.
-fn value_kind(v: &Value) -> &'static str {
-    if v.is_null() {
-        "null"
-    } else if v.is_bool() {
-        "bool"
-    } else if v.is_number() {
-        "number"
-    } else if v.is_string() {
-        "string"
-    } else if v.is_bytes() {
-        "bytes"
-    } else if v.is_array() {
-        "array"
-    } else if v.is_object() {
-        "object"
-    } else if v.is_char() {
-        "char"
-    } else if v.is_datetime() {
-        "datetime"
-    } else if v.is_qname() {
-        "qname"
-    } else if v.is_uuid() {
-        "uuid"
-    } else {
-        "value"
-    }
-}
-
-/// Whether `schema` is a scalar node — the same classification that decides
-/// map layout on read.
-fn is_scalar_schema(schema: &Node) -> bool {
-    matches!(
-        schema,
-        Node::Bool
-            | Node::Char
-            | Node::String
-            | Node::I8
-            | Node::I16
-            | Node::I32
-            | Node::I64
-            | Node::I128
-            | Node::ISize
-            | Node::U8
-            | Node::U16
-            | Node::U32
-            | Node::U64
-            | Node::U128
-            | Node::USize
-            | Node::F32
-            | Node::F64
-    )
 }

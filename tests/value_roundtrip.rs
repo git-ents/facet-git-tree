@@ -131,8 +131,8 @@ fn fractional_float_oid_matches_typed() -> anyhow::Result<()> {
 }
 
 /// A dynamic float beyond `u128::MAX` also shares its root OID with the
-/// equivalent typed `f64`, now that the `value`-feature fast path renders it
-/// as a float instead of refusing it as an ambiguous whole value.
+/// equivalent typed `f64`: the `value`-feature fast path renders it as a
+/// float rather than an ambiguous whole value.
 #[cfg(feature = "value")]
 #[test]
 fn large_float_oid_matches_typed() -> anyhow::Result<()> {

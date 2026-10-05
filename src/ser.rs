@@ -3,10 +3,12 @@
 use facet::{Def, DynDateTimeKind, DynValueKind, Peek};
 use gix_object::{Kind, Write};
 
+use std::collections::BTreeSet;
+
 use crate::check_key;
 use crate::classify::{ShapeClass, classify, collapse_shape};
-use crate::de::MAX_DEPTH;
 use crate::error::SerializeError;
+use crate::limits::MAX_VALUE_DEPTH;
 use crate::schema::scalar_node;
 use crate::store::ObjectStore;
 use crate::{EntryKind, EntryMode, ObjectId, RawBlob, RawTree, TreeEntry};
@@ -80,8 +82,8 @@ pub(crate) fn serialize_node<W: Write + ?Sized>(
     let peek = peek.innermost_peek();
     let shape = peek.shape();
 
-    if depth > MAX_DEPTH {
-        return Err(SerializeError::MaxDepth(MAX_DEPTH));
+    if depth > MAX_VALUE_DEPTH {
+        return Err(SerializeError::MaxDepth(MAX_VALUE_DEPTH));
     }
 
     match classify(shape) {
@@ -97,7 +99,7 @@ pub(crate) fn serialize_node<W: Write + ?Sized>(
         ShapeClass::Scalar => serialize_leaf(peek, store),
         ShapeClass::Bytes => serialize_byte_sequence(peek, store),
         ShapeClass::Struct => serialize_struct(peek, store, depth),
-        ShapeClass::Sequence => serialize_sequence_node(peek, store, depth),
+        ShapeClass::Sequence => serialize_sequence(peek, store, depth),
         ShapeClass::Map => serialize_map(peek, store, depth),
         ShapeClass::Option => serialize_option(peek, store, depth),
         ShapeClass::Enum => serialize_enum(peek, store, depth),
@@ -120,7 +122,15 @@ fn serialize_byte_sequence<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
 ) -> Result<(ObjectId, EntryKind), SerializeError> {
+    // Bulk path: a contiguous `u8` list-like (Vec, array, slice) hands over
+    // its whole buffer in one call instead of one reflection call per byte —
+    // the per-byte loop below is the fallback for non-contiguous element
+    // storage.
     let seq = peek.into_list_like().map_err(reflect)?;
+    if let Some(bytes) = seq.as_bytes() {
+        let oid = write_leaf_blob(store, bytes)?;
+        return Ok((oid, EntryKind::Blob));
+    }
     let mut bytes = Vec::new();
     for item in seq.iter() {
         bytes.push(*item.get::<u8>().map_err(reflect)?);
@@ -159,18 +169,43 @@ fn serialize_struct<W: Write + ?Sized>(
     Ok((write_sorted_tree(store, entries)?, EntryKind::Tree))
 }
 
-fn serialize_sequence_node<W: Write + ?Sized>(
+/// Serialize a sequence: one ordinal-named entry per element, or the
+/// presence marker when the sequence is empty.
+fn serialize_sequence<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
     depth: usize,
 ) -> Result<(ObjectId, EntryKind), SerializeError> {
-    let entries = serialize_sequence(peek, store, depth)?;
+    let seq = peek.into_list_like().map_err(reflect)?;
+    let mut entries: Vec<TreeEntry> = Vec::new();
+    for (i, item) in seq.iter().enumerate() {
+        let (oid, kind) = serialize_node(item, store, depth + 1)?;
+        entries.push(TreeEntry {
+            mode: EntryMode::from(kind),
+            filename: format!("{i:04}").into(),
+            oid,
+        });
+    }
     Ok((
         write_tree_or_presence_marker(store, entries)?,
         EntryKind::Tree,
     ))
 }
 
+/// Serialize a map: scalar keys name their entries directly; composite keys
+/// are written as `{ k, v }` pair sub-trees, each named by the pair tree's
+/// own object id.
+///
+/// Composite pairs are content-named rather than ordinal-named because a map
+/// is unordered data — ordinals would imply an ordering the type does not
+/// have and pay renumbering churn on every insertion. Content names make a
+/// `git diff` show only the pairs that changed, and let a tree merge add or
+/// remove one pair without touching the rest. Duplicate keys are refused on
+/// write ([`SerializeError::DuplicateKey`]) and read
+/// ([`DeserializeError::DuplicateKey`]), so a merge cannot silently collapse
+/// two pairs into one. The read side is name-agnostic (it iterates entries
+/// and recurses into each as a pair sub-tree), so naming is a writer-side
+/// spelling only.
 fn serialize_map<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
@@ -196,9 +231,12 @@ fn serialize_map<W: Write + ?Sized>(
             });
         }
     } else {
-        let mut pair_oids = Vec::new();
+        let mut key_oids = BTreeSet::new();
         for (k, v) in pm.iter() {
             let (k_oid, k_kind) = serialize_node(k, store, depth + 1)?;
+            if !key_oids.insert(k_oid) {
+                return Err(SerializeError::DuplicateKey { oid: k_oid });
+            }
             let (v_oid, v_kind) = serialize_node(v, store, depth + 1)?;
             let pair = vec![
                 TreeEntry {
@@ -212,13 +250,17 @@ fn serialize_map<W: Write + ?Sized>(
                     oid: v_oid,
                 },
             ];
-            pair_oids.push(write_sorted_tree(store, pair)?);
-        }
-        pair_oids.sort();
-        for (i, pair_oid) in pair_oids.into_iter().enumerate() {
+            let pair_oid = write_sorted_tree(store, pair)?;
             entries.push(TreeEntry {
                 mode: EntryMode::from(EntryKind::Tree),
-                filename: format!("{i:04}").into(),
+                // The pair's own object id, as hex: a map is unordered data,
+                // so entry names carry no ordering to preserve — naming them
+                // by content instead makes a diff show only the pairs that
+                // changed and lets a tree-merge add or remove one pair
+                // without renumbering the rest. Hex of a fixed-width oid
+                // sorts in oid order, so the name-sorted tree is
+                // content-ordered too.
+                filename: pair_oid.to_string().into(),
                 oid: pair_oid,
             });
         }
@@ -361,7 +403,8 @@ fn serialize_dynamic<W: Write + ?Sized>(
                 .ok_or_else(|| reflect("dynamic bool unreadable"))?;
             blob(if b { "true" } else { "false" }.as_bytes())
         }
-        // Dynamic chars are surfaced as their UTF-8 string representation.
+        // Strings (and dynamic chars, which surface through this same arm
+        // as their UTF-8 representation rather than a kind of their own).
         DynValueKind::String => {
             let s = dv
                 .as_str()
@@ -377,28 +420,30 @@ fn serialize_dynamic<W: Write + ?Sized>(
         DynValueKind::Number => {
             // Resolve values beyond the generic vtable's 64-bit accessors
             // without changing the encoding of values those accessors handle.
-            #[cfg(feature = "value")]
+            // The `facet_value::Value` downcast is unconditional — the crate
+            // is an unconditional dependency — so an exact integer or a
+            // genuinely float-backed whole number encodes identically with
+            // and without the `value` feature: the same input must not
+            // succeed or fail depending on a feature flag.
+            if peek.shape().is_type::<facet_value::Value>()
+                && dv.as_i64().is_none()
+                && dv.as_u64().is_none()
             {
-                if peek.shape().is_type::<facet_value::Value>()
-                    && dv.as_i64().is_none()
-                    && dv.as_u64().is_none()
-                {
-                    let v = peek.get::<facet_value::Value>().map_err(reflect)?;
-                    if let Some(n) = v.as_number() {
-                        // Preserve float-backed values as floats: integer
-                        // accessors can expose an exact integer while changing
-                        // the shortest-round-tripping decimal representation.
-                        if n.is_float() {
-                            return blob(&float_text(n.to_f64_lossy()));
-                        }
-                        // `VNumber` canonicalizes integer representations, so
-                        // the range-appropriate accessor is exact.
-                        if let Some(i) = n.to_i128() {
-                            return blob(i.to_string().as_bytes());
-                        }
-                        if let Some(u) = n.to_u128() {
-                            return blob(u.to_string().as_bytes());
-                        }
+                let v = peek.get::<facet_value::Value>().map_err(reflect)?;
+                if let Some(n) = v.as_number() {
+                    // Preserve float-backed values as floats: integer
+                    // accessors can expose an exact integer while changing
+                    // the shortest-round-tripping decimal representation.
+                    if n.is_float() {
+                        return blob(&float_text(n.to_f64_lossy()));
+                    }
+                    // `VNumber` canonicalizes integer representations, so
+                    // the range-appropriate accessor is exact.
+                    if let Some(i) = n.to_i128() {
+                        return blob(i.to_string().as_bytes());
+                    }
+                    if let Some(u) = n.to_u128() {
+                        return blob(u.to_string().as_bytes());
                     }
                 }
             }
@@ -552,24 +597,6 @@ fn value_special_text(peek: Peek<'_, '_>) -> Result<Option<String>, SerializeErr
     Ok(None)
 }
 
-fn serialize_sequence<W: Write + ?Sized>(
-    peek: Peek<'_, '_>,
-    store: &W,
-    depth: usize,
-) -> Result<Vec<TreeEntry>, SerializeError> {
-    let seq = peek.into_list_like().map_err(reflect)?;
-    let mut entries: Vec<TreeEntry> = Vec::new();
-    for (i, item) in seq.iter().enumerate() {
-        let (oid, kind) = serialize_node(item, store, depth + 1)?;
-        entries.push(TreeEntry {
-            mode: EntryMode::from(kind),
-            filename: format!("{i:04}").into(),
-            oid,
-        });
-    }
-    Ok(entries)
-}
-
 /// A float type [`float_text`] can canonicalize (`f32`, `f64`).
 pub(crate) trait FloatScalar: Copy + PartialEq + ToString {
     /// Positive zero, used to collapse negative zero.
@@ -664,8 +691,22 @@ fn scalar_bytes(peek: Peek<'_, '_>) -> Result<Vec<u8>, SerializeError> {
                 }
             }
             PrimitiveType::Numeric(NumericType::Integer { .. }) => {
-                // Display also handles `isize`/`usize`, which are distinct from
-                // same-sized fixed-width types to `Peek::get`.
+                // Platform-width integers are spec'd i64/u64-shaped: they are
+                // encoded as their decimal text, exactly as the same value's
+                // fixed-width encoding would be, so object ids never depend
+                // on pointer width. The bounded conversions are infallible on
+                // every target where `usize` fits `u64`; a hypothetical wider
+                // target is refused rather than re-spelled per platform.
+                if let Ok(v) = peek.get::<isize>() {
+                    let v = i64::try_from(*v)
+                        .map_err(|_| SerializeError::UnsupportedScalar(shape.type_identifier))?;
+                    return Ok(v.to_string().into_bytes());
+                }
+                if let Ok(v) = peek.get::<usize>() {
+                    let v = u64::try_from(*v)
+                        .map_err(|_| SerializeError::UnsupportedScalar(shape.type_identifier))?;
+                    return Ok(v.to_string().into_bytes());
+                }
                 return Ok(peek.to_string().into_bytes());
             }
             _ => {}

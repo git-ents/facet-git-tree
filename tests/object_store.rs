@@ -16,7 +16,13 @@ use common::HELLO_BLOB_OID;
 fn write_then_get_blob_roundtrips() {
     let store = ObjectStore::default();
     let id = store.write_buf(Kind::Blob, b"hello").expect("write blob");
-    assert_eq!(store.get_blob(&id).expect("blob present"), b"hello");
+    assert_eq!(
+        store
+            .get_blob(&id)
+            .expect("read object")
+            .expect("blob present"),
+        b"hello"
+    );
 }
 
 /// The ID a write produces is exactly the SHA-1 git computes for the same blob
@@ -75,12 +81,14 @@ fn get_absent_object_is_none() {
     let id = written.write_buf(Kind::Blob, b"hello").expect("write blob");
 
     let empty = ObjectStore::default();
-    assert!(empty.get(&id).is_none());
-    assert!(empty.get_blob(&id).is_none());
-    assert!(empty.get_tree(&id).is_none());
+    assert!(empty.get(&id).expect("read object").is_none());
+    assert!(empty.get_blob(&id).expect("read object").is_none());
+    assert!(empty.get_tree(&id).expect("read object").is_none());
 }
 
-/// The typed accessors reject objects of the wrong kind.
+/// The typed accessors distinguish an object of the wrong kind from a
+/// missing one: wrong kind is an error (`NotATree`/`NotABlob`), absence is
+/// `Ok(None)`.
 #[test]
 fn typed_accessors_reject_wrong_kind() {
     let store = ObjectStore::default();
@@ -96,10 +104,22 @@ fn typed_accessors_reject_wrong_kind() {
     let tree_id = store.write(&tree).expect("write tree");
 
     // A blob is not a tree, and vice versa.
-    assert!(store.get_blob(&blob_id).is_some());
-    assert!(store.get_tree(&blob_id).is_none());
-    assert!(store.get_tree(&tree_id).is_some());
-    assert!(store.get_blob(&tree_id).is_none());
+    assert!(store.get_blob(&blob_id).expect("read object").is_some());
+    assert!(
+        matches!(
+            store.get_tree(&blob_id),
+            Err(facet_git_tree::DeserializeError::NotATree(_))
+        ),
+        "a blob read as a tree must be NotATree, not a silent None"
+    );
+    assert!(store.get_tree(&tree_id).expect("read object").is_some());
+    assert!(
+        matches!(
+            store.get_blob(&tree_id),
+            Err(facet_git_tree::DeserializeError::NotABlob(_))
+        ),
+        "a tree read as a blob must be NotABlob, not a silent None"
+    );
 }
 
 /// The `Find` impl returns the stored bytes and the correct object kind.
@@ -129,7 +149,13 @@ fn write_stream_tolerates_a_bogus_size_hint() {
     let lied = store
         .write_stream(Kind::Blob, u64::MAX, &mut &data[..])
         .expect("write with bogus size");
-    assert_eq!(store.get_blob(&lied).expect("present"), data);
+    assert_eq!(
+        store
+            .get_blob(&lied)
+            .expect("read object")
+            .expect("present"),
+        data
+    );
 
     let honest = store.write_buf(Kind::Blob, data).expect("honest write");
     assert_eq!(lied, honest, "the size hint must not affect the object ID");
@@ -143,7 +169,7 @@ proptest! {
     fn arbitrary_blob_roundtrips_deterministically(data: Vec<u8>) {
         let s1 = ObjectStore::default();
         let id1 = s1.write_buf(Kind::Blob, &data).expect("write into s1");
-        prop_assert_eq!(s1.get_blob(&id1).expect("present in s1"), data.clone());
+        prop_assert_eq!(s1.get_blob(&id1).expect("read object").expect("present in s1"), data.clone());
 
         let s2 = ObjectStore::default();
         let id2 = s2.write_buf(Kind::Blob, &data).expect("write into s2");

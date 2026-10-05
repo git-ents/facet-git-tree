@@ -7,10 +7,12 @@ use facet::{Def, Partial};
 use facet_value::Value;
 use gix_hash::Kind as HashKind;
 use gix_object::{Data, Find, Kind};
+use std::collections::BTreeSet;
 
 pub(crate) use crate::classify::collapse_shape;
 use crate::classify::{ShapeClass, classify, is_byte_seq};
 use crate::error::{DeserializeError, KeyError};
+use crate::limits::MAX_VALUE_DEPTH;
 use crate::{EntryKind, ObjectId, RawBlob, RawTree};
 
 /// Collapse a `facet` reflection error to [`DeserializeError::Reflect`].
@@ -21,18 +23,6 @@ use crate::{EntryKind, ObjectId, RawBlob, RawTree};
 fn reflect(e: impl std::fmt::Display) -> DeserializeError {
     DeserializeError::Reflect(e.to_string())
 }
-
-/// Maximum tree nesting depth accepted on deserialization.
-///
-/// Bounds recursion in [`deser_into`] so a hostile or corrupt tree cannot
-/// overflow the stack. The limit must stay well under what a default thread
-/// stack can hold: [`deser_into`] is a large recursive frame (a debug build is
-/// tens of KB per level), so a 2 MiB stack — the standard library's default for
-/// spawned threads — only holds a few dozen levels before overflowing. The
-/// guard exists precisely to forestall that overflow, so it is kept low enough
-/// to fire first with margin to spare. Still far deeper than any
-/// practically-encoded value nests.
-pub(crate) const MAX_DEPTH: usize = 32;
 
 /// Whether a decoder accepts the historical leaf-blob spelling.
 ///
@@ -49,19 +39,42 @@ pub enum DecodeMode {
 
 /// Validate a user-supplied key for use as a Git tree entry name.
 ///
-/// Keys become tree entry names, which double as path segments, so a key may not
-/// contain the path separator `/`, nor equal the reserved presence-marker name
-/// (`crate::marker::MARKER_KEY`) written in place of a literal empty tree for
-/// `None`, `Null`, and an empty collection — see [`KeyError`]. Serialization is
-/// required to apply this to every dynamic key (such as map keys) before
-/// emitting its entry, so neither name can ever be written as data.
+/// Keys become tree entry names, which double as path segments, so a key may
+/// not contain the path separator `/` nor NUL, nor equal the reserved
+/// presence-marker name (`crate::marker::MARKER_KEY`) written in place of a
+/// literal empty tree for `None`, `Null`, and an empty collection — see
+/// [`KeyError`]. NUL is checked here rather than left to the object backend:
+/// `gix` can only reject a NUL-bearing name as an opaque encode-time error,
+/// with no key and no hint, while the name is still in hand as user data.
+/// Serialization is required to apply this to every dynamic key (such as map
+/// keys) before emitting its entry, so none of these names can ever be
+/// written as data.
 pub fn check_key(key: &str) -> Result<(), KeyError> {
-    if key.contains('/') || key == crate::marker::MARKER_KEY {
+    if !is_tree_entry_name(key) {
         return Err(KeyError {
             key: key.to_owned(),
         });
     }
     Ok(())
+}
+
+/// Whether `name` is usable as a Git tree entry name.
+///
+/// The single statement of the rules every name-to-entry site shares —
+/// [`check_key`] (and through it both dynamic-key routes of both writers),
+/// [`crate::normal_form::Key::name`], and the identity normal form's struct
+/// fields — so the sites cannot drift the way canonical git's own rules
+/// (`fsck`'s `nullSha1`, `hasDot`, `hasDotdot`, zero-pad checks) once did.
+/// The rules: non-empty; not `.` or `..`; no `/` (path separator); no NUL
+/// (terminates the name in the on-disk tree format); not the reserved
+/// presence-marker name (`crate::marker::MARKER_KEY`).
+pub(crate) fn is_tree_entry_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\0')
+        && name != crate::marker::MARKER_KEY
 }
 
 /// Deserialize a [`facet::Facet`] value from a root tree stored in `store`.
@@ -83,8 +96,8 @@ pub fn deserialize<T: for<'a> facet::Facet<'a>>(
 
 /// Decode a value while accepting pre-newline leaf blobs.
 ///
-/// This is deliberately separate from [`deserialize`]: callers must opt into
-/// compatibility with the historical object spelling explicitly.
+/// Separate from [`deserialize`]: callers must opt into compatibility with
+/// the historical object spelling explicitly.
 pub fn deserialize_legacy_leaves<T: for<'a> facet::Facet<'a>>(
     root: &ObjectId,
     store: &(impl Find + ?Sized),
@@ -99,7 +112,7 @@ pub fn deserialize_legacy_leaves<T: for<'a> facet::Facet<'a>>(
 /// deserialization — schema-driven reads route a [`Node::Dynamic`]
 /// (`crate::schema::Node`) node back through this crate's own typed
 /// [`deserialize`], and must hand off the depth already spent so the combined
-/// recursion still respects [`MAX_DEPTH`] rather than resetting the budget.
+/// recursion still respects [`MAX_VALUE_DEPTH`] rather than resetting the budget.
 /// [`deserialize`] is this with `depth` fixed at `0`.
 pub(crate) fn deserialize_at_depth<T: for<'a> facet::Facet<'a>>(
     root: &ObjectId,
@@ -216,12 +229,10 @@ pub(crate) fn strip_leaf_newline(
     mut bytes: Vec<u8>,
     mode: DecodeMode,
 ) -> Result<Vec<u8>, DeserializeError> {
+    // Both modes strip the mandatory trailing newline; legacy mode
+    // additionally accepts its historical absence.
     match (mode, bytes.last().copied()) {
-        (DecodeMode::Strict, Some(b'\n')) => {
-            bytes.pop();
-            Ok(bytes)
-        }
-        (DecodeMode::LegacyLeaves, Some(b'\n')) => {
+        (DecodeMode::Strict | DecodeMode::LegacyLeaves, Some(b'\n')) => {
             bytes.pop();
             Ok(bytes)
         }
@@ -244,18 +255,17 @@ pub(crate) fn strip_leaf_newline(
 pub(crate) fn sort_by_ordinal(
     entries: &mut [(String, ObjectId, EntryKind)],
 ) -> Result<(), DeserializeError> {
-    // Validate up front so the infallible sort key below cannot misorder entries.
+    // Validate up front so the sort key and duplicate check below can use
+    // `expect` instead of re-reporting parse errors.
     for (name, _, _) in entries.iter() {
         name.parse::<usize>()
             .map_err(|_| DeserializeError::InvalidOrdinal(name.clone()))?;
     }
     entries
         .sort_by_cached_key(|(name, _, _)| name.parse::<usize>().expect("ordinal validated above"));
-    // Duplicates are now adjacent, so a single pass over sorted windows finds
-    // any pair of entries claiming the same index.
     for pair in entries.windows(2) {
-        let ordinal = |name: &str| name.parse::<usize>().expect("ordinal validated above");
-        let (a, b) = (ordinal(&pair[0].0), ordinal(&pair[1].0));
+        let a = pair[0].0.parse::<usize>().expect("ordinal validated above");
+        let b = pair[1].0.parse::<usize>().expect("ordinal validated above");
         if a == b {
             return Err(DeserializeError::DuplicateOrdinal(a));
         }
@@ -358,7 +368,7 @@ pub(crate) fn extract_enum_entry_mode<F: Find + ?Sized>(
 /// smart-pointer (`begin_smart_ptr`) and transparent-newtype (`begin_inner`)
 /// layers [`deser_into`]'s own `Def::Pointer` and inner-shape branches do,
 /// bottoming out in `parse_from_str` on the fully collapsed frame — the map
-/// analogue of those branches, except there is no separate key *object* to
+/// analogue of those branches, except there is no separate key object to
 /// fetch: the entry's name already is the key's textual form.
 fn parse_key_from_str<'facet>(
     partial: Partial<'facet, true>,
@@ -384,6 +394,31 @@ fn parse_key_from_str<'facet>(
         })
 }
 
+/// Whether an absent field of this shape reads as `None` rather than
+/// [`DeserializeError::MissingField`]. Checked on the field's own shape —
+/// the transparent-collapse [`classify`] applies would unwrap the `Option`
+/// itself.
+///
+/// [`classify`]: crate::classify::classify
+fn is_optional_shape(shape: &facet::Shape) -> bool {
+    matches!(shape.def, Def::Option(_))
+}
+
+/// Begin `field`, set its default, and end it: the typed read of an absent
+/// `Option` field.
+fn set_field_default<'facet>(
+    partial: Partial<'facet, true>,
+    field: &facet::Field,
+) -> Result<Partial<'facet, true>, DeserializeError> {
+    let partial = partial
+        .begin_field(field.name)
+        .map_err(|e| DeserializeError::Reflect(format!("begin_field {}: {e}", field.name)))?;
+    let partial = partial.set_default().map_err(reflect)?;
+    partial
+        .end()
+        .map_err(|e| DeserializeError::Reflect(format!("end field {}: {e}", field.name)))
+}
+
 fn deser_into<'facet, F: Find + ?Sized>(
     partial: Partial<'facet, true>,
     oid: &ObjectId,
@@ -391,8 +426,8 @@ fn deser_into<'facet, F: Find + ?Sized>(
     depth: usize,
     mode: DecodeMode,
 ) -> Result<Partial<'facet, true>, DeserializeError> {
-    if depth > MAX_DEPTH {
-        return Err(DeserializeError::MaxDepth(MAX_DEPTH));
+    if depth > MAX_VALUE_DEPTH {
+        return Err(DeserializeError::MaxDepth(MAX_VALUE_DEPTH));
     }
     let shape = partial.shape();
 
@@ -442,10 +477,16 @@ fn deser_into<'facet, F: Find + ?Sized>(
             });
     }
 
-    // Byte sequence (`Vec<u8>`, `[u8; N]`): read the single blob and fill the
-    // collection one byte at a time, mirroring the serializer's blob encoding.
+    // Byte sequence (`Vec<u8>`, `[u8; N]`): read the single blob. An exact
+    // `Vec<u8>` target takes the whole buffer in one set — one reflection
+    // call instead of one per byte; every other byte-leaf shape (arrays,
+    // slice smart pointers) fills item by item below, mirroring the
+    // serializer's blob encoding.
     if matches!(classify(shape), ShapeClass::Bytes) {
         let bytes = find_blob_bytes_mode(oid, store, mode)?;
+        if shape.is_type::<Vec<u8>>() {
+            return partial.set::<Vec<u8>>(bytes).map_err(reflect);
+        }
         if matches!(shape.def, Def::Array(_)) {
             let mut partial = partial.init_array().map_err(reflect)?;
             for (i, b) in bytes.iter().enumerate() {
@@ -519,24 +560,40 @@ fn deser_into<'facet, F: Find + ?Sized>(
             facet::StructKind::Tuple | facet::StructKind::TupleStruct
         );
         let entries = find_tree_entries(oid, store)?;
+        let mut matched = vec![false; entries.len()];
         let mut partial = partial;
         for (i, field) in st.fields.iter().enumerate() {
-            // Find this field's entry in the tree
             let entry_name = if positional {
                 format!("{i:04}")
             } else {
                 field.name.to_string()
             };
-            let entry = entries.iter().find(|(name, _, _)| *name == entry_name);
-            if let Some((_, child_oid, _)) = entry {
-                let child_oid = *child_oid;
-                partial = partial.begin_field(field.name).map_err(|e| {
-                    DeserializeError::Reflect(format!("begin_field {}: {e}", field.name))
-                })?;
-                partial = deser_into(partial, &child_oid, store, depth + 1, mode)?;
-                partial = partial.end().map_err(|e| {
-                    DeserializeError::Reflect(format!("end field {}: {e}", field.name))
-                })?;
+            match entries.iter().position(|(name, _, _)| *name == entry_name) {
+                Some(pos) => {
+                    let child_oid = entries[pos].1;
+                    matched[pos] = true;
+                    partial = partial.begin_field(field.name).map_err(|e| {
+                        DeserializeError::Reflect(format!("begin_field {}: {e}", field.name))
+                    })?;
+                    partial = deser_into(partial, &child_oid, store, depth + 1, mode)?;
+                    partial = partial.end().map_err(|e| {
+                        DeserializeError::Reflect(format!("end field {}: {e}", field.name))
+                    })?;
+                }
+                // Absent `Option` fields read as `None`; any other missing
+                // field means the tree does not describe this type.
+                None if field.has_default() => {}
+                None if is_optional_shape(field.shape()) => {
+                    partial = set_field_default(partial, field)?;
+                }
+                None => return Err(DeserializeError::MissingField { field: entry_name }),
+            }
+        }
+        for (pos, m) in matched.iter().enumerate() {
+            if !*m && !crate::schema::pin::is_splice_entry(&entries[pos].0) {
+                return Err(DeserializeError::UnexpectedEntry {
+                    entry: entries[pos].0.clone(),
+                });
             }
         }
         return Ok(partial);
@@ -606,9 +663,13 @@ fn deser_into<'facet, F: Find + ?Sized>(
                 partial = partial.end().map_err(reflect)?;
             }
         } else {
+            let mut key_oids = BTreeSet::new();
             for (_, pair_oid, _) in entries {
                 let pair = find_tree_entries(&pair_oid, store)?;
                 let (k_oid, v_oid) = map_pair_entries(&pair)?;
+                if !key_oids.insert(k_oid) {
+                    return Err(DeserializeError::DuplicateKey { oid: k_oid });
+                }
                 partial = partial.begin_key().map_err(reflect)?;
                 partial = deser_into(partial, &k_oid, store, depth + 1, mode)?;
                 partial = partial.end().map_err(reflect)?;
@@ -651,9 +712,16 @@ fn deser_into<'facet, F: Find + ?Sized>(
         let newtype = positional && variant.is_some_and(|v| v.data.fields.len() == 1);
         let is_unit = variant.is_some_and(|v| v.data.fields.is_empty());
 
+        // `select_variant_named` has already rejected an unknown name.
         let mut partial = partial.select_variant_named(&variant_name).map_err(|e| {
             DeserializeError::Reflect(format!("select variant {variant_name}: {e}"))
         })?;
+        let Some(variant) = variant else {
+            // Unreachable unless this lookup and `select_variant_named` disagree.
+            return Err(DeserializeError::Reflect(format!(
+                "unknown variant {variant_name}"
+            )));
+        };
 
         let inner_oid = match (is_unit, inner_oid) {
             // Unit variant, tagged with a blob: nothing further to read — the
@@ -680,6 +748,33 @@ fn deser_into<'facet, F: Find + ?Sized>(
         }
 
         let inner_entries = find_tree_entries(&inner_oid, store)?;
+        let fields = &variant.data.fields;
+        let mut matched = vec![false; inner_entries.len()];
+        for (i, field) in fields.iter().enumerate() {
+            let entry_name = if positional {
+                format!("{i:04}")
+            } else {
+                field.name.to_string()
+            };
+            match inner_entries
+                .iter()
+                .position(|(name, _, _)| *name == entry_name)
+            {
+                Some(pos) => matched[pos] = true,
+                None if field.has_default() => {}
+                None if is_optional_shape(field.shape()) => {
+                    partial = set_field_default(partial, field)?;
+                }
+                None => return Err(DeserializeError::MissingField { field: entry_name }),
+            }
+        }
+        for (pos, m) in matched.iter().enumerate() {
+            if !*m && !crate::schema::pin::is_splice_entry(&inner_entries[pos].0) {
+                return Err(DeserializeError::UnexpectedEntry {
+                    entry: inner_entries[pos].0.clone(),
+                });
+            }
+        }
         for (name, child_oid, _) in inner_entries {
             if positional {
                 let idx = name
@@ -718,7 +813,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
 /// the marker is stripped before the ordinal classification below, so it
 /// never surfaces as a phantom `"_"` member.
 ///
-/// The caller ([`deser_into`]) has already applied the [`MAX_DEPTH`] guard for
+/// The caller ([`deser_into`]) has already applied the [`MAX_VALUE_DEPTH`] guard for
 /// this level; children recurse through `deser_into` at `depth + 1`, so the
 /// guard bounds heuristic recursion exactly as it bounds typed recursion.
 ///

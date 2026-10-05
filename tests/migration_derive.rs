@@ -243,7 +243,7 @@ fn field_wrapped_is_complete() {
 }
 
 /// A rename and a wrap on the same field both classify: `Rename` precedes
-/// `Wrap`, and the `Wrap` names the *target* field.
+/// `Wrap`, and the `Wrap` names the target field.
 #[test]
 fn rename_and_wrap_on_same_field() {
     let from = def("T", Node::Struct(fields(vec![("old", Node::I32)])));

@@ -131,13 +131,16 @@ fn scalar_hashes_are_frozen() {
 #[test]
 fn leaf_blobs_hold_exactly_the_frozen_bytes() {
     let (oid, store) = normal_form::hash(&NormalForm::U32(4630)).unwrap();
-    assert_eq!(store.get_blob(&oid).unwrap(), 4630u32.to_be_bytes());
+    assert_eq!(
+        store.get_blob(&oid).expect("read object").unwrap(),
+        4630u32.to_be_bytes()
+    );
 
     let (oid, store) = normal_form::hash(&NormalForm::Bool(false)).unwrap();
-    assert_eq!(store.get_blob(&oid).unwrap(), [0x00]);
+    assert_eq!(store.get_blob(&oid).expect("read object").unwrap(), [0x00]);
 
     let (oid, store) = normal_form::hash(&NormalForm::Str("ab".to_owned())).unwrap();
-    assert_eq!(store.get_blob(&oid).unwrap(), b"ab");
+    assert_eq!(store.get_blob(&oid).expect("read object").unwrap(), b"ab");
 }
 
 /// List entries are named by eight-digit ordinal; struct entries by field
@@ -151,6 +154,7 @@ fn composite_entry_names_are_frozen() {
     .unwrap();
     let names: Vec<String> = store
         .get_tree(&oid)
+        .expect("read object")
         .unwrap()
         .iter()
         .map(|entry| entry.filename.to_string())
@@ -164,6 +168,7 @@ fn composite_entry_names_are_frozen() {
     .unwrap();
     let names: Vec<String> = store
         .get_tree(&oid)
+        .expect("read object")
         .unwrap()
         .iter()
         .map(|entry| entry.filename.to_string())
@@ -175,11 +180,32 @@ fn composite_entry_names_are_frozen() {
 /// producing a tree git could not hold.
 #[test]
 fn unusable_map_key_names_are_refused() {
-    for key in [Key::Str(String::new()), Key::Str("a/b".to_owned())] {
+    for key in [
+        Key::Str(String::new()),
+        Key::Str("a/b".to_owned()),
+        Key::Str(".".to_owned()),
+        Key::Str("..".to_owned()),
+        Key::Str("_".to_owned()),
+    ] {
         let value = NormalForm::Map(BTreeMap::from([(key, NormalForm::U8(0))]));
         assert!(matches!(
             normal_form::hash(&value),
             Err(facet_git_tree::NormalFormError::InvalidKey { .. })
+        ));
+    }
+}
+
+/// A `NormalForm::Struct` is public data — its field names are only as good
+/// as whoever constructed the map — so `hash_into` checks them against the
+/// same tree-entry-name rules a map key gets, rather than trusting the
+/// "fixed by the type" argument that only holds for derive-produced types.
+#[test]
+fn unusable_struct_field_names_are_refused() {
+    for name in ["", "a/b", ".", "..", "_"] {
+        let value = NormalForm::Struct(BTreeMap::from([(name.to_owned(), NormalForm::U8(0))]));
+        assert!(matches!(
+            normal_form::hash(&value),
+            Err(facet_git_tree::NormalFormError::InvalidFieldName { field }) if field == name
         ));
     }
 }

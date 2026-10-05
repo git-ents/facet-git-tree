@@ -85,7 +85,7 @@ fn ordinal_names_are_at_least_four_digits() {
 }
 
 /// A collection larger than 9999 remains correct: index 10000 needs a five-digit
-/// name (`10000`), which sorts *before* `9999` lexically, so a correct roundtrip
+/// name (`10000`), which sorts before `9999` lexically, so a correct roundtrip
 /// proves indices are parsed numerically rather than by tree-entry order.
 #[test]
 fn large_vec_roundtrips_with_wide_ordinals() {

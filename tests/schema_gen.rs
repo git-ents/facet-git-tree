@@ -449,7 +449,7 @@ fn transparent_newtype_schema_collapses() -> anyhow::Result<()> {
 /// regardless of what schema described it.
 ///
 /// Exercised through `from_shape_with_limit` with a small bound: a type
-/// actually deeper than `MAX_DEPTH` (32) makes the compiler's recursive
+/// actually deeper than the codec depth bound (32) makes the compiler's recursive
 /// `SHAPE` evaluation prohibitively expensive, and the guard's threading is
 /// identical at every bound.
 #[test]
@@ -462,4 +462,42 @@ fn excessively_nested_shape_schema_is_rejected() {
     );
     // The same shape is comfortably within the real bound.
     assert!(schema_of::<Nested>().is_ok());
+}
+
+/// A schema generated for a root with no valid publication name carries the
+/// deterministic [`Schema::ANONYMOUS_KIND`] sentinel — and publication
+/// refuses it: two structurally different anonymous roots would otherwise
+/// both publish under one kind, silently losing provenance. `with_kind` is
+/// the required, checked way out. The well-formedness check
+/// (`validate`) still accepts the document, so a document carrying the
+/// sentinel remains readable.
+#[test]
+fn anonymous_kind_is_a_placeholder_publication_refuses() -> anyhow::Result<()> {
+    let doc = schema_of::<[i32; 3]>()?;
+    assert_eq!(doc.kind, Schema::ANONYMOUS_KIND);
+    doc.validate().expect("anonymous is well-formed");
+    assert!(matches!(
+        doc.validate_publishable(),
+        Err(SchemaError::AnonymousKind)
+    ));
+
+    let store = facet_git_tree::ObjectStore::default();
+    assert!(
+        doc.write_pinned(&store).is_err(),
+        "an anonymous schema must not be publishable"
+    );
+
+    let named = doc.with_kind("triples")?;
+    named.validate_publishable()?;
+    Ok(())
+}
+
+/// The explicit-bound entry point at the default bound reproduces
+/// `from_shape_with_hints` exactly — same document, same hints.
+#[test]
+fn from_shape_with_limit_at_default_matches_from_shape_with_hints() -> anyhow::Result<()> {
+    let via_limit = Schema::from_shape_with_limit(<common::Person as facet::Facet>::SHAPE, 32)?;
+    let via_hints = Schema::from_shape_with_hints(<common::Person as facet::Facet>::SHAPE)?;
+    assert_eq!(via_limit, via_hints);
+    Ok(())
 }

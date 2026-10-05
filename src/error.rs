@@ -11,15 +11,19 @@ use gix_hash::ObjectId;
 /// A user-supplied key cannot be used as a Git tree entry name.
 ///
 /// Tree entry names double as path segments, so a key may not contain the
-/// path separator `/`; nor may it equal the reserved presence-marker name
-/// (`crate::marker::MARKER_KEY`, `"_"`) written in place of a literal empty
-/// tree for `None`, `Null`, and an empty collection — a real entry named
-/// exactly that would otherwise be indistinguishable, on read, from the
-/// marker. Returned by [`check_key`](crate::check_key) and carried by
-/// [`SerializeError::Key`] when serialization rejects a dynamic (map or
-/// dynamic-object) key.
+/// path separator `/` nor NUL (which terminates a name in the on-disk tree
+/// format, making such an entry unparsable); nor may it equal the reserved
+/// presence-marker name (`crate::marker::MARKER_KEY`, `"_"`) written in place
+/// of a literal empty tree for `None`, `Null`, and an empty collection — a
+/// real entry named exactly that would otherwise be indistinguishable, on
+/// read, from the marker. Returned by [`check_key`](crate::check_key) and
+/// carried by [`SerializeError::Key`] when serialization rejects a dynamic
+/// (map or dynamic-object) key.
 #[derive(Debug, thiserror::Error)]
-#[error("invalid key {key:?}: must not contain '/' and must not equal the reserved marker \"_\"")]
+#[error(
+    "invalid key {key:?}: not a usable git tree entry name (must be non-empty, must not contain \
+     '/' or NUL, must not be \".\" or \"..\", and must not equal the reserved marker \"_\")"
+)]
 pub struct KeyError {
     /// The offending key.
     pub key: String,
@@ -48,6 +52,23 @@ pub enum SerializeError {
     /// tree entry name.
     #[error("map key is not valid UTF-8")]
     NonUtf8MapKey,
+    /// Two map pairs carry the same composite key.
+    ///
+    /// Pair entries are named by their pair sub-tree's own object id, and the
+    /// pair sub-tree names its key, so two pairs sharing a key id would be
+    /// two entries for one key. Refused on write, where it can only mean the
+    /// map's key equality is broken (e.g. NaN float keys, which compare
+    /// unequal while encoding identically to `"nan"`) or two distinct keys
+    /// encode identically (e.g. `0.0` and `-0.0`, collapsed by the canonical
+    /// float spelling); a merged or foreign tree carrying two pairs for one
+    /// key is refused on read by [`DeserializeError::DuplicateKey`] instead.
+    #[error(
+        "two map pairs carry the same key (key object {oid}); the map's key equality is broken"
+    )]
+    DuplicateKey {
+        /// The shared key object id.
+        oid: ObjectId,
+    },
     /// The value contains a type this encoding does not support.
     ///
     /// Holds the type identifier of the unsupported shape.
@@ -63,9 +84,11 @@ pub enum SerializeError {
     /// The generic dynamic-value vtable only surfaces 64-bit reads, so an
     /// integer beyond the 64-bit range can only be observed as a lossy `f64`
     /// approximation. Writing that approximation would silently change the
-    /// value — and therefore its object id — so it is refused instead. The
-    /// `value` cargo feature adds a `facet_value::Value` fast path that
-    /// renders integers exactly at any width.
+    /// value — and therefore its object id — so it is refused instead. A
+    /// `facet_value::Value` is always downcast first (the crate is an
+    /// unconditional dependency), so it renders integers exactly at any
+    /// width; this error remains for dynamic values of other types whose
+    /// vtable cannot render their numbers exactly.
     #[error("dynamic number has no exact textual rendering")]
     UnrepresentableNumber,
     /// A dynamic value's runtime kind is not supported by this encoding.
@@ -109,7 +132,7 @@ pub enum DeserializeError {
     ///
     /// Every leaf blob (a scalar, a byte sequence, or a unit enum variant's
     /// name blob) MUST carry exactly one trailing newline
-    /// (`serialization.design.leaves.encoding`); this is *not* "at most one",
+    /// (`serialization.design.leaves.encoding`); this is not "at most one",
     /// so a leaf blob missing that byte can only be a foreign or corrupt
     /// object, rejected here rather than accepted leniently. The presence
     /// marker (`crate::marker`) is a separate, structural object and is never
@@ -224,6 +247,49 @@ pub enum DeserializeError {
         /// The missing entry name (`"k"` or `"v"`).
         entry: &'static str,
     },
+    /// A composite-key map tree holds two pairs for the same key.
+    ///
+    /// Content-named pair entries merge cleanly — two branches editing the
+    /// same key produce two pair entries rather than a name conflict — so a
+    /// merged tree can carry two pairs for one key, and a foreign tree can
+    /// carry them for any reason. Either pair could be "the" value, so
+    /// accepting both would silently pick one; the read refuses instead.
+    #[error("map holds two pairs for the same key (key object {oid})")]
+    DuplicateKey {
+        /// The shared key object id.
+        oid: ObjectId,
+    },
+    /// A struct tree lacks the entry a non-defaulted field requires.
+    ///
+    /// Fields carrying a `facet` default may be absent — that is the
+    /// documented leniency for defaults — and a field of `Option` type is
+    /// defaulted to `None` for the same reason: absent and unset are
+    /// indistinguishable for an optional value. Any other missing field
+    /// means the tree does not describe this type, reported here with the
+    /// entry name rather than as an opaque reflection error. Schema changes
+    /// beyond that (renamed or removed fields) are the migration
+    /// machinery's job — see `crate::migration`.
+    #[error("struct field {field:?} is missing from the tree")]
+    MissingField {
+        /// The field (or positional-ordinal name) the tree omits.
+        field: String,
+    },
+    /// A tree entry has no counterpart field in the target type.
+    ///
+    /// The other half of the strict field-matching policy
+    /// ([`MissingField`](Self::MissingField)). Without this check, a foreign
+    /// tree sharing even one field name would read "successfully" while its
+    /// remaining entries were silently dropped — indistinguishable from a
+    /// value the tree never described. Old readers therefore do not
+    /// transparently read data written by a schema that added fields; such
+    /// evolution goes through the migration machinery (`crate::migration`),
+    /// which pairs a source schema with rename hints and explicit change
+    /// operations.
+    #[error("tree entry {entry:?} has no counterpart in the target type")]
+    UnexpectedEntry {
+        /// The entry name found in the tree.
+        entry: String,
+    },
     /// The target type is not supported by this encoding.
     ///
     /// Holds the type identifier of the unsupported shape.
@@ -236,25 +302,38 @@ pub enum DeserializeError {
 /// [`hash`](crate::normal_form::hash)).
 ///
 /// The frozen mapping has no shape errors to report —
-/// [`NormalForm`](crate::normal_form::NormalForm) *is* the universe, so an
+/// [`NormalForm`](crate::normal_form::NormalForm) is the universe, so an
 /// out-of-universe value cannot be constructed — leaving only the two
 /// conditions the data itself can produce.
 #[derive(Debug, thiserror::Error)]
 pub enum NormalFormError {
     /// A map key's name form is not usable as a Git tree entry name.
-    #[error(
-        "invalid normal-form map key name {key:?}: must be non-empty and hold neither '/' nor NUL"
-    )]
+    ///
+    /// The rules are the shared tree-entry-name rules
+    /// ([`crate::check_key`]): non-empty, no `/` or NUL, not `.`/`..`, and
+    /// not the general codec's reserved presence-marker name.
+    #[error("invalid normal-form map key name {key:?}: not a usable git tree entry name")]
     InvalidKey {
         /// The offending name form.
         key: String,
     },
-    /// A list holds more elements than an eight-digit ordinal can name.
+    /// A struct's field name is not usable as a Git tree entry name.
+    ///
+    /// A `NormalForm::Struct` is public data, so its entry names are only
+    /// fixed by the type when the type itself is trusted; `hash_into` is the
+    /// boundary that refuses names canonical git would refuse, by the same
+    /// shared rules as [`crate::check_key`].
+    #[error("invalid normal-form struct field name {field:?}: not a usable git tree entry name")]
+    InvalidFieldName {
+        /// The offending field name.
+        field: String,
+    },
+    /// A list holds more elements than eight-digit ordinals can name.
     ///
     /// The ordinal width is part of the frozen mapping, so a longer list is
     /// refused rather than silently widened.
     #[error(
-        "normal-form list holds {len} elements, more than the {max} an eight-digit ordinal names"
+        "normal-form list holds {len} elements, more than the {max} eight-digit ordinals can name"
     )]
     ListTooLong {
         /// The element count.
@@ -339,6 +418,18 @@ pub enum SchemaError {
         /// The first violated ref-name rule.
         reason: &'static str,
     },
+    /// The schema document's embedded kind is the anonymous-root sentinel.
+    ///
+    /// Two structurally different anonymous roots both carry the
+    /// anonymous-root sentinel ([`Schema::ANONYMOUS_KIND`](crate::Schema::ANONYMOUS_KIND)),
+    /// so publishing it would silently lose
+    /// provenance; name the document with
+    /// [`Schema::with_kind`](crate::Schema::with_kind) instead.
+    #[error(
+        "schema kind is the anonymous-root sentinel; name it with `Schema::with_kind` before \
+         publication"
+    )]
+    AnonymousKind,
     /// Schema generation exceeded the maximum supported nesting depth.
     ///
     /// Mirrors [`DeserializeError::MaxDepth`]: data nested deeper than the
@@ -527,7 +618,7 @@ pub enum SchemaReadError {
 /// (`serialize_value_with_schema`, available with the `value` feature).
 ///
 /// The write-side mirror of [`SchemaReadError`]: it validates a dynamic value
-/// against a schema *while* encoding it, so every variant beyond the backend
+/// against a schema while encoding it, so every variant beyond the backend
 /// pass-through names the `path` in the value where the value diverged from
 /// what the schema accepts. The accepted set is exactly the image of
 /// [`deserialize_value_with_schema`](crate::deserialize_value_with_schema),

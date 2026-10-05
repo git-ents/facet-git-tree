@@ -32,7 +32,7 @@ fn reflected_variants<T: for<'a> facet::Facet<'a>>() -> HashSet<String> {
 /// definition.
 ///
 /// The match arms are exhaustive (no wildcard), so adding a `Node` or
-/// `VariantKind` variant fails this file to *compile* until it is handled
+/// `VariantKind` variant fails this file to compile until it is handled
 /// here — the strongest form of "you forgot this" available.
 fn used_variants(schema: &Schema) -> (HashSet<String>, HashSet<String>) {
     let mut nodes = HashSet::new();

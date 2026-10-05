@@ -9,18 +9,18 @@
 //! The normative mapping lives in `docs/specification.adoc` under
 //! `deserialization.schema-driven`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use facet_value::{VArray, VNumber, VObject, Value};
 use gix_object::{Find, Kind};
 
 use crate::de::{
-    DecodeMode, MAX_DEPTH, deserialize_at_depth_mode, extract_enum_entry_mode,
-    find_blob_bytes_mode, find_object, find_tree_entries, map_pair_entries, sort_by_ordinal,
-    validate_option_entries,
+    DecodeMode, deserialize_at_depth_mode, extract_enum_entry_mode, find_blob_bytes_mode,
+    find_object, find_tree_entries, map_pair_entries, sort_by_ordinal, validate_option_entries,
 };
 use crate::error::{DeserializeError, SchemaReadError};
-use crate::schema::{DefaultFieldNode, Node, Schema, VariantKind};
+use crate::limits::MAX_VALUE_DEPTH;
+use crate::schema::{DefaultFieldNode, Node, Schema, VariantKind, is_scalar_schema};
 use crate::{EntryKind, ObjectId};
 
 /// Deserialize the tree at `root` into a full-fidelity [`Value`], guided by
@@ -94,7 +94,7 @@ type Entries = Vec<(String, ObjectId, EntryKind)>;
 /// Read one schema node's value from the object at `oid`.
 ///
 /// `depth` counts every hop — including [`Node::Ref`] resolution — against
-/// the same [`MAX_DEPTH`] limit that bounds typed deserialization, so
+/// the same [`MAX_VALUE_DEPTH`] limit that bounds typed deserialization, so
 /// `Ref`-to-`Ref` chains cannot recurse unboundedly.
 fn read_node<F: Find + ?Sized>(
     oid: &ObjectId,
@@ -104,8 +104,8 @@ fn read_node<F: Find + ?Sized>(
     depth: usize,
     mode: DecodeMode,
 ) -> Result<Value, SchemaReadError> {
-    if depth > MAX_DEPTH {
-        return Err(DeserializeError::MaxDepth(MAX_DEPTH).into());
+    if depth > MAX_VALUE_DEPTH {
+        return Err(DeserializeError::MaxDepth(MAX_VALUE_DEPTH).into());
     }
     match schema {
         Node::Unit => {
@@ -131,12 +131,12 @@ fn read_node<F: Find + ?Sized>(
         Node::I32 => int_value::<i32, F>(oid, store, "I32", mode),
         Node::I64 => int_value::<i64, F>(oid, store, "I64", mode),
         Node::I128 => int_value::<i128, F>(oid, store, "I128", mode),
-        // `isize`/`usize` have no `From` into the 128-bit widths (their size
-        // is platform-defined), but are at most 64 bits on every supported
-        // platform, so the widening cast is lossless.
+        // `isize`/`usize` are spec'd i64/u64-shaped, so a read parses into the
+        // fixed width and widens: a 64-bit-written document reads identically
+        // on a 32-bit target instead of failing a platform-width parse.
         Node::ISize => {
             let text = blob_text(oid, store, mode)?;
-            let v: isize = text.parse().map_err(|_| invalid_scalar("ISize", &text))?;
+            let v: i64 = text.parse().map_err(|_| invalid_scalar("ISize", &text))?;
             Ok(VNumber::from_i128(v as i128).into())
         }
         Node::U8 => uint_value::<u8, F>(oid, store, "U8", mode),
@@ -146,7 +146,7 @@ fn read_node<F: Find + ?Sized>(
         Node::U128 => uint_value::<u128, F>(oid, store, "U128", mode),
         Node::USize => {
             let text = blob_text(oid, store, mode)?;
-            let v: usize = text.parse().map_err(|_| invalid_scalar("USize", &text))?;
+            let v: u64 = text.parse().map_err(|_| invalid_scalar("USize", &text))?;
             Ok(VNumber::from_u128(v as u128).into())
         }
         Node::F32 => {
@@ -200,7 +200,8 @@ fn read_node<F: Find + ?Sized>(
         }
         // The key schema decides the layout, exactly as the static key shape
         // does on write: scalar keys name the entries directly; composite keys
-        // store ordinal-named `{ k, v }` pair sub-trees. The marker tree
+        // store `{ k, v }` pair sub-trees named by their own object id. The
+        // marker tree
         // written for an empty map (either layout) is stripped up front.
         Node::Map { key, value } => {
             let mut entries = find_tree_entries(oid, store)?;
@@ -216,9 +217,13 @@ fn read_node<F: Find + ?Sized>(
                 return Ok(object.into());
             }
             let mut array = VArray::new();
+            let mut key_oids = BTreeSet::new();
             for (_, pair_oid, _) in entries {
                 let pair = find_tree_entries(&pair_oid, store)?;
                 let (k_oid, v_oid) = map_pair_entries(&pair)?;
+                if !key_oids.insert(k_oid) {
+                    return Err(DeserializeError::DuplicateKey { oid: k_oid }.into());
+                }
                 let mut object = VObject::new();
                 object.insert("k", read_node(&k_oid, key, doc, store, depth + 1, mode)?);
                 object.insert("v", read_node(&v_oid, value, doc, store, depth + 1, mode)?);
@@ -290,7 +295,7 @@ fn read_node<F: Find + ?Sized>(
         // already `depth` levels into the schema-driven walk, so the typed
         // read underneath it must keep spending from that same budget rather
         // than resetting it — otherwise a `Dynamic` node nested near
-        // `MAX_DEPTH` could recurse further than an ordinary typed read of
+        // `MAX_VALUE_DEPTH` could recurse further than an ordinary typed read of
         // the same effective depth ever could.
         Node::Dynamic => Ok(deserialize_at_depth_mode::<Value>(oid, store, depth, mode)?),
         Node::Ref(name) => {
@@ -305,7 +310,7 @@ fn read_node<F: Find + ?Sized>(
 /// Read a name-keyed tree as a [`VObject`], requiring the tree's entries and
 /// the schema's fields to correspond exactly — except a field whose
 /// [`DefaultFieldNode::has_default`] is set, whose entry may be absent: the result
-/// simply omits it, since a schema-only read has no default *value* to
+/// simply omits it, since a schema-only read has no default value to
 /// invent, only the marker that one exists elsewhere.
 ///
 /// Strictness (for every other field) is what makes this function usable as
@@ -366,31 +371,6 @@ fn read_tuple<F: Find + ?Sized>(
         array.push(read_node(child_oid, elem, doc, store, depth + 1, mode)?);
     }
     Ok(array)
-}
-
-/// Whether `schema` is a scalar node, deciding the map layout exactly as
-/// `Def::Scalar` does on the write side.
-fn is_scalar_schema(schema: &Node) -> bool {
-    matches!(
-        schema,
-        Node::Bool
-            | Node::Char
-            | Node::String
-            | Node::I8
-            | Node::I16
-            | Node::I32
-            | Node::I64
-            | Node::I128
-            | Node::ISize
-            | Node::U8
-            | Node::U16
-            | Node::U32
-            | Node::U64
-            | Node::U128
-            | Node::USize
-            | Node::F32
-            | Node::F64
-    )
 }
 
 /// Verify that `oid` is an empty tree (a `Unit` value or unit variant

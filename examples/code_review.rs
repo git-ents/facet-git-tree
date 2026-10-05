@@ -30,7 +30,7 @@ struct Review {
 /// Print the object graph rooted at `oid`: trees recurse, blobs show their text.
 fn dump(oid: &ObjectId, store: &ObjectStore, depth: usize) {
     let pad = "  ".repeat(depth);
-    match store.get(oid) {
+    match store.get(oid).expect("read object") {
         Some(GitObject::Tree(tree)) => {
             for entry in tree.entries {
                 println!("{pad}{} ({:?}):", entry.filename, entry.mode.kind());

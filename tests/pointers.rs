@@ -98,7 +98,10 @@ fn arc_byte_slice_is_a_single_blob() {
     assert_eq!(kind, EntryKind::Blob);
     let mut expected = bytes.to_vec();
     expected.push(b'\n');
-    assert_eq!(store.get_blob(&oid).expect("blob"), expected);
+    assert_eq!(
+        store.get_blob(&oid).expect("read object").expect("blob"),
+        expected
+    );
 }
 
 /// A non-`u8` slice pointee (`Arc<[u32]>`) is a tree, and roundtrips with order
@@ -108,7 +111,7 @@ fn arc_u32_slice_roundtrip() {
     let values: Arc<[u32]> = Arc::from([10_u32, 20, 30].as_slice());
     let (root, store) = serialize(&values).expect("serialize");
     assert!(
-        store.get_tree(&root).is_some(),
+        store.get_tree(&root).expect("read object").is_some(),
         "a non-u8 slice must be a tree, not a blob"
     );
     assert_eq!(roundtrip(values.clone()), values);

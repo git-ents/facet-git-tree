@@ -10,10 +10,12 @@
 //!   DeserializeError::DuplicateOrdinal — two sequence entries name the same numeric index
 //!   DeserializeError::MaxDepth         — a pathologically deep tree is rejected, not overflowed
 //!   DeserializeError::MislabeledOption — an Option tree's single entry is not named "some"
-//!   DeserializeError::MalformedOption  — a literal empty tree is no longer a valid `None`
+//!   DeserializeError::MalformedOption  — a literal empty tree is not a valid `None`
 //!   DeserializeError::UnitVariantIsTree    — a unit variant tagged with a tree, not a blob
 //!   DeserializeError::VariantPayloadIsBlob — a non-unit variant tagged with a blob, not a tree
 //!   DeserializeError::MissingLeafNewline   — a leaf blob is missing its mandatory trailing newline
+//!   DeserializeError::MissingField     — a struct tree omits a non-defaulted field
+//!   DeserializeError::UnexpectedEntry  — a tree entry has no counterpart field
 
 use facet::Facet;
 use facet_git_tree::{
@@ -154,25 +156,25 @@ fn mislabeled_option_entry_is_rejected() {
     );
 }
 
-/// Per issue 8d109650, `None` is now written as the presence-marker tree, not
-/// a literal empty tree; a literal empty tree is therefore foreign input and
-/// rejected as `MalformedOption { found: 0 }` rather than accepted as `None`.
+/// `None` is written as the presence-marker tree; a literal empty tree is
+/// foreign input, rejected as `MalformedOption { found: 0 }` rather than
+/// accepted as `None`.
 #[test]
-fn literal_empty_tree_is_no_longer_a_valid_option() {
+fn literal_empty_tree_is_not_a_valid_option() {
     let store = ObjectStore::default();
     let tree_id = write_tree(&store, &[]);
 
     let result: Result<Option<i32>, _> = deserialize(&tree_id, &store);
     assert!(
         matches!(result, Err(DeserializeError::MalformedOption { found: 0 })),
-        "a literal empty tree must no longer decode as None, got {result:?}"
+        "a literal empty tree must not decode as None, got {result:?}"
     );
 
     let legacy: Option<i32> = deserialize_legacy_leaves(&tree_id, &store).unwrap();
     assert_eq!(legacy, None);
 }
 
-/// A foreign tree tagging a *unit* variant (`Shape::Unit`) with a tree
+/// A foreign tree tagging a unit variant (`Shape::Unit`) with a tree
 /// instead of the required bare name-blob is rejected as `UnitVariantIsTree`.
 #[test]
 fn unit_variant_tagged_with_tree_is_rejected() {
@@ -187,7 +189,7 @@ fn unit_variant_tagged_with_tree_is_rejected() {
     );
 }
 
-/// A foreign object naming a *non-unit* variant (`Shape::Circle`) that is
+/// A foreign object naming a non-unit variant (`Shape::Circle`) that is
 /// itself a bare blob, rather than the required payload tree, is rejected as
 /// `VariantPayloadIsBlob`.
 #[test]
@@ -250,5 +252,131 @@ fn excessively_deep_tree_is_rejected() {
     assert!(
         matches!(result, Err(DeserializeError::MaxDepth(_))),
         "deeply nested tree must be MaxDepth, got {result:?}"
+    );
+}
+
+// --- struct / enum field correspondence (MissingField, UnexpectedEntry) ---
+
+/// A struct tree missing a non-defaulted field is reported with the field's
+/// name, as [`DeserializeError::MissingField`].
+#[test]
+fn missing_struct_field_is_reported_by_name() {
+    let store = ObjectStore::default();
+    let x_blob = store.write_buf(Kind::Blob, b"1.0\n").expect("write blob");
+    let tree = write_tree(&store, &[("x", EntryKind::Blob, x_blob)]);
+
+    let result: Result<Point, _> = deserialize(&tree, &store);
+    assert!(
+        matches!(result, Err(DeserializeError::MissingField { field }) if field == "y"),
+        "missing field must be MissingField naming \"y\""
+    );
+}
+
+/// A struct tree carrying an entry the target type does not define is
+/// rejected: without this, a foreign tree sharing one field name would read
+/// "successfully" with the extra entry silently dropped.
+#[test]
+fn unexpected_struct_entry_is_rejected() {
+    let store = ObjectStore::default();
+    let x_blob = store.write_buf(Kind::Blob, b"1.0\n").expect("write blob");
+    let y_blob = store.write_buf(Kind::Blob, b"2.0\n").expect("write blob");
+    let tree = write_tree(
+        &store,
+        &[
+            ("x", EntryKind::Blob, x_blob),
+            ("y", EntryKind::Blob, y_blob),
+            ("z", EntryKind::Blob, x_blob),
+        ],
+    );
+
+    let result: Result<Point, _> = deserialize(&tree, &store);
+    assert!(
+        matches!(result, Err(DeserializeError::UnexpectedEntry { entry }) if entry == "z"),
+        "extra entry must be UnexpectedEntry naming \"z\""
+    );
+}
+
+/// A field of `Option` type is defaulted to `None` when its tree entry is
+/// absent — the one missing-field case where "absent" has an unambiguous
+/// reading — so data written by an older type without the field reads
+/// cleanly into a type that later gained the field.
+#[test]
+fn missing_option_field_reads_as_none() {
+    #[derive(Debug, Facet, PartialEq)]
+    struct Newer {
+        a: i32,
+        /// An arbitrary optional field.
+        b: Option<String>,
+    }
+
+    let store = ObjectStore::default();
+    let a = store.write_buf(Kind::Blob, b"7\n").expect("write blob");
+    let tree = write_tree(&store, &[("a", EntryKind::Blob, a)]);
+
+    let got: Newer = deserialize(&tree, &store).expect("Option field defaults to None");
+    assert_eq!(got, Newer { a: 7, b: None });
+}
+
+/// An enum tuple variant whose ordinal entries have a gap (`0000`, `0002`)
+/// is reported as a missing field naming the gap, not an opaque build error.
+#[test]
+fn tuple_variant_ordinal_gap_is_reported() {
+    #[derive(Debug, Facet, PartialEq)]
+    #[repr(u8)]
+    enum Tagged {
+        Unit,
+        Pair(i32, String),
+        Named {
+            /// An arbitrary field.
+            a: i32,
+        },
+    }
+
+    let store = ObjectStore::default();
+    let one = store.write_buf(Kind::Blob, b"1\n").expect("write blob");
+    let text = store.write_buf(Kind::Blob, b"two\n").expect("write blob");
+    let payload = write_tree(
+        &store,
+        &[
+            ("0000", EntryKind::Blob, one),
+            ("0002", EntryKind::Blob, text),
+        ],
+    );
+    let tree = write_tree(&store, &[("Pair", EntryKind::Tree, payload)]);
+
+    let result: Result<Tagged, _> = deserialize(&tree, &store);
+    assert!(
+        matches!(result, Err(DeserializeError::MissingField { field }) if field == "0001"),
+        "the ordinal gap must be MissingField naming \"0001\""
+    );
+}
+
+/// A struct variant carrying an entry no field defines is rejected with the
+/// entry's name, exactly as a struct's extra entries are.
+#[test]
+fn struct_variant_unexpected_entry_is_rejected() {
+    #[derive(Debug, Facet, PartialEq)]
+    #[repr(u8)]
+    enum Tagged {
+        Unit,
+        Named {
+            /// An arbitrary field.
+            a: i32,
+        },
+    }
+
+    let store = ObjectStore::default();
+    let one = store.write_buf(Kind::Blob, b"1\n").expect("write blob");
+    let text = store.write_buf(Kind::Blob, b"two\n").expect("write blob");
+    let payload = write_tree(
+        &store,
+        &[("a", EntryKind::Blob, one), ("b", EntryKind::Blob, text)],
+    );
+    let tree = write_tree(&store, &[("Named", EntryKind::Tree, payload)]);
+
+    let result: Result<Tagged, _> = deserialize(&tree, &store);
+    assert!(
+        matches!(result, Err(DeserializeError::UnexpectedEntry { entry }) if entry == "b"),
+        "extra variant entry must be UnexpectedEntry naming \"b\""
     );
 }
