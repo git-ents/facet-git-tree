@@ -30,7 +30,7 @@ fn reflect(e: impl std::fmt::Display) -> DeserializeError {
 /// `LegacyLeaves` is an explicit compatibility mode for reading pre-newline
 /// objects; it never changes what the serializer writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DecodeMode {
+pub(crate) enum DecodeMode {
     /// Read only the current leaf-blob format.
     Strict,
     /// Also accept leaf blobs that predate the trailing newline.

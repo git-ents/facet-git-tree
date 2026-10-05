@@ -342,7 +342,7 @@ pub fn check_universe(node: &Node, defs: &BTreeMap<String, Node>) -> Result<(), 
 }
 
 /// [`check_universe`] with `root` naming the subtree in reported paths.
-pub fn check_universe_at(
+pub(crate) fn check_universe_at(
     node: &Node,
     defs: &BTreeMap<String, Node>,
     root: &str,

@@ -44,25 +44,6 @@ pub fn serialize<T: for<'a> facet::Facet<'a>>(
     Ok((root, store))
 }
 
-/// Serialize an already-constructed [`Peek`] into the given `gix` object `store`.
-///
-/// Returns the root tree [`ObjectId`].
-pub fn serialize_peek_into<W>(peek: Peek<'_, '_>, store: &W) -> Result<ObjectId, SerializeError>
-where
-    W: Write + ?Sized,
-{
-    serialize_root(peek, store)
-}
-
-/// Serialize an already-constructed [`Peek`] into a fresh [`ObjectStore`].
-///
-/// Returns the root [`ObjectId`] and the store containing all reachable objects.
-pub fn serialize_peek(peek: Peek<'_, '_>) -> Result<(ObjectId, ObjectStore), SerializeError> {
-    let store = ObjectStore::default();
-    let root = serialize_root(peek, &store)?;
-    Ok((root, store))
-}
-
 fn serialize_root<W: Write + ?Sized>(
     peek: Peek<'_, '_>,
     store: &W,
