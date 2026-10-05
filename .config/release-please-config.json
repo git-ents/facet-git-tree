@@ -17,7 +17,7 @@
     { "type": "refactor", "section": "Code Refactoring" },
     { "type": "test", "section": "Tests" }
   ],
-  "packages": {},
+  "packages": { ".": {} },
   "plugins": [{ "type": "sentence-case" }],
   "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json"
 }

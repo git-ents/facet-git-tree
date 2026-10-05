@@ -3,6 +3,9 @@ name = "facet-git-tree"
 version = "0.1.0"
 edition = "2024"
 readme = "README.adoc"
+description = "Format crate for facet: serialize and deserialize facet values as Git tree objects"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/git-ents/facet-git-tree"
 
 [features]
 # The pin towers' codec fixture (`schema::codec`) needs a `Def::DynamicValue`
