@@ -71,9 +71,9 @@ fn numbers_are_decimal_blobs() -> anyhow::Result<()> {
 /// Null is the presence-marker tree (`crate::marker`): a single blob entry
 /// named `"_"`, not a literal empty tree, which would be invisible to
 /// `git ls-tree -r`/`diff` — exactly the invisibility the marker exists to
-/// avoid. The empty blob is now the marker's alone: every leaf blob carries
-/// a mandatory trailing newline, so `""` and empty bytes can no longer
-/// collide with it.
+/// avoid. The empty blob is the marker's alone: every leaf blob carries
+/// a mandatory trailing newline, so `""` and empty bytes do not collide
+/// with it.
 #[test]
 fn null_is_marker_tree() -> anyhow::Result<()> {
     let (root, store) = serialize(&Value::NULL)?;
@@ -237,7 +237,7 @@ fn avogadro_float_matches_typed_f64() -> anyhow::Result<()> {
 
 // --- datetime ---
 
-/// A negative (BCE) year renders as `-` followed by its *magnitude*
+/// A negative (BCE) year renders as `-` followed by its magnitude
 /// zero-padded to four digits. Zero-padding the whole signed value instead
 /// (`format!("{year:04}", ...)` with `year: i32`) would count the sign
 /// character toward the width and under-pad the magnitude by one digit.

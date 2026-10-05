@@ -43,7 +43,7 @@ fn one_field(name: &str, schema: Node) -> BTreeMap<String, StructField> {
     )])
 }
 
-/// Every value the schema-driven *read* can produce must re-encode to the exact
+/// Every value the schema-driven read can produce must re-encode to the exact
 /// object it was read from — the round-trip property at the heart of the
 /// accepted-set contract.
 fn assert_reencodes<T>(value: T)
@@ -396,16 +396,13 @@ fn unknown_ref_is_rejected() {
     );
 }
 
-// --- regression: unit-variant / empty-collection visibility (issue 8d109650) ---
+// --- unit-variant / empty-collection visibility ---
 
-/// The `git-store` `task.json` repro: a struct with a `priority: Priority`
-/// field, `Priority` a plain enum of unit variants (`Low`, `Medium`, `High`).
-/// Storing a task and then flipping `priority` from `Low` to `High` must
-/// change the `priority` entry's own *blob content* — the property that
-/// makes `git diff`/`git log --stat` non-empty and `priority` appear in
-/// `git ls-tree -r`, none of which held before this fix (the variant name
-/// lived only in a tree-entry name, and both `Low` and `High` resolved to the
-/// same empty-tree payload).
+/// A struct with a `priority: Priority` field, `Priority` a plain enum of
+/// unit variants (`Low`, `Medium`, `High`). Storing a task and then flipping
+/// `priority` from `Low` to `High` must change the `priority` entry's own
+/// *blob content* — the property that makes `git diff`/`git log --stat`
+/// non-empty and `priority` appear in `git ls-tree -r`.
 #[test]
 fn priority_field_change_is_a_visible_blob_diff() {
     let priority_variants = BTreeMap::from([
@@ -513,14 +510,11 @@ fn ref_cycle_hits_the_depth_bound() {
 /// A zero-element `Node::Tuple` MUST encode as the literal empty tree, not
 /// the presence marker.
 ///
-/// A tuple's arity is fixed by the schema, so an empty one encodes identically
-/// for every value and there is nothing for a diff to show — the same reason a
-/// unit struct goes unmarked. Marking it broke both directions at once: the
-/// written tree no longer matched the typed encoder's oid (violating the
-/// byte-identity contract this module exists to enforce), and it could not be
-/// read back at all, because the tuple read length-checks the entries it finds
-/// before any marker could be stripped. That made `put` succeed and `get` fail
-/// permanently on the same data.
+/// A tuple's arity is fixed by the schema, so an empty one encodes
+/// identically for every value and there is nothing for a diff to show —
+/// the same reason a unit struct goes unmarked. The tuple read
+/// length-checks its entries, so a marker in their place could not be read
+/// back at all.
 #[test]
 fn an_empty_tuple_is_not_markered_and_reads_back() {
     let doc = Schema {

@@ -65,19 +65,29 @@ impl ObjectStore {
     }
 
     /// Return the entries of the tree stored under `id`, if it is a tree.
+    ///
+    /// Missing and wrong-kind are distinguished, as in [`get`](Self::get): an
+    /// absent id is `Ok(None)`, while an object that exists but is not a tree
+    /// is [`DeserializeError::NotATree`].
     pub fn get_tree(&self, id: &ObjectId) -> Result<Option<Vec<TreeEntry>>, DeserializeError> {
-        Ok(match self.get(id)? {
-            Some(GitObject::Tree(tree)) => Some(tree.entries),
-            _ => None,
-        })
+        match self.get(id)? {
+            Some(GitObject::Tree(tree)) => Ok(Some(tree.entries)),
+            Some(_) => Err(DeserializeError::NotATree(*id)),
+            None => Ok(None),
+        }
     }
 
     /// Return the raw bytes of the blob stored under `id`, if it is a blob.
+    ///
+    /// Missing and wrong-kind are distinguished, as in [`get`](Self::get): an
+    /// absent id is `Ok(None)`, while an object that exists but is not a blob
+    /// is [`DeserializeError::NotABlob`].
     pub fn get_blob(&self, id: &ObjectId) -> Result<Option<Vec<u8>>, DeserializeError> {
-        Ok(match self.get(id)? {
-            Some(GitObject::Blob(blob)) => Some(blob.data),
-            _ => None,
-        })
+        match self.get(id)? {
+            Some(GitObject::Blob(blob)) => Ok(Some(blob.data)),
+            Some(_) => Err(DeserializeError::NotABlob(*id)),
+            None => Ok(None),
+        }
     }
 }
 

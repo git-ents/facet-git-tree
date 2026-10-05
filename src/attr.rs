@@ -49,7 +49,7 @@ pub(crate) fn renamed_from(field: &'static facet::Field) -> Option<&'static str>
 
 /// Whether `attributes` carries `#[facet(facet_git_tree::identity_key)]`.
 ///
-/// One function covers both altitudes: a `facet_core::FieldAttribute` *is* a
+/// One function covers both altitudes: a `facet_core::FieldAttribute` is a
 /// `facet::Attr`, so a field's attributes and a container's are the same type.
 pub(crate) fn is_identity_key(attributes: &'static [facet::Attr]) -> bool {
     attributes

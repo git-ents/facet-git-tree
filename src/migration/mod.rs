@@ -3,7 +3,7 @@
 //! A migration is DATA, never Rust code: it is an ordinary [`Facet`] value
 //! storable through this crate's own tree encoding, exactly as
 //! [`Schema`](crate::Schema) is self-hosted. The vocabulary is
-//! deliberately tiny — every operator here is semantics every consumer, in
+//! tiny — every operator here is semantics every consumer, in
 //! every language, must implement forever. Migration is read-time upcast,
 //! never rewrite: nothing here ever produces a new stored value tree from an
 //! old one.
@@ -69,7 +69,7 @@ pub enum Change {
     /// This is the identity on a dynamic value: `Node::Optional` reads as
     /// `null` or the inner value directly (see `schema/read.rs`), so
     /// `Some(x)` and `x` are the same `Value`. The operator exists anyway
-    /// because it records the *encoding* change — a `some/` tree entry
+    /// because it records the encoding change — a `some/` tree entry
     /// appears — for consumers working at the tree altitude, and because
     /// without it the single most common schema evolution after
     /// add/remove/rename would be unclassifiable by derivation.
@@ -102,7 +102,7 @@ pub enum Constant {
 /// Author-supplied facts a schema diff cannot contain: which {removed, added}
 /// field pair is a rename, and what an added field defaults to.
 ///
-/// Input to derivation, not a stored artifact — deliberately does not derive
+/// Input to derivation, not a stored artifact, so it does not derive
 /// [`Facet`].
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Hints {

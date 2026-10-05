@@ -5,9 +5,9 @@
 //! Identity- and key-bearing subtrees (an anchor id, an action key) are hashed
 //! through this mapping rather than through the general codec, so that codec
 //! stays free to evolve: a grammar or encoder change must never move an
-//! identity. Only *this* mapping is frozen. It lives in `facet-git-tree`
+//! identity. Only this mapping is frozen. It lives in `facet-git-tree`
 //! because that crate owns the pure codec, and the normal form is a second,
-//! deliberately smaller codec over the same [`Node`] universe — not a storage
+//! smaller codec over the same [`Node`] universe — not a storage
 //! or authority concern.
 //!
 //! # The universe
@@ -17,7 +17,7 @@
 //! else schema-rich, so an out-of-universe value is unrepresentable rather
 //! than merely rejected. [`Key`] is closed the same way, over scalars only.
 //!
-//! Platform-width integers (`isize`/`usize`) are deliberately absent: their
+//! Platform-width integers (`isize`/`usize`) are absent: their
 //! width is a property of the machine that captured the value, and a frozen
 //! mapping cannot depend on that. Floats are present, encoded verbatim from
 //! their IEEE-754 bits with no canonicalization, so `-0.0` and `0.0` — and two
@@ -64,7 +64,7 @@
 //! codec's keys (not `.`/`..`, not the reserved marker name) — see
 //! [`crate::check_key`]. [`NormalFormError::InvalidKey`] reports one that is
 //! not. Two
-//! keys of *different* variants can share a name (`Key::Str("true")` and
+//! keys of different variants can share a name (`Key::Str("true")` and
 //! `Key::Bool(true)`), which is unambiguous in practice because a map's key
 //! type is fixed by its schema. The mapping is untagged for the same reason:
 //! the hash identifies a value under a known shape, exactly as a git tree

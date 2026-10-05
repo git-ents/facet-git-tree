@@ -11,9 +11,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use facet::Facet;
-use facet_git_tree::{EntryKind, deserialize, serialize};
+use facet_git_tree::{
+    DeserializeError, EntryKind, EntryMode, ObjectStore, SerializeError, TreeEntry, deserialize,
+    serialize,
+};
+use gix_object::{Kind, Tree, Write};
 use proptest::prelude::*;
-
 mod common;
 use common::{WithArray, WithMap, WithVec, get_tree_entry_mode, tree_entries};
 
@@ -36,6 +39,34 @@ struct Coord {
 #[derive(Facet, PartialEq, Debug)]
 struct WithCompositeKeyMap {
     table: HashMap<Coord, String>,
+}
+
+/// A float-backed composite key, for the duplicate-key suites: two `NaN`s
+/// compare unequal (so a `HashMap` keeps both) while both encode to the
+/// same canonical `"nan"` blob.
+#[derive(Facet, Clone, Debug, PartialEq)]
+struct FloatKey {
+    x: f64,
+}
+
+impl Eq for FloatKey {}
+
+impl std::hash::Hash for FloatKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Any NaN hashes alike (all encode to the same blob) while comparing
+        // unequal, so a HashMap keeps two of them — the broken-key-equality
+        // case the duplicate-key check exists to catch.
+        if self.x.is_nan() {
+            0u64.hash(state);
+        } else {
+            self.x.to_bits().hash(state);
+        }
+    }
+}
+
+#[derive(Facet)]
+struct WithFloatKeyMap {
+    table: HashMap<FloatKey, String>,
 }
 
 // --- Vec ---
@@ -215,7 +246,7 @@ fn map_insertion_order_is_irrelevant() {
 }
 
 /// A map keyed by a smart pointer to a scalar (`Arc<str>`) is name-keyed by
-/// the textual form of the *collapsed* key shape (`str`'s own textual form),
+/// the textual form of the collapsed key shape (`str`'s own textual form),
 /// not treated as composite merely because the key's own static shape is
 /// `Def::Pointer`. This is the encoder-side half of the map-key transparency
 /// collapse: `schema_of::<HashMap<Arc<str>, u32>>()` classifies the same key
@@ -451,4 +482,67 @@ proptest! {
             prop_assert!(pair_entries.iter().any(|entry| entry.filename == "v"));
         }
     }
+}
+
+// --- duplicate composite keys ---
+
+/// Two composite keys that encode identically (here two `NaN`s, both rendered
+/// as the canonical `"nan"` blob) are refused on write rather than emitted as
+/// two pairs for one key — the read side could only silently pick one.
+#[test]
+fn duplicate_composite_keys_are_refused_on_write() {
+    let mut table = HashMap::new();
+    table.insert(FloatKey { x: f64::NAN }, "a".to_string());
+    table.insert(FloatKey { x: f64::NAN }, "b".to_string());
+    assert_eq!(table.len(), 2, "NaN keys are distinct to the map");
+
+    let err = serialize(&WithFloatKeyMap { table }).expect_err("duplicate key must be refused");
+    assert!(
+        matches!(err, SerializeError::DuplicateKey { .. }),
+        "expected DuplicateKey, got {err:?}"
+    );
+}
+
+/// A merged or foreign tree can carry two pair entries for one key —
+/// content naming splices both sides' pairs in without a name conflict —
+/// and the read refuses it rather than silently returning one of the values.
+#[test]
+fn duplicate_composite_keys_are_refused_on_read() {
+    let store = ObjectStore::default();
+    let leaf = |text: &[u8]| store.write_buf(Kind::Blob, text).expect("write blob");
+    let write_tree = |mut entries: Vec<TreeEntry>| {
+        entries.sort();
+        store.write(&Tree { entries }).expect("write tree")
+    };
+    let entry = |name: &str, kind: EntryKind, oid| TreeEntry {
+        mode: EntryMode::from(kind),
+        filename: name.into(),
+        oid,
+    };
+
+    // The key object: the encoding of Coord { x: 1, y: 1 }.
+    let key = write_tree(vec![
+        entry("x", EntryKind::Blob, leaf(b"1\n")),
+        entry("y", EntryKind::Blob, leaf(b"1\n")),
+    ]);
+    let pair = |v| {
+        write_tree(vec![
+            entry("k", EntryKind::Tree, key),
+            entry("v", EntryKind::Blob, v),
+        ])
+    };
+    let p1 = pair(leaf(b"a\n"));
+    let p2 = pair(leaf(b"b\n"));
+    let map = write_tree(vec![
+        entry(&p1.to_string(), EntryKind::Tree, p1),
+        entry(&p2.to_string(), EntryKind::Tree, p2),
+    ]);
+    let root = write_tree(vec![entry("table", EntryKind::Tree, map)]);
+
+    let err = deserialize::<WithCompositeKeyMap>(&root, &store)
+        .expect_err("duplicate keys must be refused");
+    assert!(
+        matches!(err, DeserializeError::DuplicateKey { .. }),
+        "expected DuplicateKey, got {err:?}"
+    );
 }

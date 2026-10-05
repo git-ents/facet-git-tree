@@ -101,9 +101,8 @@ fn unit_variant_field_is_a_bare_name_blob() {
 }
 
 /// Flipping a unit-variant field between two variants changes that field's
-/// blob content — the regression this crate exists to prevent: previously
-/// the variant name lived only in a tree-entry name, so the diff between two
-/// unit-variant values was silently empty.
+/// blob content, not merely its tree-entry name — the property that keeps
+/// `git diff` non-empty.
 #[test]
 fn unit_variant_field_change_changes_the_blob() {
     let (low_root, low_store) = serialize(&WithPriority {

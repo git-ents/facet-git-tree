@@ -459,7 +459,8 @@ fn excessively_nested_shape_schema_is_rejected() {
     assert!(
         matches!(err, SchemaError::MaxDepth(3)),
         "expected MaxDepth(3), got {err:?}"
-    ); // The same shape is comfortably within the real bound.
+    );
+    // The same shape is comfortably within the real bound.
     assert!(schema_of::<Nested>().is_ok());
 }
 
@@ -467,12 +468,18 @@ fn excessively_nested_shape_schema_is_rejected() {
 /// deterministic [`Schema::ANONYMOUS_KIND`] sentinel — and publication
 /// refuses it: two structurally different anonymous roots would otherwise
 /// both publish under one kind, silently losing provenance. `with_kind` is
-/// the required, checked way out.
+/// the required, checked way out. The well-formedness check
+/// (`validate`) still accepts the document, so a document carrying the
+/// sentinel remains readable.
 #[test]
 fn anonymous_kind_is_a_placeholder_publication_refuses() -> anyhow::Result<()> {
     let doc = schema_of::<[i32; 3]>()?;
     assert_eq!(doc.kind, Schema::ANONYMOUS_KIND);
-    assert!(matches!(doc.validate(), Err(SchemaError::AnonymousKind)));
+    doc.validate().expect("anonymous is well-formed");
+    assert!(matches!(
+        doc.validate_publishable(),
+        Err(SchemaError::AnonymousKind)
+    ));
 
     let store = facet_git_tree::ObjectStore::default();
     assert!(
@@ -481,13 +488,12 @@ fn anonymous_kind_is_a_placeholder_publication_refuses() -> anyhow::Result<()> {
     );
 
     let named = doc.with_kind("triples")?;
-    named.validate()?;
+    named.validate_publishable()?;
     Ok(())
 }
 
 /// The explicit-bound entry point at the default bound reproduces
-/// `from_shape_with_hints` exactly — same document, same hints — so the
-/// bound is a genuine parameter, not a test-only affordance.
+/// `from_shape_with_hints` exactly — same document, same hints.
 #[test]
 fn from_shape_with_limit_at_default_matches_from_shape_with_hints() -> anyhow::Result<()> {
     let via_limit = Schema::from_shape_with_limit(<common::Person as facet::Facet>::SHAPE, 32)?;

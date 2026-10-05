@@ -7,6 +7,7 @@ use facet::{Def, Partial};
 use facet_value::Value;
 use gix_hash::Kind as HashKind;
 use gix_object::{Data, Find, Kind};
+use std::collections::BTreeSet;
 
 pub(crate) use crate::classify::collapse_shape;
 use crate::classify::{ShapeClass, classify, is_byte_seq};
@@ -95,8 +96,8 @@ pub fn deserialize<T: for<'a> facet::Facet<'a>>(
 
 /// Decode a value while accepting pre-newline leaf blobs.
 ///
-/// This is deliberately separate from [`deserialize`]: callers must opt into
-/// compatibility with the historical object spelling explicitly.
+/// Separate from [`deserialize`]: callers must opt into compatibility with
+/// the historical object spelling explicitly.
 pub fn deserialize_legacy_leaves<T: for<'a> facet::Facet<'a>>(
     root: &ObjectId,
     store: &(impl Find + ?Sized),
@@ -254,45 +255,22 @@ pub(crate) fn strip_leaf_newline(
 pub(crate) fn sort_by_ordinal(
     entries: &mut [(String, ObjectId, EntryKind)],
 ) -> Result<(), DeserializeError> {
-    // Parse each name exactly once into an `OrdinalEntry`; the ordinal is then
-    // a real field, so the sort key and the duplicate check need no re-parse
-    // whose correctness would rest on a separate validation pass.
-    let mut parsed: Vec<OrdinalEntry> = entries
-        .iter()
-        .map(|(name, oid, kind)| {
-            let ordinal = name
-                .parse::<usize>()
-                .map_err(|_| DeserializeError::InvalidOrdinal(name.clone()))?;
-            Ok(OrdinalEntry {
-                ordinal,
-                name: name.clone(),
-                oid: *oid,
-                kind: *kind,
-            })
-        })
-        .collect::<Result<_, _>>()?;
-    parsed.sort_unstable_by_key(|entry| entry.ordinal);
-    // Duplicates are now adjacent, so a single pass over sorted windows finds
-    // any pair of entries claiming the same index.
-    for pair in parsed.windows(2) {
-        if pair[0].ordinal == pair[1].ordinal {
-            return Err(DeserializeError::DuplicateOrdinal(pair[0].ordinal));
+    // Validate up front so the sort key and duplicate check below can use
+    // `expect` instead of re-reporting parse errors.
+    for (name, _, _) in entries.iter() {
+        name.parse::<usize>()
+            .map_err(|_| DeserializeError::InvalidOrdinal(name.clone()))?;
+    }
+    entries
+        .sort_by_cached_key(|(name, _, _)| name.parse::<usize>().expect("ordinal validated above"));
+    for pair in entries.windows(2) {
+        let a = pair[0].0.parse::<usize>().expect("ordinal validated above");
+        let b = pair[1].0.parse::<usize>().expect("ordinal validated above");
+        if a == b {
+            return Err(DeserializeError::DuplicateOrdinal(a));
         }
     }
-    for (entry, slot) in parsed.into_iter().zip(entries.iter_mut()) {
-        *slot = (entry.name, entry.oid, entry.kind);
-    }
     Ok(())
-}
-
-/// One sequence entry with its name parsed to an ordinal: the invariant that
-/// every entry's name is a valid decimal index is structural, so nothing
-/// downstream re-parses or re-validates it.
-struct OrdinalEntry {
-    ordinal: usize,
-    name: String,
-    oid: ObjectId,
-    kind: EntryKind,
 }
 
 /// The `k`/`v` object ids of a composite-key map pair sub-tree.
@@ -390,7 +368,7 @@ pub(crate) fn extract_enum_entry_mode<F: Find + ?Sized>(
 /// smart-pointer (`begin_smart_ptr`) and transparent-newtype (`begin_inner`)
 /// layers [`deser_into`]'s own `Def::Pointer` and inner-shape branches do,
 /// bottoming out in `parse_from_str` on the fully collapsed frame — the map
-/// analogue of those branches, except there is no separate key *object* to
+/// analogue of those branches, except there is no separate key object to
 /// fetch: the entry's name already is the key's textual form.
 fn parse_key_from_str<'facet>(
     partial: Partial<'facet, true>,
@@ -414,6 +392,31 @@ fn parse_key_from_str<'facet>(
             text: text.to_owned(),
             reason: e.to_string(),
         })
+}
+
+/// Whether an absent field of this shape reads as `None` rather than
+/// [`DeserializeError::MissingField`]. Checked on the field's own shape —
+/// the transparent-collapse [`classify`] applies would unwrap the `Option`
+/// itself.
+///
+/// [`classify`]: crate::classify::classify
+fn is_optional_shape(shape: &facet::Shape) -> bool {
+    matches!(shape.def, Def::Option(_))
+}
+
+/// Begin `field`, set its default, and end it: the typed read of an absent
+/// `Option` field.
+fn set_field_default<'facet>(
+    partial: Partial<'facet, true>,
+    field: &facet::Field,
+) -> Result<Partial<'facet, true>, DeserializeError> {
+    let partial = partial
+        .begin_field(field.name)
+        .map_err(|e| DeserializeError::Reflect(format!("begin_field {}: {e}", field.name)))?;
+    let partial = partial.set_default().map_err(reflect)?;
+    partial
+        .end()
+        .map_err(|e| DeserializeError::Reflect(format!("end field {}: {e}", field.name)))
 }
 
 fn deser_into<'facet, F: Find + ?Sized>(
@@ -577,9 +580,12 @@ fn deser_into<'facet, F: Find + ?Sized>(
                         DeserializeError::Reflect(format!("end field {}: {e}", field.name))
                     })?;
                 }
-                // A defaulted field may be absent; any other missing field
-                // means the tree does not describe this type.
+                // Absent `Option` fields read as `None`; any other missing
+                // field means the tree does not describe this type.
                 None if field.has_default() => {}
+                None if is_optional_shape(field.shape()) => {
+                    partial = set_field_default(partial, field)?;
+                }
                 None => return Err(DeserializeError::MissingField { field: entry_name }),
             }
         }
@@ -657,9 +663,13 @@ fn deser_into<'facet, F: Find + ?Sized>(
                 partial = partial.end().map_err(reflect)?;
             }
         } else {
+            let mut key_oids = BTreeSet::new();
             for (_, pair_oid, _) in entries {
                 let pair = find_tree_entries(&pair_oid, store)?;
                 let (k_oid, v_oid) = map_pair_entries(&pair)?;
+                if !key_oids.insert(k_oid) {
+                    return Err(DeserializeError::DuplicateKey { oid: k_oid });
+                }
                 partial = partial.begin_key().map_err(reflect)?;
                 partial = deser_into(partial, &k_oid, store, depth + 1, mode)?;
                 partial = partial.end().map_err(reflect)?;
@@ -702,16 +712,15 @@ fn deser_into<'facet, F: Find + ?Sized>(
         let newtype = positional && variant.is_some_and(|v| v.data.fields.len() == 1);
         let is_unit = variant.is_some_and(|v| v.data.fields.is_empty());
 
-        // `select_variant_named` is the authority on whether `variant_name`
-        // even exists; its failure is collapsed to text exactly as before.
+        // `select_variant_named` has already rejected an unknown name.
         let mut partial = partial.select_variant_named(&variant_name).map_err(|e| {
             DeserializeError::Reflect(format!("select variant {variant_name}: {e}"))
         })?;
         let Some(variant) = variant else {
-            // `select_variant_named` already rejected the unknown name; this
-            // arm only satisfies the borrow checker's view of the fallible
-            // lookup above.
-            return Ok(partial);
+            // Unreachable unless this lookup and `select_variant_named` disagree.
+            return Err(DeserializeError::Reflect(format!(
+                "unknown variant {variant_name}"
+            )));
         };
 
         let inner_oid = match (is_unit, inner_oid) {
@@ -753,6 +762,9 @@ fn deser_into<'facet, F: Find + ?Sized>(
             {
                 Some(pos) => matched[pos] = true,
                 None if field.has_default() => {}
+                None if is_optional_shape(field.shape()) => {
+                    partial = set_field_default(partial, field)?;
+                }
                 None => return Err(DeserializeError::MissingField { field: entry_name }),
             }
         }

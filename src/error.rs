@@ -52,19 +52,21 @@ pub enum SerializeError {
     /// tree entry name.
     #[error("map key is not valid UTF-8")]
     NonUtf8MapKey,
-    /// Two distinct composite-key map pairs encoded to the same object id.
+    /// Two map pairs carry the same composite key.
     ///
-    /// Pair entries are named by their pair sub-tree's own object id, so two
-    /// pairs sharing an id would be written as two identically-named entries
-    /// — a tree canonical git rejects (`duplicateEntries`). Reachable only
-    /// when the map's key equality is broken (e.g. NaN float keys, which
-    /// compare unequal while encoding identically to `"nan"`), so it is
-    /// refused rather than silently collapsed.
+    /// Pair entries are named by their pair sub-tree's own object id, and the
+    /// pair sub-tree names its key, so two pairs sharing a key id would be
+    /// two entries for one key. Refused on write, where it can only mean the
+    /// map's key equality is broken (e.g. NaN float keys, which compare
+    /// unequal while encoding identically to `"nan"`) or two distinct keys
+    /// encode identically (e.g. `0.0` and `-0.0`, collapsed by the canonical
+    /// float spelling); a merged or foreign tree carrying two pairs for one
+    /// key is refused on read by [`DeserializeError::DuplicateKey`] instead.
     #[error(
-        "two distinct map pairs encode to the same object {oid}; the map's key equality is broken"
+        "two map pairs carry the same key (key object {oid}); the map's key equality is broken"
     )]
-    DuplicatePair {
-        /// The shared pair sub-tree id.
+    DuplicateKey {
+        /// The shared key object id.
         oid: ObjectId,
     },
     /// The value contains a type this encoding does not support.
@@ -130,7 +132,7 @@ pub enum DeserializeError {
     ///
     /// Every leaf blob (a scalar, a byte sequence, or a unit enum variant's
     /// name blob) MUST carry exactly one trailing newline
-    /// (`serialization.design.leaves.encoding`); this is *not* "at most one",
+    /// (`serialization.design.leaves.encoding`); this is not "at most one",
     /// so a leaf blob missing that byte can only be a foreign or corrupt
     /// object, rejected here rather than accepted leniently. The presence
     /// marker (`crate::marker`) is a separate, structural object and is never
@@ -245,13 +247,28 @@ pub enum DeserializeError {
         /// The missing entry name (`"k"` or `"v"`).
         entry: &'static str,
     },
+    /// A composite-key map tree holds two pairs for the same key.
+    ///
+    /// Content-named pair entries merge cleanly — two branches editing the
+    /// same key produce two pair entries rather than a name conflict — so a
+    /// merged tree can carry two pairs for one key, and a foreign tree can
+    /// carry them for any reason. Either pair could be "the" value, so
+    /// accepting both would silently pick one; the read refuses instead.
+    #[error("map holds two pairs for the same key (key object {oid})")]
+    DuplicateKey {
+        /// The shared key object id.
+        oid: ObjectId,
+    },
     /// A struct tree lacks the entry a non-defaulted field requires.
     ///
     /// Fields carrying a `facet` default may be absent — that is the
-    /// documented leniency for defaults — but a field with no default that
-    /// is missing from the tree can only mean a foreign or stale tree.
-    /// Reporting it here, with the entry name, beats the opaque facet build
-    /// error ("build failed: …") the silent skip used to surface as.
+    /// documented leniency for defaults — and a field of `Option` type is
+    /// defaulted to `None` for the same reason: absent and unset are
+    /// indistinguishable for an optional value. Any other missing field
+    /// means the tree does not describe this type, reported here with the
+    /// entry name rather than as an opaque reflection error. Schema changes
+    /// beyond that (renamed or removed fields) are the migration
+    /// machinery's job — see `crate::migration`.
     #[error("struct field {field:?} is missing from the tree")]
     MissingField {
         /// The field (or positional-ordinal name) the tree omits.
@@ -259,9 +276,15 @@ pub enum DeserializeError {
     },
     /// A tree entry has no counterpart field in the target type.
     ///
-    /// Without this check a foreign tree sharing even one field name would
-    /// read "successfully" while its remaining entries were silently
-    /// dropped — indistinguishable from a value the tree never described.
+    /// The other half of the strict field-matching policy
+    /// ([`MissingField`](Self::MissingField)). Without this check, a foreign
+    /// tree sharing even one field name would read "successfully" while its
+    /// remaining entries were silently dropped — indistinguishable from a
+    /// value the tree never described. Old readers therefore do not
+    /// transparently read data written by a schema that added fields; such
+    /// evolution goes through the migration machinery (`crate::migration`),
+    /// which pairs a source schema with rename hints and explicit change
+    /// operations.
     #[error("tree entry {entry:?} has no counterpart in the target type")]
     UnexpectedEntry {
         /// The entry name found in the tree.
@@ -279,7 +302,7 @@ pub enum DeserializeError {
 /// [`hash`](crate::normal_form::hash)).
 ///
 /// The frozen mapping has no shape errors to report —
-/// [`NormalForm`](crate::normal_form::NormalForm) *is* the universe, so an
+/// [`NormalForm`](crate::normal_form::NormalForm) is the universe, so an
 /// out-of-universe value cannot be constructed — leaving only the two
 /// conditions the data itself can produce.
 #[derive(Debug, thiserror::Error)]
@@ -308,9 +331,7 @@ pub enum NormalFormError {
     /// A list holds more elements than eight-digit ordinals can name.
     ///
     /// The ordinal width is part of the frozen mapping, so a longer list is
-    /// refused rather than silently widened. Eight-digit ordinals name
-    /// indices `0..=99_999_999`, hence at most exactly 100_000_000
-    /// elements, so a list of that length is accepted.
+    /// refused rather than silently widened.
     #[error(
         "normal-form list holds {len} elements, more than the {max} eight-digit ordinals can name"
     )]
@@ -597,7 +618,7 @@ pub enum SchemaReadError {
 /// (`serialize_value_with_schema`, available with the `value` feature).
 ///
 /// The write-side mirror of [`SchemaReadError`]: it validates a dynamic value
-/// against a schema *while* encoding it, so every variant beyond the backend
+/// against a schema while encoding it, so every variant beyond the backend
 /// pass-through names the `path` in the value where the value diverged from
 /// what the schema accepts. The accepted set is exactly the image of
 /// [`deserialize_value_with_schema`](crate::deserialize_value_with_schema),

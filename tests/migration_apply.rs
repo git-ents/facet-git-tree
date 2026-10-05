@@ -262,10 +262,9 @@ struct RenameForNoRewrite {
     old_id: i64,
 }
 
-/// The point of the whole feature: `apply` never writes an object. The
-/// source tree's id and the store's entire object population are exactly
-/// what they were before `apply` ran, and re-reading the original tree
-/// yields the original value byte-identically.
+/// `apply` never writes an object: the source tree's id and the store's
+/// object population are exactly what they were before `apply` ran, and
+/// re-reading the original tree yields the original value byte-identically.
 #[test]
 fn apply_never_rewrites_the_object_store() -> anyhow::Result<()> {
     let (root, store) = serialize(&RenameForNoRewrite { old_id: 1 })?;

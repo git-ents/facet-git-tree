@@ -7,7 +7,7 @@
 //! whose `Some` payload must be wrapped in a `some` entry, and a bare number
 //! cannot tell that its field is `f64` rather than an integer. The schema
 //! supplies exactly that missing type information, so `serialize_value_with_schema`
-//! writes the *same* objects — byte-for-byte, and therefore the same object
+//! writes the same objects — byte-for-byte, and therefore the same object
 //! ids — that the equivalent typed value would produce through
 //! [`serialize`](crate::serialize).
 //!
@@ -22,7 +22,7 @@
 //! The normative mapping lives in `docs/specification.adoc` under
 //! `serialization.schema-directed`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use facet::Peek;
 use facet_value::{VArray, VNumber, Value};
@@ -322,7 +322,7 @@ fn write_named_tree<W: Write + ?Sized, T: DefaultFieldNode>(
 /// `marker_empty` says whether an empty result takes the presence marker
 /// instead of a literal empty tree, per `crate::marker`. It is true for the
 /// variable-length sequences — [`Node::List`], [`Node::Array`] — whose
-/// emptiness is a property of the *value* and so is worth seeing in a diff.
+/// emptiness is a property of the value and so is worth seeing in a diff.
 /// It is false for [`Node::Tuple`], whose length is fixed by the schema:
 /// a zero-element tuple encodes identically for every value, so there is
 /// nothing to diff, and marking it would both diverge from the typed encoder
@@ -374,7 +374,7 @@ fn write_composite_map<W: Write + ?Sized>(
 ) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
     let arr = as_array(value, path)?;
     let mut entries = Vec::with_capacity(arr.len());
-    let mut pair_oids = std::collections::BTreeSet::new();
+    let mut key_oids = BTreeSet::new();
     for (i, item) in arr.as_slice().iter().enumerate() {
         let ipath = path.index(i);
         let obj = as_object(item, &ipath)?;
@@ -385,6 +385,9 @@ fn write_composite_map<W: Write + ?Sized>(
             .get("v")
             .ok_or_else(|| expected(&ipath, "object with \"k\" and \"v\"", item))?;
         let (k_oid, k_kind) = write_node(k, key, doc, store, &ipath.field("k"), depth + 1)?;
+        if !key_oids.insert(k_oid) {
+            return Err(SerializeError::DuplicateKey { oid: k_oid }.into());
+        }
         let (v_oid, v_kind) = write_node(v, val, doc, store, &ipath.field("v"), depth + 1)?;
         let mut pair = vec![
             TreeEntry {
@@ -400,9 +403,6 @@ fn write_composite_map<W: Write + ?Sized>(
         ];
         pair.sort();
         let (pair_oid, _) = tree(store, pair)?;
-        if !pair_oids.insert(pair_oid) {
-            return Err(SerializeError::DuplicatePair { oid: pair_oid }.into());
-        }
         entries.push(TreeEntry {
             mode: EntryMode::from(EntryKind::Tree),
             // Named by the pair's own object id, exactly as the typed

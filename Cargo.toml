@@ -12,6 +12,10 @@ readme = "README.adoc"
 # downcast fast paths and the schema-driven read/write modules; the
 # `facet_value::Value` number downcast is unconditional, so dynamic numbers
 # encode identically with and without it.
+#
+# NOTE (release notes): the unconditional number downcast can change object
+# ids for builds *without* the `value` feature that previously wrote very
+# large or float-backed dynamic numbers through the lossy vtable path.
 value = []
 
 [dependencies]

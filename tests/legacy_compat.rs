@@ -1,5 +1,5 @@
-//! Explicit compatibility coverage for objects written before the current
-//! leaf framing and schema document shape.
+//! Compatibility coverage for objects in the legacy leaf framing and schema
+//! document shape.
 
 use std::collections::BTreeMap;
 

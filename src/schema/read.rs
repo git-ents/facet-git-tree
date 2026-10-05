@@ -9,7 +9,7 @@
 //! The normative mapping lives in `docs/specification.adoc` under
 //! `deserialization.schema-driven`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use facet_value::{VArray, VNumber, VObject, Value};
 use gix_object::{Find, Kind};
@@ -217,9 +217,13 @@ fn read_node<F: Find + ?Sized>(
                 return Ok(object.into());
             }
             let mut array = VArray::new();
+            let mut key_oids = BTreeSet::new();
             for (_, pair_oid, _) in entries {
                 let pair = find_tree_entries(&pair_oid, store)?;
                 let (k_oid, v_oid) = map_pair_entries(&pair)?;
+                if !key_oids.insert(k_oid) {
+                    return Err(DeserializeError::DuplicateKey { oid: k_oid }.into());
+                }
                 let mut object = VObject::new();
                 object.insert("k", read_node(&k_oid, key, doc, store, depth + 1, mode)?);
                 object.insert("v", read_node(&v_oid, value, doc, store, depth + 1, mode)?);
@@ -306,7 +310,7 @@ fn read_node<F: Find + ?Sized>(
 /// Read a name-keyed tree as a [`VObject`], requiring the tree's entries and
 /// the schema's fields to correspond exactly — except a field whose
 /// [`DefaultFieldNode::has_default`] is set, whose entry may be absent: the result
-/// simply omits it, since a schema-only read has no default *value* to
+/// simply omits it, since a schema-only read has no default value to
 /// invent, only the marker that one exists elsewhere.
 ///
 /// Strictness (for every other field) is what makes this function usable as

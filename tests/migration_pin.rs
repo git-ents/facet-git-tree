@@ -99,7 +99,7 @@ fn unpinned_tree_is_rejected() -> anyhow::Result<()> {
 }
 
 /// A tree carrying a pin entry that names an unrecognized migration-schema
-/// tree is rejected with [`MigrationPinError::Unrecognized`] *before* a full
+/// tree is rejected with [`MigrationPinError::Unrecognized`] before a full
 /// typed deserialize is attempted.
 #[test]
 fn unrecognized_pin_is_rejected_before_a_full_deserialize_is_attempted() -> anyhow::Result<()> {

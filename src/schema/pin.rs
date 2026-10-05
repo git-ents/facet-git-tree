@@ -11,7 +11,7 @@
 //!
 //! Each generation's own tree also carries a [`codec`] entry: a fixture value
 //! exercising every construct the codec can encode, so a change to how a
-//! value is *spelled* — not just to `Schema`'s own shape — moves the
+//! value is spelled — not just to `Schema`'s own shape — moves the
 //! generation id too.
 
 use std::collections::BTreeMap;
@@ -29,7 +29,7 @@ use crate::{EntryKind, EntryMode, ObjectId, TreeEntry};
 ///
 /// Generations chain by reachability — generation N's own tree carries a
 /// [`ENTRY`](Self::ENTRY) entry naming N-1 — which is what restores the
-/// *ordering* a version number gave and a bare object id does not.
+/// ordering a version number gave and a bare object id does not.
 #[derive(Debug)]
 pub struct SchemaSchema {
     tree: ObjectId,
@@ -43,9 +43,8 @@ impl SchemaSchema {
     /// The last schema-schema generation before [`Schema::kind`] existed.
     ///
     /// This generation is read-only compatibility support. Its documents have
-    /// the historical `{root, defs}` shape and are decoded with
-    /// [`LegacySchema`], then represented as [`Schema::LEGACY_KIND`]. It is
-    /// deliberately not used by any writer.
+    /// the legacy `{root, defs}` shape and are decoded into [`Schema`] with
+    /// kind [`Schema::LEGACY_KIND`]. No writer produces it.
     pub const LEGACY: SchemaSchema = SchemaSchema {
         tree: decode_oid(LEGACY_HEX),
         parent: None,
@@ -67,9 +66,9 @@ impl SchemaSchema {
     /// The generation this build writes.
     pub const CURRENT: &'static SchemaSchema = &Self::GENESIS;
 
-    /// Every generation this build speaks, oldest first. The legacy entry is
-    /// retained solely so documents written before `Schema.kind` remain
-    /// readable; new documents always pin [`Self::CURRENT`].
+    /// Every generation this build speaks, oldest first. The legacy entry
+    /// exists so pre-`kind` documents remain readable; new documents always
+    /// pin [`Self::CURRENT`].
     pub const KNOWN: &'static [&'static SchemaSchema] = &[&Self::LEGACY, &Self::GENESIS];
 
     /// This generation's own schema-schema tree id.
@@ -269,7 +268,7 @@ impl Schema {
         &self,
         store: &S,
     ) -> Result<ObjectId, SchemaPinError> {
-        self.validate()?;
+        self.validate_publishable()?;
         materialize(store)?;
         let doc_tree = serialize_into(self, store)?;
         splice_pin(doc_tree, SchemaSchema::CURRENT.tree(), store)
@@ -305,7 +304,7 @@ impl Schema {
     }
 
     /// Read a stored schema document, refusing one this build does not speak
-    /// *before* deserializing it.
+    /// before deserializing it.
     ///
     /// A document from a newer binary may contain a `Node` variant this
     /// build has never heard of, and a typed deserialize attempted first
@@ -423,9 +422,7 @@ fn decode_legacy<F: Find + ?Sized>(tree: &ObjectId, store: &F) -> Result<Schema,
 /// Spliced entries — the schema-schema pin and the codec fixture — are
 /// storage metadata, not fields of the document's Rust type, so a typed
 /// read of a pinned document must exempt them from its strict
-/// unexpected-entry check ([`DeserializeError::UnexpectedEntry`]). Before
-/// that check existed they were silently skipped; this keeps the
-/// load-bearing tolerance, but explicit and by name.
+/// unexpected-entry check ([`DeserializeError::UnexpectedEntry`]).
 pub(crate) fn is_splice_entry(name: &str) -> bool {
     name == SchemaSchema::ENTRY || name == codec::ENTRY
 }

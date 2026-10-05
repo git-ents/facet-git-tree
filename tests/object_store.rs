@@ -86,7 +86,9 @@ fn get_absent_object_is_none() {
     assert!(empty.get_tree(&id).expect("read object").is_none());
 }
 
-/// The typed accessors reject objects of the wrong kind.
+/// The typed accessors distinguish an object of the wrong kind from a
+/// missing one: wrong kind is an error (`NotATree`/`NotABlob`), absence is
+/// `Ok(None)`.
 #[test]
 fn typed_accessors_reject_wrong_kind() {
     let store = ObjectStore::default();
@@ -103,9 +105,21 @@ fn typed_accessors_reject_wrong_kind() {
 
     // A blob is not a tree, and vice versa.
     assert!(store.get_blob(&blob_id).expect("read object").is_some());
-    assert!(store.get_tree(&blob_id).expect("read object").is_none());
+    assert!(
+        matches!(
+            store.get_tree(&blob_id),
+            Err(facet_git_tree::DeserializeError::NotATree(_))
+        ),
+        "a blob read as a tree must be NotATree, not a silent None"
+    );
     assert!(store.get_tree(&tree_id).expect("read object").is_some());
-    assert!(store.get_blob(&tree_id).expect("read object").is_none());
+    assert!(
+        matches!(
+            store.get_blob(&tree_id),
+            Err(facet_git_tree::DeserializeError::NotABlob(_))
+        ),
+        "a tree read as a blob must be NotABlob, not a silent None"
+    );
 }
 
 /// The `Find` impl returns the stored bytes and the correct object kind.

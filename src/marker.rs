@@ -22,8 +22,8 @@
 //! reader that cannot make that distinction — the schemaless
 //! [`deserialization.dynamic.heuristic`](crate) read — already documents
 //! `Null` and an empty collection as collapsing to the same empty `Object`
-//! reading, from long before markers existed; a shared marker preserves that
-//! exact (lossy, documented) behavior instead of introducing a new one.
+//! reading; a shared marker preserves that (lossy, documented) behavior
+//! rather than introducing a new one.
 //!
 //! [`MARKER_KEY`] is reserved: [`crate::check_key`] rejects it for a dynamic
 //! (map or dynamic-object) key for the same reason it rejects `/` — a real
@@ -31,7 +31,7 @@
 //! on read, from the marker. Ordinal (sequence) names can never collide with
 //! it, being always decimal digits. Field names of a `#[derive(Facet)]` type
 //! cannot either, a bare `_` not being a valid Rust field identifier — but a
-//! [`Schema`](crate::Schema) is *data*, and one authored by hand can
+//! [`Schema`](crate::Schema) is data, and one authored by hand can
 //! name a field anything at all, so the schema-directed writer checks field
 //! names too rather than trusting the derive's guarantee.
 

@@ -19,8 +19,8 @@ use common::WithMap;
 #[case("field0")]
 #[case("0001")] // a zero-padded ordinal name is a perfectly ordinary key
 #[case(".env")]
-#[case(".schema")] // TODO remove: no longer reserved; the encoding stores no schema
-#[case(".variant")] // TODO remove: no longer reserved; enums are externally tagged, no sentinel
+#[case(".schema")]
+#[case(".variant")]
 fn accepts_valid_keys(#[case] key: &str) {
     assert!(check_key(key).is_ok(), "{key:?} should be accepted");
 }

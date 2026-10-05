@@ -163,7 +163,7 @@ fn leaf_has_exactly_one_trailing_newline() {
 
 /// The trailing newline is unconditional, not "at most one": a String whose
 /// own content already ends in `\n` still gets the byte appended, producing a
-/// blob with *two* trailing newlines. This is what keeps the transform
+/// blob with two trailing newlines. This is what keeps the transform
 /// exactly lossless — see `already_newline_terminated_string_roundtrips`.
 #[test]
 
@@ -205,12 +205,10 @@ fn empty_string_is_a_single_newline_byte() {
     assert_eq!(back, value);
 }
 
-/// Before the mandatory-trailing-newline rule, an empty `String` and the
-/// [presence marker](facet_git_tree) blob were both the literal empty blob
-/// and therefore the *same* object. Now that every leaf blob (including an
-/// empty String's) carries the trailing byte while the marker does not, the
-/// two are distinguishable: the empty String's blob is a distinct object
-/// from the well-known empty blob the marker uses.
+/// An empty `String` and the [presence marker](facet_git_tree) are distinct
+/// objects: every leaf blob — including an empty String's — carries a
+/// mandatory trailing newline while the marker blob does not, so the empty
+/// String's blob differs from the well-known empty blob the marker uses.
 #[test]
 
 fn empty_string_blob_is_distinct_from_the_marker_blob() {
@@ -220,7 +218,7 @@ fn empty_string_blob_is_distinct_from_the_marker_blob() {
         ObjectId::from_hex(b"e69de29bb2d1d6434b8b29ae775ad8c2e48c5391").expect("valid oid");
     assert_ne!(
         entry, empty_blob_oid,
-        "an empty String's blob must no longer collide with the empty blob \
+        "an empty String's blob must not collide with the empty blob \
          the presence marker uses"
     );
 }
