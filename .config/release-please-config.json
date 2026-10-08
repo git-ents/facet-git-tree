@@ -5,7 +5,7 @@
   "include-component-in-tag": true,
   "include-v-in-tag": true,
   "release-type": "rust",
-  "initial-version": "0.0.1",
+  "initial-version": "0.1.0",
   "draft-pull-request": true,
   "pull-request-footer": "This release was generated with [Release Please](https://github.com/googleapis/release-please).",
   "changelog-sections": [
