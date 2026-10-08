@@ -1,6 +1,46 @@
 [package]
 name = "facet-git-tree"
-version = "0.1.0"
+version = "0.0.0"
 edition = "2024"
+readme = "README.adoc"
+description = "Format crate for facet: serialize and deserialize facet values as Git tree objects"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/git-ents/facet-git-tree"
+
+[features]
+# `facet-value` is an unconditional dependency (not gated by this feature)
+# so that the pin towers' codec fixture (`schema::codec`) has a
+# `Def::DynamicValue` type reachable on every feature combination — its
+# generation id must not depend on which features are enabled. `value`
+# instead gates the QName/UUID downcast fast paths and the schema-driven
+# read/write modules. See src/schema/codec.rs for the full rationale.
+value = []
 
 [dependencies]
+facet = { version = "0.50.0-rc.0", features = ["reflect"] }
+facet-value = "0.50.0-rc.5"
+gix-hash = { version = "0.25.1", features = ["sha1"] }
+gix-object = "0.62.0"
+gix-odb = "0.82.0"
+thiserror = "2"
+
+[dev-dependencies]
+anyhow = "1"
+proptest = "1"
+rstest = "0.26"
+
+[[test]]
+name = "schema_driven"
+required-features = ["value"]
+
+[[test]]
+name = "schema_write"
+required-features = ["value"]
+
+[[test]]
+name = "migration_apply"
+required-features = ["value"]
+
+[[test]]
+name = "legacy_compat"
+required-features = ["value"]
