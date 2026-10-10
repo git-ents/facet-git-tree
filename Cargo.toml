@@ -17,8 +17,8 @@ repository = "https://github.com/git-ents/facet-git-tree"
 value = []
 
 [dependencies]
-facet = { version = "0.50.0-rc.0", features = ["reflect"] }
-facet-value = "0.50.0-rc.5"
+facet = { version = "0.50.0-rc.7", features = ["reflect"] }
+facet-value = "0.50.0-rc.7"
 gix-hash = { version = "0.25.1", features = ["sha1"] }
 gix-object = "0.62.0"
 gix-odb = "0.82.0"
