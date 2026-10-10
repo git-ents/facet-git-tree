@@ -18,9 +18,8 @@ allowed_types = [
     "release",
     "deps",
 ]
-allowed_scopes = [
-    "checks",
-    "release",
-]
+# `committed` checks scopes only when this list is nonempty; the empty scope
+# allows unscoped subjects while rejecting every actual scope.
+allowed_scopes = [""]
 merge_commit = false
 no_fixup = false
