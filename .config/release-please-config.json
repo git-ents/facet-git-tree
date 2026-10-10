@@ -9,6 +9,7 @@
   "draft-pull-request": true,
   "pull-request-footer": "This release was generated with [Release Please](https://github.com/googleapis/release-please).",
   "changelog-sections": [
+    { "type": "deps", "section": "Dependencies" },
     { "type": "feat", "section": "Features" },
     { "type": "fix", "section": "Bug Fixes" },
     { "type": "perf", "section": "Performance Improvements" },

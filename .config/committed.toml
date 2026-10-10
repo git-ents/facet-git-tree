@@ -16,6 +16,7 @@ allowed_types = [
     "perf",
     "test",
     "release",
+    "deps",
 ]
 allowed_scopes = [
     "checks",
