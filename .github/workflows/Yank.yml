@@ -1,0 +1,38 @@
+name: Yank
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Crate version to yank (e.g. 0.1.0-alpha.2)"
+        required: true
+        type: string
+      undo:
+        description: "Un-yank instead of yank"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  yank:
+    name: Yank
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          toolchain: stable
+      - name: Yank from crates.io
+        if: ${{ !inputs.undo }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo yank --version "${{ inputs.version }}" --token "$CARGO_REGISTRY_TOKEN"
+      - name: Un-yank from crates.io
+        if: ${{ inputs.undo }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo yank --undo --version "${{ inputs.version }}" --token "$CARGO_REGISTRY_TOKEN"
