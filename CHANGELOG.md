@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.0-alpha.2 (2026-10-11)
+
+### Dependencies
+
+- Move to the gix 0.89 stack (gix-hash 0.28, gix-object 0.66, gix-odb 0.86); backend errors now surface as gix_error::Error
+
 ## 0.1.0-alpha.1 (2026-10-10)
 
 ### Features
