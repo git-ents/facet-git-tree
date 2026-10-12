@@ -96,7 +96,7 @@ impl Find for ObjectStore {
         &self,
         id: &gix_hash::oid,
         buffer: &'a mut Vec<u8>,
-    ) -> Result<Option<Data<'a>>, gix_object::find::Error> {
+    ) -> Result<Option<Data<'a>>, gix_error::Error> {
         self.0.try_find(id, buffer)
     }
 }
@@ -107,7 +107,7 @@ impl Write for ObjectStore {
         kind: Kind,
         size: u64,
         from: &mut dyn Read,
-    ) -> Result<ObjectId, gix_object::write::Error> {
+    ) -> Result<ObjectId, gix_error::Error> {
         self.0.write_stream(kind, size, from)
     }
 
@@ -116,7 +116,7 @@ impl Write for ObjectStore {
         kind: Kind,
         from: &[u8],
         id: ObjectId,
-    ) -> Result<ObjectId, gix_object::write::Error> {
+    ) -> Result<ObjectId, gix_error::Error> {
         self.0.write_buf_with_known_id(kind, from, id)
     }
 
@@ -126,7 +126,7 @@ impl Write for ObjectStore {
         size: u64,
         from: &mut dyn Read,
         id: ObjectId,
-    ) -> Result<ObjectId, gix_object::write::Error> {
+    ) -> Result<ObjectId, gix_error::Error> {
         self.0.write_stream_with_known_id(kind, size, from, id)
     }
 }
@@ -147,7 +147,7 @@ impl Find for NoBackend {
         &self,
         _id: &gix_hash::oid,
         _buffer: &'a mut Vec<u8>,
-    ) -> Result<Option<Data<'a>>, gix_object::find::Error> {
+    ) -> Result<Option<Data<'a>>, gix_error::Error> {
         Ok(None)
     }
 }
@@ -158,10 +158,10 @@ impl Write for NoBackend {
         _kind: Kind,
         _size: u64,
         _from: &mut dyn Read,
-    ) -> Result<ObjectId, gix_object::write::Error> {
+    ) -> Result<ObjectId, gix_error::Error> {
         // The enclosing `Proxy` always has its in-memory store enabled, so writes
         // are intercepted before reaching this inner database.
-        Err("NoBackend: writes are handled by the in-memory proxy".into())
+        Err(gix_error::message("NoBackend: writes are handled by the in-memory proxy").into())
     }
 
     fn write_buf_with_known_id(
@@ -169,8 +169,8 @@ impl Write for NoBackend {
         _kind: Kind,
         _from: &[u8],
         _id: ObjectId,
-    ) -> Result<ObjectId, gix_object::write::Error> {
-        Err("NoBackend: writes are handled by the in-memory proxy".into())
+    ) -> Result<ObjectId, gix_error::Error> {
+        Err(gix_error::message("NoBackend: writes are handled by the in-memory proxy").into())
     }
 
     fn write_stream_with_known_id(
@@ -179,7 +179,7 @@ impl Write for NoBackend {
         _size: u64,
         _from: &mut dyn Read,
         _id: ObjectId,
-    ) -> Result<ObjectId, gix_object::write::Error> {
-        Err("NoBackend: writes are handled by the in-memory proxy".into())
+    ) -> Result<ObjectId, gix_error::Error> {
+        Err(gix_error::message("NoBackend: writes are handled by the in-memory proxy").into())
     }
 }

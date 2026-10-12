@@ -25,7 +25,7 @@ pub enum SerializeError {
     Key(#[from] KeyError),
     /// An error from the underlying `gix` object backend.
     #[error("git object backend error")]
-    Backend(#[source] gix_object::write::Error),
+    Backend(#[source] gix_error::Error),
     /// A `facet` reflection operation failed.
     ///
     /// Reflection errors borrow from the reflected shape and are not
@@ -118,7 +118,7 @@ pub enum DeserializeError {
     DuplicateOrdinal(usize),
     /// An error from the underlying `gix` object backend.
     #[error("git object backend error")]
-    Backend(#[source] gix_object::find::Error),
+    Backend(#[source] gix_error::Error),
     /// A stored tree object's bytes could not be decoded as a Git tree.
     #[error("failed to decode tree {oid}")]
     Decode {
@@ -126,7 +126,7 @@ pub enum DeserializeError {
         oid: ObjectId,
         /// The underlying `gix` decode error.
         #[source]
-        source: gix_object::decode::Error,
+        source: gix_error::Error,
     },
     /// A `facet` reflection operation failed (see [`SerializeError::Reflect`]).
     #[error("reflection error: {0}")]
@@ -246,7 +246,7 @@ pub enum NormalFormError {
     },
     /// An error from the underlying `gix` object backend.
     #[error("git object backend error")]
-    Backend(#[source] gix_object::write::Error),
+    Backend(#[source] gix_error::Error),
 }
 
 /// An error produced by the identity normal form's type-universe check.
