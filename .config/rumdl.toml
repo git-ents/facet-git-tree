@@ -1,0 +1,19 @@
+[global]
+line-length = -1
+force-exclude = true
+
+exclude = [
+    ".git",
+    "dist",
+    "build",
+    "CHANGELOG.md",
+    # Archived issue bodies, exported verbatim from the forge refs. Reflowing
+    # them would rewrite the record they exist to preserve.
+    "docs/issue",
+]
+
+respect-gitignore = true
+
+[MD013]
+reflow = true
+reflow-mode = "sentence-per-line"
