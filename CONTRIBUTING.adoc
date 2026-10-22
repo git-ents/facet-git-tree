@@ -35,4 +35,4 @@ All code and documentation contributions should be submitted as GitHub Pull Requ
 
 == Code of Conduct
 
-Please refer to the in-source link:CONDUCT.adoc[code of conduct] for all behavioral expectations.
+Please refer to the in-source link:CONDUCT.md[code of conduct] for all behavioral expectations.
