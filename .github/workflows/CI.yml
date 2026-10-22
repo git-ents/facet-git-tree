@@ -34,8 +34,8 @@ jobs:
           - runner: ubuntu-24.04
             target: ppc64le
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: true
       - uses: taiki-e/install-action@nextest
@@ -59,8 +59,8 @@ jobs:
           - runner: ubuntu-24.04
             target: armv7
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: true
       - uses: taiki-e/install-action@nextest
@@ -80,8 +80,8 @@ jobs:
           - runner: windows-latest
             target: x64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: true
       - uses: taiki-e/install-action@nextest
@@ -101,8 +101,8 @@ jobs:
           - runner: macos-14
             target: aarch64
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: true
       - uses: taiki-e/install-action@nextest
