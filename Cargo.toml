@@ -1,6 +1,6 @@
 [package]
 name = "facet-git-tree"
-version = "0.1.0-alpha.1"
+version = "0.1.0-alpha.3"
 edition = "2024"
 readme = "README.md"
 description = "Format crate for facet: serialize and deserialize facet values as Git tree objects"
