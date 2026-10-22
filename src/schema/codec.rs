@@ -1,6 +1,6 @@
 //! The codec fixture: a value exercising every construct this crate's codec
-//! can encode, written into each pin tower's generation tree beside its own
-//! schema-schema/migration-schema document.
+//! can encode, written into a pin tower's generation tree beside its own
+//! schema-schema document.
 //!
 //! [`Fixture`]'s schema only captures the shape language — an `f64`'s text,
 //! `Bytes`' framing, an empty `List`'s marker, and so on are not in it. A
@@ -212,10 +212,6 @@ fn fixture_schema() -> Schema {
 
 /// Write the codec fixture's schema and value into `store`, and return the
 /// `{schema/, value/}` tree that wraps them.
-///
-/// Shared by both pin towers (`schema::pin` and `migration::pin`): they
-/// splice the exact same fixture, so the returned tree is one shared,
-/// content-addressed object regardless of which tower writes it first.
 pub fn codec_tree<S: Write + ?Sized>(store: &S) -> Result<ObjectId, SerializeError> {
     // RawTree never writes its own target (`ser::serialize_node`'s RawTree
     // branch only reads `RawTree::oid()`), so the fixture's target is

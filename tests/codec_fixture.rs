@@ -1,17 +1,11 @@
-//! The codec fixture ([`facet_git_tree::schema::codec`]): coverage and
-//! sharing checks for the value that binds a pin tower's generation id to the
-//! value codec, not just to `Schema`'s/`Migration`'s own shape.
+//! The codec fixture ([`facet_git_tree::schema::codec`]): coverage checks for
+//! the value that binds a pin tower's generation id to the value codec, not
+//! just to `Schema`'s own shape.
 
 use std::collections::HashSet;
 
 use facet_git_tree::schema::codec::{Fixture, fixture};
-use facet_git_tree::{
-    EntryKind, Migration, MigrationSchema, Node, ObjectStore, Schema, SchemaSchema, VariantKind,
-    schema_of,
-};
-
-mod common;
-use common::find_entry;
+use facet_git_tree::{Node, Schema, VariantKind, schema_of};
 
 /// The variant names `T`'s own schema reflects, by walking `schema_of::<T>()`
 /// to the `Node::Enum` definition of `T` itself — `T`'s full variant set,
@@ -162,34 +156,4 @@ fn fixture_covers_every_construct() {
 #[test]
 fn fixture_value_is_deterministic() {
     assert_eq!(fixture(), fixture());
-}
-
-/// A materialized generation tree — for both towers — really contains
-/// `codec/schema` and `codec/value`, and both towers splice the identical
-/// `codec` tree object id.
-#[test]
-fn both_towers_splice_the_identical_codec_tree() -> anyhow::Result<()> {
-    let store = ObjectStore::default();
-
-    let schema_root = schema_of::<Schema>()?.write_pinned(&store)?;
-    let schema_generation = find_entry(&store, &schema_root, SchemaSchema::ENTRY).oid;
-    let schema_codec = find_entry(&store, &schema_generation, "codec");
-    assert_eq!(schema_codec.mode.kind(), EntryKind::Tree);
-
-    let migration_root = Migration::default().write_pinned(&store)?;
-    let migration_generation = find_entry(&store, &migration_root, MigrationSchema::ENTRY).oid;
-    let migration_codec = find_entry(&store, &migration_generation, "codec");
-    assert_eq!(migration_codec.mode.kind(), EntryKind::Tree);
-
-    assert_eq!(
-        schema_codec.oid, migration_codec.oid,
-        "both towers must splice the exact same codec tree object"
-    );
-
-    let schema_entry = find_entry(&store, &schema_codec.oid, "schema");
-    assert_eq!(schema_entry.mode.kind(), EntryKind::Tree);
-    let value_entry = find_entry(&store, &schema_codec.oid, "value");
-    assert_eq!(value_entry.mode.kind(), EntryKind::Tree);
-
-    Ok(())
 }

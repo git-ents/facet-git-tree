@@ -38,9 +38,5 @@ name = "schema_write"
 required-features = ["value"]
 
 [[test]]
-name = "migration_apply"
-required-features = ["value"]
-
-[[test]]
 name = "legacy_compat"
 required-features = ["value"]

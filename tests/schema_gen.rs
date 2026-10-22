@@ -493,11 +493,11 @@ fn anonymous_kind_is_a_placeholder_publication_refuses() -> anyhow::Result<()> {
 }
 
 /// The explicit-bound entry point at the default bound reproduces
-/// `from_shape_with_hints` exactly — same document, same hints.
+/// `from_shape` exactly — same document.
 #[test]
-fn from_shape_with_limit_at_default_matches_from_shape_with_hints() -> anyhow::Result<()> {
+fn from_shape_with_limit_at_default_matches_from_shape() -> anyhow::Result<()> {
     let via_limit = Schema::from_shape_with_limit(<common::Person as facet::Facet>::SHAPE, 32)?;
-    let via_hints = Schema::from_shape_with_hints(<common::Person as facet::Facet>::SHAPE)?;
-    assert_eq!(via_limit, via_hints);
+    let via_default = Schema::from_shape(<common::Person as facet::Facet>::SHAPE)?;
+    assert_eq!(via_limit, via_default);
     Ok(())
 }
