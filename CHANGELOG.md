@@ -2,6 +2,8 @@
 
 ## [0.1.0-alpha.3](https://github.com/git-ents/facet-git-tree/compare/facet-git-tree-v0.1.0-alpha.1...facet-git-tree-v0.1.0-alpha.3) (2026-10-22)
 
+Note that `v0.1.0-alpha.2` was published accidentally, and was therefore yanked.
+That yanked pre-release did not contain substantive changes.
 
 ### ⚠ BREAKING CHANGES
 
