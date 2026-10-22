@@ -1,7 +1,12 @@
 //! Table-driven tests for [`check_key`], the write-side tree-entry-name validator.
 
-use facet_git_tree::{KeyError, check_key};
+use std::collections::HashMap;
+
+use facet_git_tree::{KeyError, SerializeError, check_key, serialize};
 use rstest::rstest;
+
+mod common;
+use common::WithMap;
 
 /// Names that are valid tree entry names and so are accepted. Leading-dot
 /// keys are ordinary data — canonical git only refuses the exact names `.`
@@ -70,5 +75,32 @@ fn rejects_keys_with_nul(#[case] key: &str) {
     assert!(
         matches!(check_key(key), Err(KeyError { key: k }) if k == key),
         "{key:?} should be rejected as KeyError carrying the offending key"
+    );
+}
+
+// --- integration: `serialize` must apply `check_key` to typed map keys ---
+
+/// The typed map path — `serialize` over a `HashMap` field — runs every key
+/// through `check_key`, surfacing a refusal as [`SerializeError::Key`]. This
+/// is the only test that crosses `serialize` into that call site; without it
+/// the check could be dropped from the encoder and every remaining test
+/// (direct `check_key` unit tests, or the dynamic path exercised in
+/// `value_serialize`) would still pass.
+#[rstest]
+#[case("a/b")] // path separator
+#[case("_")] // the reserved presence-marker name
+#[case("a\0b")] // NUL terminates a tree entry's name on disk
+#[case("")] // empty filename
+#[case(".")] // fsck's hasDot
+#[case("..")] // fsck's hasDotdot
+fn serialize_rejects_invalid_typed_map_keys(#[case] key: &str) {
+    let mut table = HashMap::new();
+    table.insert(key.to_string(), "v".to_string());
+    assert!(
+        matches!(
+            serialize(&WithMap { table }),
+            Err(SerializeError::Key(KeyError { key: k })) if k == key
+        ),
+        "typed map key {key:?} must be rejected by serialize"
     );
 }
