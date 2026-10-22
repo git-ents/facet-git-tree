@@ -174,38 +174,34 @@ pub struct StructField {
 /// A [`Node::Struct`] field, or a struct enum variant's plain [`Node`] field:
 /// one implementation lets the read and write walks handle both without
 /// duplicating themselves.
+///
+/// Gated on `value` because those two walks — its only consumers — are.
+#[cfg(feature = "value")]
 pub(crate) trait FieldNode {
     /// The field's own schema.
     fn node(&self) -> &Node;
-}
 
-impl FieldNode for Node {
-    fn node(&self) -> &Node {
-        self
-    }
-}
-
-impl FieldNode for StructField {
-    fn node(&self) -> &Node {
-        &self.node
-    }
-}
-
-#[cfg(feature = "value")]
-pub(crate) trait DefaultFieldNode: FieldNode {
     /// Whether the field's tree entry may be absent.
     fn has_default(&self) -> bool;
 }
 
 #[cfg(feature = "value")]
-impl DefaultFieldNode for Node {
+impl FieldNode for Node {
+    fn node(&self) -> &Node {
+        self
+    }
+
     fn has_default(&self) -> bool {
         false
     }
 }
 
 #[cfg(feature = "value")]
-impl DefaultFieldNode for StructField {
+impl FieldNode for StructField {
+    fn node(&self) -> &Node {
+        &self.node
+    }
+
     fn has_default(&self) -> bool {
         self.has_default
     }

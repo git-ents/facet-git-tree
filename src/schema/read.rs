@@ -17,7 +17,7 @@ use crate::de::{
 };
 use crate::error::{DeserializeError, SchemaReadError};
 use crate::limits::MAX_VALUE_DEPTH;
-use crate::schema::{DefaultFieldNode, Node, Schema, VariantKind, is_scalar_schema};
+use crate::schema::{FieldNode, Node, Schema, VariantKind, is_scalar_schema};
 use crate::{EntryKind, ObjectId};
 
 /// Deserialize the tree at `root` into a full-fidelity [`Value`], guided by
@@ -280,11 +280,11 @@ fn read_node<F: Find + ?Sized>(
 
 /// Read a name-keyed tree as a [`VObject`], requiring the tree's entries and
 /// the schema's fields to correspond exactly — except a field whose
-/// [`DefaultFieldNode::has_default`] is set, whose entry may be absent (the
+/// [`FieldNode::has_default`] is set, whose entry may be absent (the
 /// result simply omits it, a schema-only read having no default value to
 /// invent). Strictness is what makes this usable as a conformance check
 /// ([`validate_with_schema`]).
-fn read_struct<F: Find + ?Sized, T: DefaultFieldNode>(
+fn read_struct<F: Find + ?Sized, T: FieldNode>(
     entries: &Entries,
     fields: &BTreeMap<String, T>,
     doc: &Schema,
