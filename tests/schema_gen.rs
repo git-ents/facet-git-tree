@@ -54,12 +54,7 @@ fn re(name: &str) -> Node {
 }
 
 fn doc(root: Node, defs: Vec<(&str, Node)>) -> Schema {
-    let kind = match &root {
-        Node::Ref(name) => name.clone(),
-        _ => "anonymous".to_owned(),
-    };
     Schema {
-        kind,
         root,
         defs: defs.into_iter().map(|(k, v)| (k.into(), v)).collect(),
     }
@@ -239,7 +234,6 @@ fn byte_seq_schema_is_bytes() -> anyhow::Result<()> {
     assert_eq!(
         schema_of::<Vec<u8>>()?,
         Schema {
-            kind: "Vec".into(),
             root: Node::Bytes,
             defs: BTreeMap::new(),
         }
@@ -419,8 +413,6 @@ fn box_schema_collapses() -> anyhow::Result<()> {
     let point = schema_of::<Point>()?;
     assert_eq!(boxed.root, point.root);
     assert_eq!(boxed.defs, point.defs);
-    assert_eq!(boxed.kind, "Box");
-    assert_eq!(point.kind, "Point");
     Ok(())
 }
 
@@ -433,7 +425,6 @@ fn transparent_newtype_schema_collapses() -> anyhow::Result<()> {
     assert_eq!(
         schema_of::<Hex>()?,
         Schema {
-            kind: "Hex".into(),
             root: Node::String,
             defs: BTreeMap::new(),
         }
@@ -462,28 +453,6 @@ fn excessively_nested_shape_schema_is_rejected() {
     );
     // The same shape is comfortably within the real bound.
     assert!(schema_of::<Nested>().is_ok());
-}
-
-/// A schema generated for a root with no valid publication name carries the
-/// deterministic [`Schema::ANONYMOUS_KIND`] sentinel — and publication
-/// refuses it: two structurally different anonymous roots would otherwise
-/// both publish under one kind, silently losing provenance. `with_kind` is
-/// the required, checked way out. The well-formedness check
-/// (`validate`) still accepts the document, so a document carrying the
-/// sentinel remains readable.
-#[test]
-fn anonymous_kind_is_a_placeholder_publication_refuses() -> anyhow::Result<()> {
-    let doc = schema_of::<[i32; 3]>()?;
-    assert_eq!(doc.kind, Schema::ANONYMOUS_KIND);
-    doc.validate().expect("anonymous is well-formed");
-    assert!(matches!(
-        doc.validate_publishable(),
-        Err(SchemaError::AnonymousKind)
-    ));
-
-    let named = doc.with_kind("triples")?;
-    named.validate_publishable()?;
-    Ok(())
 }
 
 /// The explicit-bound entry point at the default bound reproduces

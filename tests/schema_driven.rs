@@ -119,7 +119,6 @@ fn unknown_variant_errors() -> anyhow::Result<()> {
     let (root, store) = serialize(&Event::Ping)?;
     // A schema for the same enum, but without the `Ping` variant.
     let doc = Schema {
-        kind: "test".into(),
         root: Node::Enum(Default::default()),
         defs: Default::default(),
     };
@@ -209,7 +208,6 @@ fn recursive_tree_reads_via_ref() -> anyhow::Result<()> {
 fn unknown_ref_errors() -> anyhow::Result<()> {
     let (root, store) = serialize(&42i32)?;
     let doc = Schema {
-        kind: "test".into(),
         root: Node::Ref("nope".into()),
         defs: Default::default(),
     };
@@ -292,7 +290,6 @@ fn dynamic_schema_node_shares_the_surrounding_depth_budget() -> anyhow::Result<(
         schema = Node::Optional(Box::new(schema));
     }
     let doc = Schema {
-        kind: "test".into(),
         root: schema,
         defs: Default::default(),
     };
@@ -319,7 +316,6 @@ fn dynamic_delegates_to_heuristic() -> anyhow::Result<()> {
     };
     let (root, store) = serialize(&person)?;
     let doc = Schema {
-        kind: "test".into(),
         root: Node::Dynamic,
         defs: Default::default(),
     };
@@ -349,7 +345,6 @@ fn validate_ok_and_err() -> anyhow::Result<()> {
 
     // A Person tree is not an empty tree, so a Unit schema must reject it.
     let unit = Schema {
-        kind: "test".into(),
         root: Node::Unit,
         defs: Default::default(),
     };

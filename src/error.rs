@@ -290,22 +290,6 @@ pub enum SchemaError {
     /// A smart pointer shape carries no pointee shape to collapse to.
     #[error("smart pointer {0} has no pointee shape")]
     MissingPointee(&'static str),
-    /// The embedded kind name is not a valid Git ref-name segment.
-    #[error("invalid embedded schema kind name {name:?}: {reason}")]
-    InvalidKindName {
-        /// The offending name.
-        name: String,
-        /// The first violated ref-name rule.
-        reason: &'static str,
-    },
-    /// The schema document's embedded kind is the anonymous-root sentinel,
-    /// which must be named with [`Schema::with_kind`](crate::Schema::with_kind)
-    /// before publication.
-    #[error(
-        "schema kind is the anonymous-root sentinel; name it with `Schema::with_kind` before \
-         publication"
-    )]
-    AnonymousKind,
     /// Schema generation exceeded the maximum supported nesting depth.
     #[error("maximum nesting depth ({0}) exceeded while generating schema")]
     MaxDepth(usize),

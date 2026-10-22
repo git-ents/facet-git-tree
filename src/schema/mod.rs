@@ -32,35 +32,18 @@ use facet_value::Value;
 
 /// A complete, self-contained schema document.
 ///
-/// `kind` is the embedded publication/type name. It is data in the schema
-/// document, not inferred from a ref namespace; `root` describes the value
-/// itself; and `defs` holds the bodies of every named user type (struct or
-/// enum) the root reaches, keyed by the deterministic names that
-/// [`Node::Ref`] nodes use. A `BTreeMap` keeps the encoding order-independent
-/// of construction, so equal documents share an object id.
+/// `root` describes the value itself, and `defs` holds the bodies of every
+/// named user type (struct or enum) the root reaches, keyed by the
+/// deterministic names that [`Node::Ref`] nodes use. A `BTreeMap` keeps the
+/// encoding order-independent of construction, so equal documents share an
+/// object id.
 #[derive(Debug, Clone, PartialEq, Facet)]
 pub struct Schema {
-    /// The kind/type name this schema describes.
-    pub kind: String,
     /// The schema of the value itself. Named user types appear as
     /// [`Node::Ref`] nodes resolved through `defs`.
     pub root: Node,
     /// The definition table for named user types, keyed by assigned name.
     pub defs: BTreeMap<String, Node>,
-}
-
-impl Schema {
-    /// The kind embedded in a schema generated for a root with no valid
-    /// publication name (an anonymous tuple or container).
-    ///
-    /// Deterministic so equal shapes still share an object id, but it is a
-    /// placeholder, not a publication name: two structurally different
-    /// anonymous roots both carry it, so publishing one would silently lose
-    /// provenance. [`Schema::validate_publishable`] refuses it at the
-    /// publication boundary, and a publisher must replace it via
-    /// [`Self::with_kind`] — the omission is a checked error, not a silent
-    /// default.
-    pub const ANONYMOUS_KIND: &'static str = "anonymous";
 }
 
 /// A single schema node: the shape of one value in the encoding.
@@ -313,45 +296,6 @@ pub fn schema_of<T: for<'a> Facet<'a>>() -> Result<Schema, SchemaError> {
     Schema::from_shape(<T as Facet>::SHAPE)
 }
 
-/// Validate the ref-segment form used for an embedded kind name without
-/// depending on the storage crate's ref types.
-fn validate_kind_name(name: &str) -> Result<(), SchemaError> {
-    let reason = if name.is_empty() {
-        Some("must not be empty")
-    } else if name.starts_with('.') || name.ends_with('.') {
-        Some("must not begin or end with '.'")
-    } else if name.ends_with(".lock") {
-        Some("must not end with '.lock'")
-    } else if name.contains("..") || name.contains("@{") {
-        Some("must not contain '..' or '@{'")
-    } else if name == "@" {
-        Some("must not be a lone '@'")
-    } else if name.contains('/') {
-        Some("must not contain '/'")
-    } else if name.chars().any(|c| c.is_ascii_control() || c == ' ') {
-        Some("must not contain control characters or spaces")
-    } else if name
-        .chars()
-        .any(|c| matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\'))
-    {
-        Some("must not contain any of ~^:?*[\\\\")
-    } else {
-        None
-    };
-
-    match reason {
-        Some(reason) => Err(SchemaError::InvalidKindName {
-            name: name.to_owned(),
-            reason,
-        }),
-        None => Ok(()),
-    }
-}
-
-fn is_valid_kind_name(name: &str) -> bool {
-    validate_kind_name(name).is_ok()
-}
-
 impl Schema {
     /// Generate the [`Schema`] describing how values of `shape` are encoded.
     ///
@@ -375,67 +319,10 @@ impl Schema {
     pub fn from_shape_with_limit(shape: &'static Shape, limit: usize) -> Result<Self, SchemaError> {
         let mut walker = Walker::new(limit);
         let root = walker.node(shape, 0)?;
-        let kind = shape.type_identifier.to_owned();
-        let kind = if is_valid_kind_name(&kind) {
-            kind
-        } else {
-            // A schema generated for an anonymous/container root has no
-            // publication name to derive. Keep generation deterministic;
-            // [`Schema::validate_publishable`] refuses this sentinel at the
-            // publication boundary, so a storage layer cannot forget to
-            // replace it with its kind name through [`Schema::with_kind`].
-            Self::ANONYMOUS_KIND.to_owned()
-        };
         Ok(Schema {
-            kind,
             root,
             defs: walker.defs,
         })
-    }
-
-    /// Return this schema with its embedded kind name replaced and validated.
-    ///
-    /// `schema_of` supplies a deterministic type-name default. Storage layers
-    /// that publish schemas under a user-selected kind should use this method
-    /// so the ref name and the embedded document name are checked by the same
-    /// rules at the boundary.
-    pub fn with_kind(mut self, kind: impl Into<String>) -> Result<Self, SchemaError> {
-        self.set_kind(kind)?;
-        Ok(self)
-    }
-
-    /// Replace the embedded kind name after validating it.
-    pub fn set_kind(&mut self, kind: impl Into<String>) -> Result<(), SchemaError> {
-        let kind = kind.into();
-        validate_kind_name(&kind)?;
-        self.kind = kind;
-        Ok(())
-    }
-
-    /// Validate the schema document's embedded kind name.
-    ///
-    /// This is the well-formedness check, applied on both write and read: it
-    /// says only that the document's kind is a usable ref-name segment.
-    /// Publishability — refusing the
-    /// [`ANONYMOUS_KIND`](Self::ANONYMOUS_KIND) sentinel, which carries no
-    /// provenance — is the publication boundary's job, not this function's,
-    /// so documents that predate that rule remain readable.
-    pub fn validate(&self) -> Result<(), SchemaError> {
-        validate_kind_name(&self.kind)
-    }
-
-    /// Whether this document is publishable: its kind is a valid ref-name
-    /// segment and not the anonymous-root sentinel.
-    ///
-    /// The anonymous sentinel is a deterministic placeholder for roots with
-    /// no publication name; publishing one would silently lose provenance.
-    /// Name the schema with [`Self::with_kind`] before publication.
-    pub fn validate_publishable(&self) -> Result<(), SchemaError> {
-        self.validate()?;
-        if self.kind == Self::ANONYMOUS_KIND {
-            return Err(SchemaError::AnonymousKind);
-        }
-        Ok(())
     }
 }
 
