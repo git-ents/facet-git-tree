@@ -20,7 +20,6 @@ mod de;
 mod error;
 mod limits;
 mod marker;
-pub mod migration;
 pub mod normal_form;
 mod raw_blob;
 mod raw_tree;
@@ -32,30 +31,21 @@ pub use gix_hash::ObjectId;
 pub use gix_object::Object as GitObject;
 pub use gix_object::tree::{Entry as TreeEntry, EntryKind, EntryMode};
 
-pub use de::{check_key, deserialize, deserialize_into, deserialize_legacy_leaves};
+pub use de::{check_key, deserialize};
 pub use error::{
-    DeserializeError, KeyError, MigrationError, MigrationPinError, NormalFormError, SchemaError,
-    SchemaPinError, SchemaReadError, SchemaWriteError, SerializeError, UniverseError,
+    DeserializeError, KeyError, NormalFormError, SchemaError, SchemaReadError, SchemaWriteError,
+    SerializeError, UniverseError,
 };
-#[cfg(feature = "value")]
-pub use migration::apply::{Edge, apply, apply_chain};
-pub use migration::derive::{Derivation, Divergence, Incomplete, Side};
-pub use migration::pin::MigrationSchema;
-pub use migration::{Change, Constant, Hints, Migration, Op, Target};
 pub use normal_form::{
     IDENTITY_DEF_PREFIX, Key, NormalForm, check_identity_subtrees, check_universe,
     identity_subtrees,
 };
 pub use raw_blob::RawBlob;
 pub use raw_tree::RawTree;
-pub use schema::pin::{EMPTY_TREE, SchemaSchema};
 #[cfg(feature = "value")]
-pub use schema::read::{
-    deserialize_value_with_schema, deserialize_value_with_schema_legacy_leaves,
-    validate_with_schema,
-};
+pub use schema::read::{deserialize_value_with_schema, validate_with_schema};
 #[cfg(feature = "value")]
 pub use schema::write::serialize_value_with_schema;
-pub use schema::{Node, Schema, StructField, VariantKind, schema_and_hints_of, schema_of};
+pub use schema::{Node, Schema, StructField, VariantKind, schema_of};
 pub use ser::{serialize, serialize_into};
 pub use store::ObjectStore;

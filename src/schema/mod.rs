@@ -11,8 +11,6 @@
 #[cfg(feature = "value")]
 pub(crate) mod path;
 
-pub mod codec;
-pub mod pin;
 #[cfg(feature = "value")]
 pub mod read;
 #[cfg(feature = "value")]
@@ -27,7 +25,6 @@ use crate::classify::{ShapeClass, classify};
 use crate::de::collapse_shape;
 use crate::error::SchemaError;
 use crate::limits::MAX_VALUE_DEPTH;
-use crate::migration::{Hints, Target};
 use crate::normal_form::IDENTITY_DEF_PREFIX;
 
 #[cfg(feature = "value")]
@@ -35,61 +32,18 @@ use facet_value::Value;
 
 /// A complete, self-contained schema document.
 ///
-/// `kind` is the embedded publication/type name. It is data in the schema
-/// document, not inferred from a ref namespace; `root` describes the value
-/// itself; and `defs` holds the bodies of every named user type (struct or
-/// enum) the root reaches, keyed by the deterministic names that
-/// [`Node::Ref`] nodes use. A `BTreeMap` keeps the encoding order-independent
-/// of construction, so equal documents share an object id.
-///
-/// This type carries no format-version field: a stored document instead pins
-/// the schema-schema tree it was written against as a `schema` entry spliced
-/// onto the tree at write time — see `crate::schema::pin` — which is a
-/// storage-layer concern, not part of this Rust type.
+/// `root` describes the value itself, and `defs` holds the bodies of every
+/// named user type (struct or enum) the root reaches, keyed by the
+/// deterministic names that [`Node::Ref`] nodes use. A `BTreeMap` keeps the
+/// encoding order-independent of construction, so equal documents share an
+/// object id.
 #[derive(Debug, Clone, PartialEq, Facet)]
 pub struct Schema {
-    /// The kind/type name this schema describes.
-    ///
-    /// [`Self::LEGACY_KIND`] is used only when a reader decodes the historical
-    /// pre-`kind` `{root, defs}` representation. New schemas always carry the
-    /// publication/type name selected by the writer.
-    pub kind: String,
     /// The schema of the value itself. Named user types appear as
     /// [`Node::Ref`] nodes resolved through `defs`.
     pub root: Node,
     /// The definition table for named user types, keyed by assigned name.
     pub defs: BTreeMap<String, Node>,
-}
-
-impl Schema {
-    /// Explicit kind used for a schema decoded from the pre-`kind` format.
-    ///
-    /// This sentinel is valid as a Git ref segment but is not selected by
-    /// [`schema_of`]. Compatibility callers that require a publication name
-    /// should replace it with [`Self::with_kind`] before writing.
-    pub const LEGACY_KIND: &'static str = "legacy-unknown";
-
-    /// The kind embedded in a schema generated for a root with no valid
-    /// publication name (an anonymous tuple or container).
-    ///
-    /// Deterministic so equal shapes still share an object id, but it is a
-    /// placeholder, not a publication name: two structurally different
-    /// anonymous roots both carry it, so publishing one would silently lose
-    /// provenance. [`Schema::validate_publishable`] refuses it at the
-    /// publication boundary, and a publisher must replace it via
-    /// [`Self::with_kind`] — the omission is a checked error, not a silent
-    /// default.
-    pub const ANONYMOUS_KIND: &'static str = "anonymous";
-}
-
-/// The legacy `{root, defs}` wire shape — a schema document without `kind` —
-/// read for compatibility only; new code must use [`Schema`].
-#[derive(Debug, Clone, PartialEq, Facet)]
-pub(crate) struct LegacySchema {
-    /// The schema of the value itself.
-    pub(crate) root: Node,
-    /// The named definition table.
-    pub(crate) defs: BTreeMap<String, Node>,
 }
 
 /// A single schema node: the shape of one value in the encoding.
@@ -218,49 +172,45 @@ pub struct StructField {
 }
 
 /// A [`Node::Struct`] field, or a struct enum variant's plain [`Node`] field:
-/// one implementation lets the read, write, and migration walks handle both
-/// without duplicating themselves.
+/// one implementation lets the read and write walks handle both without
+/// duplicating themselves.
+///
+/// Gated on `value` because those two walks — its only consumers — are.
+#[cfg(feature = "value")]
 pub(crate) trait FieldNode {
     /// The field's own schema.
     fn node(&self) -> &Node;
-}
 
-impl FieldNode for Node {
-    fn node(&self) -> &Node {
-        self
-    }
-}
-
-impl FieldNode for StructField {
-    fn node(&self) -> &Node {
-        &self.node
-    }
-}
-
-#[cfg(feature = "value")]
-pub(crate) trait DefaultFieldNode: FieldNode {
     /// Whether the field's tree entry may be absent.
     fn has_default(&self) -> bool;
 }
 
 #[cfg(feature = "value")]
-impl DefaultFieldNode for Node {
+impl FieldNode for Node {
+    fn node(&self) -> &Node {
+        self
+    }
+
     fn has_default(&self) -> bool {
         false
     }
 }
 
 #[cfg(feature = "value")]
-impl DefaultFieldNode for StructField {
+impl FieldNode for StructField {
+    fn node(&self) -> &Node {
+        &self.node
+    }
+
     fn has_default(&self) -> bool {
         self.has_default
     }
 }
 
 /// Whether `schema` is a scalar node — the classification that decides map
-/// layout identically on the read side ([`Node::Map`]), the schema-directed
-/// writer, and the migration walk. One home: the layout decision must not
-/// be able to drift between the walks that must agree on it.
+/// layout identically on the read side ([`Node::Map`]) and the schema-directed
+/// writer. One home: the layout decision must not be able to drift between
+/// the walks that must agree on it.
 #[cfg(feature = "value")]
 pub(crate) fn is_scalar_schema(schema: &Node) -> bool {
     matches!(
@@ -286,7 +236,7 @@ pub(crate) fn is_scalar_schema(schema: &Node) -> bool {
 }
 
 /// A dynamic value's runtime kind, for mismatch diagnostics in the
-/// schema-directed writer and the migration walk.
+/// schema-directed writer.
 ///
 /// One home with the full arm set, so the value's kind is reported the same
 /// way from every walk that can reject it.
@@ -342,51 +292,6 @@ pub fn schema_of<T: for<'a> Facet<'a>>() -> Result<Schema, SchemaError> {
     Schema::from_shape(<T as Facet>::SHAPE)
 }
 
-/// [`schema_of`] together with the rename hints `T`'s
-/// `#[facet(migrate::renamed_from = …)]` attributes declare.
-pub fn schema_and_hints_of<T: for<'a> Facet<'a>>() -> Result<(Schema, Hints), SchemaError> {
-    Schema::from_shape_with_hints(<T as Facet>::SHAPE)
-}
-
-/// Validate the ref-segment form used for an embedded kind name without
-/// depending on the storage crate's ref types.
-fn validate_kind_name(name: &str) -> Result<(), SchemaError> {
-    let reason = if name.is_empty() {
-        Some("must not be empty")
-    } else if name.starts_with('.') || name.ends_with('.') {
-        Some("must not begin or end with '.'")
-    } else if name.ends_with(".lock") {
-        Some("must not end with '.lock'")
-    } else if name.contains("..") || name.contains("@{") {
-        Some("must not contain '..' or '@{'")
-    } else if name == "@" {
-        Some("must not be a lone '@'")
-    } else if name.contains('/') {
-        Some("must not contain '/'")
-    } else if name.chars().any(|c| c.is_ascii_control() || c == ' ') {
-        Some("must not contain control characters or spaces")
-    } else if name
-        .chars()
-        .any(|c| matches!(c, '~' | '^' | ':' | '?' | '*' | '[' | '\\'))
-    {
-        Some("must not contain any of ~^:?*[\\\\")
-    } else {
-        None
-    };
-
-    match reason {
-        Some(reason) => Err(SchemaError::InvalidKindName {
-            name: name.to_owned(),
-            reason,
-        }),
-        None => Ok(()),
-    }
-}
-
-fn is_valid_kind_name(name: &str) -> bool {
-    validate_kind_name(name).is_ok()
-}
-
 impl Schema {
     /// Generate the [`Schema`] describing how values of `shape` are encoded.
     ///
@@ -397,94 +302,23 @@ impl Schema {
     /// referenced by [`Node::Ref`]; names are assigned deterministically in
     /// pre-order, so the same shape always yields an identical document.
     pub fn from_shape(shape: &'static Shape) -> Result<Self, SchemaError> {
-        Self::from_shape_with_limit(shape, MAX_VALUE_DEPTH).map(|(doc, _hints)| doc)
-    }
-
-    /// [`from_shape`](Self::from_shape), additionally returning the rename
-    /// [`Hints`] collected from `#[facet(migrate::renamed_from = …)]`
-    /// attributes on named struct fields and struct enum variant fields.
-    pub fn from_shape_with_hints(shape: &'static Shape) -> Result<(Self, Hints), SchemaError> {
         Self::from_shape_with_limit(shape, MAX_VALUE_DEPTH)
     }
 
     /// [`from_shape`](Self::from_shape) with a custom nesting bound in place
-    /// of [`MAX_VALUE_DEPTH`], also returning the collected [`Hints`].
+    /// of [`MAX_VALUE_DEPTH`].
     ///
     /// Exists so tests can exercise the depth guard without a pathologically
     /// deep type (whose `SHAPE` evaluation is prohibitively expensive to
     /// compile); not part of the public API.
     #[doc(hidden)]
-    pub fn from_shape_with_limit(
-        shape: &'static Shape,
-        limit: usize,
-    ) -> Result<(Self, Hints), SchemaError> {
+    pub fn from_shape_with_limit(shape: &'static Shape, limit: usize) -> Result<Self, SchemaError> {
         let mut walker = Walker::new(limit);
         let root = walker.node(shape, 0)?;
-        let kind = shape.type_identifier.to_owned();
-        let kind = if is_valid_kind_name(&kind) {
-            kind
-        } else {
-            // A schema generated for an anonymous/container root has no
-            // publication name to derive. Keep generation deterministic;
-            // [`Schema::validate_publishable`] refuses this sentinel at the
-            // publication boundary, so a storage layer cannot forget to
-            // replace it with its kind name through [`Schema::with_kind`].
-            Self::ANONYMOUS_KIND.to_owned()
-        };
-        Ok((
-            Schema {
-                kind,
-                root,
-                defs: walker.defs,
-            },
-            walker.hints,
-        ))
-    }
-
-    /// Return this schema with its embedded kind name replaced and validated.
-    ///
-    /// `schema_of` supplies a deterministic type-name default. Storage layers
-    /// that publish schemas under a user-selected kind should use this method
-    /// so the ref name and the embedded document name are checked by the same
-    /// rules at the boundary.
-    pub fn with_kind(mut self, kind: impl Into<String>) -> Result<Self, SchemaError> {
-        self.set_kind(kind)?;
-        Ok(self)
-    }
-
-    /// Replace the embedded kind name after validating it.
-    pub fn set_kind(&mut self, kind: impl Into<String>) -> Result<(), SchemaError> {
-        let kind = kind.into();
-        validate_kind_name(&kind)?;
-        self.kind = kind;
-        Ok(())
-    }
-
-    /// Validate the schema document's embedded kind name.
-    ///
-    /// This is the well-formedness check, applied on both write and read: it
-    /// says only that the document's kind is a usable ref-name segment.
-    /// Publishability — refusing the
-    /// [`ANONYMOUS_KIND`](Self::ANONYMOUS_KIND) sentinel, which carries no
-    /// provenance — is the publication boundary's job
-    /// ([`write_pinned`](Self::write_pinned)), not this function's, so
-    /// documents that predate that rule remain readable.
-    pub fn validate(&self) -> Result<(), SchemaError> {
-        validate_kind_name(&self.kind)
-    }
-
-    /// Whether this document is publishable: its kind is a valid ref-name
-    /// segment and not the anonymous-root sentinel.
-    ///
-    /// The anonymous sentinel is a deterministic placeholder for roots with
-    /// no publication name; publishing one would silently lose provenance.
-    /// Name the schema with [`Self::with_kind`] before publication.
-    pub fn validate_publishable(&self) -> Result<(), SchemaError> {
-        self.validate()?;
-        if self.kind == Self::ANONYMOUS_KIND {
-            return Err(SchemaError::AnonymousKind);
-        }
-        Ok(())
+        Ok(Schema {
+            root,
+            defs: walker.defs,
+        })
     }
 }
 
@@ -500,9 +334,6 @@ struct Walker {
     claimed: HashMap<&'static str, usize>,
     /// The nesting bound `node` enforces — [`MAX_VALUE_DEPTH`] outside of tests.
     limit: usize,
-    /// Rename hints collected from named-field structs' and struct enum
-    /// variants' fields as they are visited.
-    hints: Hints,
 }
 
 impl Walker {
@@ -512,7 +343,6 @@ impl Walker {
             names: HashMap::new(),
             claimed: HashMap::new(),
             limit,
-            hints: Hints::default(),
         }
     }
 
@@ -608,17 +438,14 @@ impl Walker {
             if matches!(st.kind, facet::StructKind::Tuple) {
                 return Ok(Node::Tuple(self.field_schemas(st.fields, depth + 1)?));
             }
-            return self.define(shape, |walker, name| match st.kind {
+            return self.define(shape, |walker| match st.kind {
                 facet::StructKind::Unit => Ok(Node::Unit),
                 facet::StructKind::TupleStruct => {
                     Ok(Node::Tuple(walker.field_schemas(st.fields, depth + 1)?))
                 }
-                _ => {
-                    walker.record_rename_hints(&Target::Def(name.to_owned()), st.fields);
-                    Ok(Node::Struct(
-                        walker.struct_field_schemas(st.fields, depth + 1)?,
-                    ))
-                }
+                _ => Ok(Node::Struct(
+                    walker.struct_field_schemas(st.fields, depth + 1)?,
+                )),
             });
         }
 
@@ -653,7 +480,7 @@ impl Walker {
         if matches!(classify(shape), ShapeClass::Enum)
             && let facet::Type::User(facet::UserType::Enum(et)) = shape.ty
         {
-            return self.define(shape, |walker, def_name| {
+            return self.define(shape, |walker| {
                 let mut variants = BTreeMap::new();
                 for variant in et.variants {
                     let positional = matches!(variant.data.kind, facet::StructKind::TupleStruct);
@@ -667,13 +494,6 @@ impl Walker {
                     } else if positional {
                         VariantKind::Tuple(walker.field_schemas(variant.data.fields, depth + 1)?)
                     } else {
-                        walker.record_rename_hints(
-                            &Target::Variant {
-                                def: def_name.to_owned(),
-                                variant: variant.name.to_owned(),
-                            },
-                            variant.data.fields,
-                        );
                         VariantKind::Struct(
                             walker.named_field_schemas(variant.data.fields, depth + 1)?,
                         )
@@ -744,12 +564,11 @@ impl Walker {
     /// (`struct Node { children: Vec<Node> }`) resolves its own occurrences to
     /// the already-assigned `Ref` instead of recursing forever. Distinct types
     /// sharing an identifier get `_2`, `_3`, … suffixes in pre-order, keeping
-    /// name assignment deterministic. `body` receives the assigned name, so it
-    /// can address its own fields as migration [`Target`]s.
+    /// name assignment deterministic.
     fn define(
         &mut self,
         shape: &'static Shape,
-        body: impl FnOnce(&mut Self, &str) -> Result<Node, SchemaError>,
+        body: impl FnOnce(&mut Self) -> Result<Node, SchemaError>,
     ) -> Result<Node, SchemaError> {
         if let Some(name) = self.names.get(&shape.id) {
             return Ok(Node::Ref(name.clone()));
@@ -762,23 +581,9 @@ impl Walker {
             format!("{}_{claimed}", shape.type_identifier)
         };
         self.names.insert(shape.id, name.clone());
-        let schema = body(self, &name)?;
+        let schema = body(self)?;
         self.defs.insert(name.clone(), schema);
         Ok(Node::Ref(name))
-    }
-
-    /// Record each of `fields`' `#[facet(migrate::renamed_from = …)]` hint,
-    /// if any, against `target`.
-    ///
-    /// Only meaningful for named fields (named-field structs and struct enum
-    /// variants); positional fields have no name for a rename to target, so
-    /// callers must not invoke this for them.
-    fn record_rename_hints(&mut self, target: &Target, fields: &'static [facet::Field]) {
-        for field in fields {
-            if let Some(from) = attr::renamed_from(field) {
-                self.hints.record_rename(target.clone(), from, field.name);
-            }
-        }
     }
 }
 

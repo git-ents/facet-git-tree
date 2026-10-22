@@ -20,7 +20,6 @@
 use facet::Facet;
 use facet_git_tree::{
     DeserializeError, EntryKind, EntryMode, ObjectId, ObjectStore, TreeEntry, deserialize,
-    deserialize_legacy_leaves,
 };
 use gix_object::bstr::BString;
 use gix_object::{Kind, Tree, Write};
@@ -169,9 +168,6 @@ fn literal_empty_tree_is_not_a_valid_option() {
         matches!(result, Err(DeserializeError::MalformedOption { found: 0 })),
         "a literal empty tree must not decode as None, got {result:?}"
     );
-
-    let legacy: Option<i32> = deserialize_legacy_leaves(&tree_id, &store).unwrap();
-    assert_eq!(legacy, None);
 }
 
 /// A foreign tree tagging a unit variant (`Shape::Unit`) with a tree

@@ -115,29 +115,3 @@ fn equal_values_share_a_root_oid() -> anyhow::Result<()> {
     assert_eq!(root_a, root_a2);
     Ok(())
 }
-
-// --- content addressing: dynamic floats vs. typed (`value` feature) ---
-
-/// A fractional dynamic float shares its root OID with the equivalent typed
-/// `f64` — content addressing holds across the typed/dynamic boundary for an
-/// ordinary (in-range) float, not just for the large-magnitude case below.
-#[cfg(feature = "value")]
-#[test]
-fn fractional_float_oid_matches_typed() -> anyhow::Result<()> {
-    let (dyn_root, _) = serialize(&Value::from(3.5_f64))?;
-    let (typed_root, _) = serialize(&3.5_f64)?;
-    assert_eq!(dyn_root, typed_root);
-    Ok(())
-}
-
-/// A dynamic float beyond `u128::MAX` also shares its root OID with the
-/// equivalent typed `f64`: the `value`-feature fast path renders it as a
-/// float rather than an ambiguous whole value.
-#[cfg(feature = "value")]
-#[test]
-fn large_float_oid_matches_typed() -> anyhow::Result<()> {
-    let (dyn_root, _) = serialize(&Value::from(1e40_f64))?;
-    let (typed_root, _) = serialize(&1e40_f64)?;
-    assert_eq!(dyn_root, typed_root);
-    Ok(())
-}

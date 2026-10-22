@@ -203,9 +203,7 @@ pub enum DeserializeError {
     /// A tree entry has no counterpart field in the target type.
     ///
     /// Without this check a foreign tree sharing even one field name would
-    /// read "successfully" while dropping its remaining entries. Schema
-    /// evolution (renames, additions, removals) goes through
-    /// `crate::migration`.
+    /// read "successfully" while dropping its remaining entries.
     #[error("tree entry {entry:?} has no counterpart in the target type")]
     UnexpectedEntry {
         /// The entry name found in the tree.
@@ -292,122 +290,9 @@ pub enum SchemaError {
     /// A smart pointer shape carries no pointee shape to collapse to.
     #[error("smart pointer {0} has no pointee shape")]
     MissingPointee(&'static str),
-    /// The embedded kind name is not a valid Git ref-name segment.
-    #[error("invalid embedded schema kind name {name:?}: {reason}")]
-    InvalidKindName {
-        /// The offending name.
-        name: String,
-        /// The first violated ref-name rule.
-        reason: &'static str,
-    },
-    /// The schema document's embedded kind is the anonymous-root sentinel,
-    /// which must be named with [`Schema::with_kind`](crate::Schema::with_kind)
-    /// before publication.
-    #[error(
-        "schema kind is the anonymous-root sentinel; name it with `Schema::with_kind` before \
-         publication"
-    )]
-    AnonymousKind,
     /// Schema generation exceeded the maximum supported nesting depth.
     #[error("maximum nesting depth ({0}) exceeded while generating schema")]
     MaxDepth(usize),
-}
-
-/// An error produced by the schema-schema pin.
-#[derive(Debug, thiserror::Error)]
-pub enum SchemaPinError {
-    /// The document pins a schema-schema generation this build does not speak.
-    ///
-    /// An oid pin gives equality only, never ordering, so this cannot
-    /// distinguish older from newer — only unrecognized.
-    #[error(
-        "schema tree {tree} was written against schema-schema {pinned}, which this build does \
-         not recognize; it speaks {}",
-        crate::schema::pin::known_generations()
-    )]
-    Unrecognized {
-        /// The schema tree carrying the unrecognized pin.
-        tree: ObjectId,
-        /// The pinned schema-schema tree id.
-        pinned: ObjectId,
-    },
-    /// The document carries no `schema` pin entry and is not itself a known
-    /// schema-schema root.
-    #[error("schema tree {0} carries no schema-schema pin and is not itself a known root")]
-    Unpinned(ObjectId),
-    /// Writing the document or its pinned schema-schema tree failed.
-    #[error(transparent)]
-    Serialize(#[from] SerializeError),
-    /// The embedded kind name failed Git ref-segment validation.
-    #[error(transparent)]
-    Schema(#[from] SchemaError),
-    /// A pre-`kind` generation tree lacks the exact historical representation
-    /// that reader expects.
-    #[error("legacy schema tree {tree} has invalid pre-kind representation: {reason}")]
-    LegacyFormat {
-        /// The schema tree that failed the compatibility check.
-        tree: ObjectId,
-        /// The violated compatibility invariant.
-        reason: &'static str,
-    },
-    /// Reading the pin entry or the document itself failed.
-    #[error(transparent)]
-    Deserialize(#[from] DeserializeError),
-    /// The canonical schema document did not survive the fixed-point check.
-    #[error("schema fixed point failed during {stage}: expected {expected}, observed {observed}")]
-    FixedPoint {
-        /// The operation that produced the unexpected digest.
-        stage: &'static str,
-        /// The compile-time or canonical expected digest.
-        expected: ObjectId,
-        /// The digest produced by this build.
-        observed: ObjectId,
-    },
-    /// The canonical schema document could not be decoded during bootstrap.
-    #[error("schema fixed point decode failed: expected {expected}, observed {observed}: {source}")]
-    FixedPointDecode {
-        /// The compile-time canonical digest expected by this build.
-        expected: ObjectId,
-        /// The tree presented to the normal schema reader.
-        observed: ObjectId,
-        /// The underlying decode failure.
-        #[source]
-        source: DeserializeError,
-    },
-}
-
-/// An error produced by the migration-schema pin.
-///
-/// Separate from [`SchemaPinError`] because a build may speak one generation
-/// of `Schema` and a different generation of `Migration`.
-#[derive(Debug, thiserror::Error)]
-pub enum MigrationPinError {
-    /// The migration pins a migration-schema generation this build does not
-    /// speak.
-    ///
-    /// Refusing here stops an unrecognized operator from being silently
-    /// skipped, which would produce a value that looks conformant and is not.
-    #[error(
-        "migration tree {tree} was written against migration-schema {pinned}, which this build \
-         does not recognize; it speaks {}",
-        crate::migration::pin::known_generations()
-    )]
-    Unrecognized {
-        /// The migration tree carrying the unrecognized pin.
-        tree: ObjectId,
-        /// The pinned migration-schema tree id.
-        pinned: ObjectId,
-    },
-    /// The migration carries no `schema` pin entry and is not itself a known
-    /// migration-schema root.
-    #[error("migration tree {0} carries no migration-schema pin and is not itself a known root")]
-    Unpinned(ObjectId),
-    /// Writing the migration or its pinned migration-schema tree failed.
-    #[error(transparent)]
-    Serialize(#[from] SerializeError),
-    /// Reading the pin entry or the migration itself failed.
-    #[error(transparent)]
-    Deserialize(#[from] DeserializeError),
 }
 
 /// An error produced by schema-driven deserialization (`value` feature).
@@ -580,55 +465,6 @@ pub enum SchemaWriteError {
     /// Every hop, including `Ref` resolution, counts against the limit, so a
     /// `Ref`-to-`Ref` cycle fails here rather than recursing unboundedly.
     #[error("at {path}: maximum nesting depth ({depth}) exceeded while serializing")]
-    MaxDepth {
-        /// The location reached when the limit tripped.
-        path: String,
-        /// The limit that was exceeded.
-        depth: usize,
-    },
-}
-
-/// An error produced by read-time migration application (`value` feature).
-///
-/// Walks an already-read `facet_value::Value` guided by the source `Schema`;
-/// every variant names the `path` where the value diverged from that document.
-#[derive(Debug, thiserror::Error)]
-pub enum MigrationError {
-    /// The value does not match the source schema at `path`.
-    #[error("at {path}: expected {expected}, found {found}")]
-    Mismatch {
-        /// The location within the value.
-        path: String,
-        /// The kind the schema node accepts.
-        expected: &'static str,
-        /// The value's actual runtime kind.
-        found: &'static str,
-    },
-    /// A fixed-length sequence's element count does not match the source
-    /// schema.
-    ///
-    /// Refused rather than truncated: an upcast that silently dropped
-    /// elements would produce a value conforming to the target schema that
-    /// is not the stored value.
-    #[error("at {path}: expected {expected} elements, found {found}")]
-    LengthMismatch {
-        /// The location within the value.
-        path: String,
-        /// The element count the source schema requires.
-        expected: usize,
-        /// The element count the value holds.
-        found: usize,
-    },
-    /// A `Node::Ref` names a definition absent from the source document.
-    #[error("at {path}: schema ref {name:?} has no definition in the source document")]
-    UnknownRef {
-        /// The location within the value.
-        path: String,
-        /// The undefined reference name.
-        name: String,
-    },
-    /// Recursion exceeded the maximum supported nesting depth.
-    #[error("at {path}: maximum nesting depth ({depth}) exceeded while applying a migration")]
     MaxDepth {
         /// The location reached when the limit tripped.
         path: String,

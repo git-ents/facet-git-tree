@@ -1,7 +1,4 @@
 //! Table-driven tests for [`check_key`], the write-side tree-entry-name validator.
-//!
-//! Runnable today: `check_key` is independent of the not-yet-implemented
-//! `serialize` that is expected to call it.
 
 use std::collections::HashMap;
 
@@ -81,65 +78,22 @@ fn rejects_keys_with_nul(#[case] key: &str) {
     );
 }
 
-// --- integration: serialize must apply `check_key` to dynamic (map) keys ---
+// --- integration: `serialize` must apply `check_key` to typed map keys ---
 
-/// `serialize` rejects a map key containing the path separator, surfacing it as
-/// [`SerializeError::Key`] rather than emitting an invalid tree entry name.
-#[test]
-fn serialize_rejects_map_key_with_slash() {
-    let mut table = HashMap::new();
-    table.insert("a/b".to_string(), "v".to_string());
-    assert!(
-        matches!(
-            serialize(&WithMap { table }),
-            Err(SerializeError::Key(KeyError { key })) if key == "a/b"
-        ),
-        "a map key with '/' must be rejected by serialize"
-    );
-}
-
-/// `serialize` also rejects a map key equal to the reserved marker name: were
-/// it allowed, a map with the single entry `{"_": v}` would be
-/// indistinguishable on read from an empty map.
-#[test]
-fn serialize_rejects_map_key_equal_to_marker() {
-    let mut table = HashMap::new();
-    table.insert("_".to_string(), "v".to_string());
-    assert!(
-        matches!(
-            serialize(&WithMap { table }),
-            Err(SerializeError::Key(KeyError { key })) if key == "_"
-        ),
-        "a map key equal to the reserved marker must be rejected by serialize"
-    );
-}
-
-/// `serialize` rejects a NUL-bearing map key as [`SerializeError::Key`] — the
-/// [`KeyError`] from [`check_key`] — rather than letting the name through to
-/// the object backend, which could only refuse it as an opaque encode-time
-/// error after the key's provenance was lost.
-#[test]
-fn serialize_rejects_map_key_with_nul() {
-    let mut table = HashMap::new();
-    table.insert("a\0b".to_string(), "v".to_string());
-    assert!(
-        matches!(
-            serialize(&WithMap { table }),
-            Err(SerializeError::Key(KeyError { key })) if key == "a\0b"
-        ),
-        "a map key containing NUL must be rejected by serialize"
-    );
-}
-
-/// `serialize` rejects the empty key and the `.`/`..` names: canonical git
-/// refuses to create trees holding them, so a scalar map keyed by either
-/// must fail at the codec boundary instead of producing an object
-/// `git fsck` would call malformed.
+/// The typed map path — `serialize` over a `HashMap` field — runs every key
+/// through `check_key`, surfacing a refusal as [`SerializeError::Key`]. This
+/// is the only test that crosses `serialize` into that call site; without it
+/// the check could be dropped from the encoder and every remaining test
+/// (direct `check_key` unit tests, or the dynamic path exercised in
+/// `value_serialize`) would still pass.
 #[rstest]
-#[case("")]
-#[case(".")]
-#[case("..")]
-fn serialize_rejects_names_canonical_git_refuses(#[case] key: &str) {
+#[case("a/b")] // path separator
+#[case("_")] // the reserved presence-marker name
+#[case("a\0b")] // NUL terminates a tree entry's name on disk
+#[case("")] // empty filename
+#[case(".")] // fsck's hasDot
+#[case("..")] // fsck's hasDotdot
+fn serialize_rejects_invalid_typed_map_keys(#[case] key: &str) {
     let mut table = HashMap::new();
     table.insert(key.to_string(), "v".to_string());
     assert!(
@@ -147,6 +101,6 @@ fn serialize_rejects_names_canonical_git_refuses(#[case] key: &str) {
             serialize(&WithMap { table }),
             Err(SerializeError::Key(KeyError { key: k })) if k == key
         ),
-        "map key {key:?} must be rejected by serialize"
+        "typed map key {key:?} must be rejected by serialize"
     );
 }

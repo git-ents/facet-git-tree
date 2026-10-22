@@ -213,7 +213,6 @@ fn raw_tree_reference_matches_typed() {
 #[test]
 fn dynamic_node_matches_plain_serialize() {
     let doc = Schema {
-        kind: "test".into(),
         root: Node::Dynamic,
         defs: Default::default(),
     };
@@ -305,7 +304,6 @@ fn float_into_integer_field_is_rejected() {
 fn integer_too_large_for_f64_is_refused() {
     // 2^53 + 1 has no exact f64 representation.
     let doc = Schema {
-        kind: "test".into(),
         root: Node::F64,
         defs: Default::default(),
     };
@@ -384,7 +382,6 @@ fn multi_member_enum_object_is_rejected() {
 #[test]
 fn unknown_ref_is_rejected() {
     let doc = Schema {
-        kind: "test".into(),
         root: Node::Ref("missing".into()),
         defs: Default::default(),
     };
@@ -411,7 +408,6 @@ fn priority_field_change_is_a_visible_blob_diff() {
         ("High".to_owned(), VariantKind::Unit),
     ]);
     let doc = Schema {
-        kind: "test".into(),
         root: Node::Struct(one_field("priority", Node::Enum(priority_variants))),
         defs: Default::default(),
     };
@@ -465,7 +461,6 @@ fn priority_field_change_is_a_visible_blob_diff() {
 #[test]
 fn empty_tags_list_is_visible_as_a_marker_entry() {
     let doc = Schema {
-        kind: "test".into(),
         root: Node::Struct(one_field("tags", Node::List(Box::new(Node::String)))),
         defs: Default::default(),
     };
@@ -493,7 +488,6 @@ fn ref_cycle_hits_the_depth_bound() {
     let mut defs = std::collections::BTreeMap::new();
     defs.insert("loop".to_string(), Node::Ref("loop".into()));
     let doc = Schema {
-        kind: "test".into(),
         root: Node::Ref("loop".into()),
         defs,
     };
@@ -518,7 +512,6 @@ fn ref_cycle_hits_the_depth_bound() {
 #[test]
 fn an_empty_tuple_is_not_markered_and_reads_back() {
     let doc = Schema {
-        kind: "test".into(),
         root: Node::Struct(one_field("nothing", Node::Tuple(vec![]))),
         defs: Default::default(),
     };
@@ -558,7 +551,6 @@ fn zero_field_tuple_struct_matches_typed() {
 #[test]
 fn a_schema_field_named_as_the_presence_marker_is_rejected() {
     let doc = Schema {
-        kind: "test".into(),
         root: Node::Struct(one_field("_", Node::String)),
         defs: Default::default(),
     };

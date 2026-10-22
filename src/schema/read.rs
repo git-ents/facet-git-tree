@@ -12,12 +12,12 @@ use facet_value::{VArray, VNumber, VObject, Value};
 use gix_object::{Find, Kind};
 
 use crate::de::{
-    DecodeMode, deserialize_at_depth_mode, extract_enum_entry_mode, find_blob_bytes_mode,
-    find_object, find_tree_entries, map_pair_entries, sort_by_ordinal, validate_option_entries,
+    deserialize_at_depth, extract_enum_entry, find_blob_bytes, find_object, find_tree_entries,
+    map_pair_entries, sort_by_ordinal, validate_option_entries,
 };
 use crate::error::{DeserializeError, SchemaReadError};
 use crate::limits::MAX_VALUE_DEPTH;
-use crate::schema::{DefaultFieldNode, Node, Schema, VariantKind, is_scalar_schema};
+use crate::schema::{FieldNode, Node, Schema, VariantKind, is_scalar_schema};
 use crate::{EntryKind, ObjectId};
 
 /// Deserialize the tree at `root` into a full-fidelity [`Value`], guided by
@@ -50,28 +50,7 @@ pub fn deserialize_value_with_schema<F: Find + ?Sized>(
     doc: &Schema,
     store: &F,
 ) -> Result<Value, SchemaReadError> {
-    deserialize_value_with_schema_mode(root, doc, store, DecodeMode::Strict)
-}
-
-/// Decode a schema-directed value while accepting pre-newline leaf blobs.
-///
-/// This compatibility entry point is opt-in; ordinary schema-directed reads
-/// retain their strict leaf framing checks.
-pub fn deserialize_value_with_schema_legacy_leaves<F: Find + ?Sized>(
-    root: &ObjectId,
-    doc: &Schema,
-    store: &F,
-) -> Result<Value, SchemaReadError> {
-    deserialize_value_with_schema_mode(root, doc, store, DecodeMode::LegacyLeaves)
-}
-
-fn deserialize_value_with_schema_mode<F: Find + ?Sized>(
-    root: &ObjectId,
-    doc: &Schema,
-    store: &F,
-    mode: DecodeMode,
-) -> Result<Value, SchemaReadError> {
-    read_node(root, &doc.root, doc, store, 0, mode)
+    read_node(root, &doc.root, doc, store, 0)
 }
 
 /// Check that the tree at `root` conforms to `doc` without keeping the value.
@@ -99,7 +78,6 @@ fn read_node<F: Find + ?Sized>(
     doc: &Schema,
     store: &F,
     depth: usize,
-    mode: DecodeMode,
 ) -> Result<Value, SchemaReadError> {
     if depth > MAX_VALUE_DEPTH {
         return Err(DeserializeError::MaxDepth(MAX_VALUE_DEPTH).into());
@@ -109,61 +87,61 @@ fn read_node<F: Find + ?Sized>(
             expect_empty_tree(oid, store)?;
             Ok(Value::NULL)
         }
-        Node::Bool => match blob_text(oid, store, mode)?.as_str() {
+        Node::Bool => match blob_text(oid, store)?.as_str() {
             "true" => Ok(Value::from(true)),
             "false" => Ok(Value::from(false)),
             other => Err(invalid_scalar("Bool", other)),
         },
         Node::Char => {
-            let text = blob_text(oid, store, mode)?;
+            let text = blob_text(oid, store)?;
             let mut chars = text.chars();
             match (chars.next(), chars.next()) {
                 (Some(c), None) => Ok(Value::from(c)),
                 _ => Err(invalid_scalar("Char", &text)),
             }
         }
-        Node::String => Ok(Value::from(blob_text(oid, store, mode)?)),
-        Node::I8 => int_value::<i8, F>(oid, store, "I8", mode),
-        Node::I16 => int_value::<i16, F>(oid, store, "I16", mode),
-        Node::I32 => int_value::<i32, F>(oid, store, "I32", mode),
-        Node::I64 => int_value::<i64, F>(oid, store, "I64", mode),
-        Node::I128 => int_value::<i128, F>(oid, store, "I128", mode),
+        Node::String => Ok(Value::from(blob_text(oid, store)?)),
+        Node::I8 => int_value::<i8, F>(oid, store, "I8"),
+        Node::I16 => int_value::<i16, F>(oid, store, "I16"),
+        Node::I32 => int_value::<i32, F>(oid, store, "I32"),
+        Node::I64 => int_value::<i64, F>(oid, store, "I64"),
+        Node::I128 => int_value::<i128, F>(oid, store, "I128"),
         // `isize`/`usize` are spec'd i64/u64-shaped, so a read parses into the
         // fixed width and widens: a 64-bit-written document reads identically
         // on a 32-bit target instead of failing a platform-width parse.
         Node::ISize => {
-            let text = blob_text(oid, store, mode)?;
+            let text = blob_text(oid, store)?;
             let v: i64 = text.parse().map_err(|_| invalid_scalar("ISize", &text))?;
             Ok(VNumber::from_i128(v as i128).into())
         }
-        Node::U8 => uint_value::<u8, F>(oid, store, "U8", mode),
-        Node::U16 => uint_value::<u16, F>(oid, store, "U16", mode),
-        Node::U32 => uint_value::<u32, F>(oid, store, "U32", mode),
-        Node::U64 => uint_value::<u64, F>(oid, store, "U64", mode),
-        Node::U128 => uint_value::<u128, F>(oid, store, "U128", mode),
+        Node::U8 => uint_value::<u8, F>(oid, store, "U8"),
+        Node::U16 => uint_value::<u16, F>(oid, store, "U16"),
+        Node::U32 => uint_value::<u32, F>(oid, store, "U32"),
+        Node::U64 => uint_value::<u64, F>(oid, store, "U64"),
+        Node::U128 => uint_value::<u128, F>(oid, store, "U128"),
         Node::USize => {
-            let text = blob_text(oid, store, mode)?;
+            let text = blob_text(oid, store)?;
             let v: u64 = text.parse().map_err(|_| invalid_scalar("USize", &text))?;
             Ok(VNumber::from_u128(v as u128).into())
         }
         Node::F32 => {
-            let text = blob_text(oid, store, mode)?;
+            let text = blob_text(oid, store)?;
             let v: f32 = text.parse().map_err(|_| invalid_scalar("F32", &text))?;
             Ok(Value::from(v))
         }
         Node::F64 => {
-            let text = blob_text(oid, store, mode)?;
+            let text = blob_text(oid, store)?;
             let v: f64 = text.parse().map_err(|_| invalid_scalar("F64", &text))?;
             Ok(Value::from(v))
         }
-        Node::Bytes => Ok(Value::from(find_blob_bytes_mode(oid, store, mode)?)),
+        Node::Bytes => Ok(Value::from(find_blob_bytes(oid, store)?)),
         Node::Struct(fields) => {
             let entries = find_tree_entries(oid, store)?;
-            Ok(read_struct(&entries, fields, doc, store, depth, mode)?.into())
+            Ok(read_struct(&entries, fields, doc, store, depth)?.into())
         }
         Node::Tuple(elems) => {
             let entries = find_tree_entries(oid, store)?;
-            Ok(read_tuple(entries, elems, doc, store, depth, mode)?.into())
+            Ok(read_tuple(entries, elems, doc, store, depth)?.into())
         }
         Node::List(elem) => {
             let mut entries = find_tree_entries(oid, store)?;
@@ -173,7 +151,7 @@ fn read_node<F: Find + ?Sized>(
             sort_by_ordinal(&mut entries)?;
             let mut array = VArray::new();
             for (_, child_oid, _) in entries {
-                array.push(read_node(&child_oid, elem, doc, store, depth + 1, mode)?);
+                array.push(read_node(&child_oid, elem, doc, store, depth + 1)?);
             }
             Ok(array.into())
         }
@@ -191,7 +169,7 @@ fn read_node<F: Find + ?Sized>(
             sort_by_ordinal(&mut entries)?;
             let mut array = VArray::new();
             for (_, child_oid, _) in entries {
-                array.push(read_node(&child_oid, elem, doc, store, depth + 1, mode)?);
+                array.push(read_node(&child_oid, elem, doc, store, depth + 1)?);
             }
             Ok(array.into())
         }
@@ -208,7 +186,7 @@ fn read_node<F: Find + ?Sized>(
             if is_scalar_schema(key) {
                 let mut object = VObject::new();
                 for (name, child_oid, _) in entries {
-                    let v = read_node(&child_oid, value, doc, store, depth + 1, mode)?;
+                    let v = read_node(&child_oid, value, doc, store, depth + 1)?;
                     object.insert(name, v);
                 }
                 return Ok(object.into());
@@ -222,21 +200,21 @@ fn read_node<F: Find + ?Sized>(
                     return Err(DeserializeError::DuplicateKey { oid: k_oid }.into());
                 }
                 let mut object = VObject::new();
-                object.insert("k", read_node(&k_oid, key, doc, store, depth + 1, mode)?);
-                object.insert("v", read_node(&v_oid, value, doc, store, depth + 1, mode)?);
+                object.insert("k", read_node(&k_oid, key, doc, store, depth + 1)?);
+                object.insert("v", read_node(&v_oid, value, doc, store, depth + 1)?);
                 array.push(object);
             }
             Ok(array.into())
         }
         Node::Optional(inner) => {
             let entries = find_tree_entries(oid, store)?;
-            let Some(inner_oid) = validate_option_entries(&entries, mode)? else {
+            let Some(inner_oid) = validate_option_entries(&entries)? else {
                 return Ok(Value::NULL);
             };
-            read_node(&inner_oid, inner, doc, store, depth + 1, mode)
+            read_node(&inner_oid, inner, doc, store, depth + 1)
         }
         Node::Enum(variants) => {
-            let (variant_name, inner_oid) = extract_enum_entry_mode(oid, store, mode)?;
+            let (variant_name, inner_oid) = extract_enum_entry(oid, store)?;
             let Some(kind) = variants.get(&variant_name) else {
                 return Err(SchemaReadError::UnknownVariant {
                     variant: variant_name,
@@ -254,15 +232,15 @@ fn read_node<F: Find + ?Sized>(
                     .into());
                 }
                 (VariantKind::Newtype(inner), Some(inner_oid)) => {
-                    read_node(&inner_oid, inner, doc, store, depth + 1, mode)?
+                    read_node(&inner_oid, inner, doc, store, depth + 1)?
                 }
                 (VariantKind::Tuple(elems), Some(inner_oid)) => {
                     let inner_entries = find_tree_entries(&inner_oid, store)?;
-                    read_tuple(inner_entries, elems, doc, store, depth + 1, mode)?.into()
+                    read_tuple(inner_entries, elems, doc, store, depth + 1)?.into()
                 }
                 (VariantKind::Struct(fields), Some(inner_oid)) => {
                     let inner_entries = find_tree_entries(&inner_oid, store)?;
-                    read_struct(&inner_entries, fields, doc, store, depth + 1, mode)?.into()
+                    read_struct(&inner_entries, fields, doc, store, depth + 1)?.into()
                 }
                 (_, None) => {
                     return Err(DeserializeError::VariantPayloadIsBlob {
@@ -287,38 +265,37 @@ fn read_node<F: Find + ?Sized>(
         }
         // A dynamic node carries no schema information, so the bare
         // heuristic read applies here, routed through
-        // `deserialize_at_depth_mode` (not the public `deserialize`) so the
+        // `deserialize_at_depth` (not the public `deserialize`) so the
         // typed read keeps spending from this walk's depth budget instead
         // of resetting it.
-        Node::Dynamic => Ok(deserialize_at_depth_mode::<Value>(oid, store, depth, mode)?),
+        Node::Dynamic => Ok(deserialize_at_depth::<Value>(oid, store, depth)?),
         Node::Ref(name) => {
             let Some(target) = doc.defs.get(name) else {
                 return Err(SchemaReadError::UnknownRef(name.clone()));
             };
-            read_node(oid, target, doc, store, depth + 1, mode)
+            read_node(oid, target, doc, store, depth + 1)
         }
     }
 }
 
 /// Read a name-keyed tree as a [`VObject`], requiring the tree's entries and
 /// the schema's fields to correspond exactly — except a field whose
-/// [`DefaultFieldNode::has_default`] is set, whose entry may be absent (the
+/// [`FieldNode::has_default`] is set, whose entry may be absent (the
 /// result simply omits it, a schema-only read having no default value to
 /// invent). Strictness is what makes this usable as a conformance check
 /// ([`validate_with_schema`]).
-fn read_struct<F: Find + ?Sized, T: DefaultFieldNode>(
+fn read_struct<F: Find + ?Sized, T: FieldNode>(
     entries: &Entries,
     fields: &BTreeMap<String, T>,
     doc: &Schema,
     store: &F,
     depth: usize,
-    mode: DecodeMode,
 ) -> Result<VObject, SchemaReadError> {
     let mut object = VObject::new();
     for (name, field) in fields {
         match entries.iter().find(|(n, _, _)| n == name) {
             Some((_, child_oid, _)) => {
-                let v = read_node(child_oid, field.node(), doc, store, depth + 1, mode)?;
+                let v = read_node(child_oid, field.node(), doc, store, depth + 1)?;
                 object.insert(name.clone(), v);
             }
             None if field.has_default() => {}
@@ -345,7 +322,6 @@ fn read_tuple<F: Find + ?Sized>(
     doc: &Schema,
     store: &F,
     depth: usize,
-    mode: DecodeMode,
 ) -> Result<VArray, SchemaReadError> {
     if entries.len() != elems.len() {
         return Err(SchemaReadError::ArrayLenMismatch {
@@ -356,7 +332,7 @@ fn read_tuple<F: Find + ?Sized>(
     sort_by_ordinal(&mut entries)?;
     let mut array = VArray::new();
     for ((_, child_oid, _), elem) in entries.iter().zip(elems) {
-        array.push(read_node(child_oid, elem, doc, store, depth + 1, mode)?);
+        array.push(read_node(child_oid, elem, doc, store, depth + 1)?);
     }
     Ok(array)
 }
@@ -374,12 +350,8 @@ fn expect_empty_tree<F: Find + ?Sized>(oid: &ObjectId, store: &F) -> Result<(), 
 }
 
 /// A scalar blob's UTF-8 text.
-fn blob_text<F: Find + ?Sized>(
-    oid: &ObjectId,
-    store: &F,
-    mode: DecodeMode,
-) -> Result<String, SchemaReadError> {
-    let bytes = find_blob_bytes_mode(oid, store, mode)?;
+fn blob_text<F: Find + ?Sized>(oid: &ObjectId, store: &F) -> Result<String, SchemaReadError> {
+    let bytes = find_blob_bytes(oid, store)?;
     String::from_utf8(bytes).map_err(|_| DeserializeError::NonUtf8Blob(*oid).into())
 }
 
@@ -389,13 +361,12 @@ fn int_value<T, F>(
     oid: &ObjectId,
     store: &F,
     schema: &'static str,
-    mode: DecodeMode,
 ) -> Result<Value, SchemaReadError>
 where
     T: std::str::FromStr + Into<i128>,
     F: Find + ?Sized,
 {
-    let text = blob_text(oid, store, mode)?;
+    let text = blob_text(oid, store)?;
     let v: T = text.parse().map_err(|_| invalid_scalar(schema, &text))?;
     Ok(VNumber::from_i128(v.into()).into())
 }
@@ -406,13 +377,12 @@ fn uint_value<T, F>(
     oid: &ObjectId,
     store: &F,
     schema: &'static str,
-    mode: DecodeMode,
 ) -> Result<Value, SchemaReadError>
 where
     T: std::str::FromStr + Into<u128>,
     F: Find + ?Sized,
 {
-    let text = blob_text(oid, store, mode)?;
+    let text = blob_text(oid, store)?;
     let v: T = text.parse().map_err(|_| invalid_scalar(schema, &text))?;
     Ok(VNumber::from_u128(v.into()).into())
 }

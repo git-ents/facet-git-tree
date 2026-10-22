@@ -1,14 +1,10 @@
-//! The value-walk location type shared by the schema-directed writer and the
-//! migration walk.
-//!
-//! One home instead of two byte-for-byte copies: the walks mirror each other
-//! (both thread a location so an error can name the exact spot the value
-//! diverged from its schema), so their path type must not be able to drift.
+//! The value-walk location type threaded through the schema-directed writer,
+//! so an error can name the exact spot the value diverged from its schema.
 
 use core::fmt::Write as _;
 
-/// A location within the value being written or migrated, threaded through
-/// the walk so a mismatch can name exactly where it happened.
+/// A location within the value being written, threaded through the walk so a
+/// mismatch can name exactly where it happened.
 ///
 /// Borrowed and stack-linked, so the happy path allocates nothing; only
 /// [`Path::show`] materializes a string, at the point an error is built.
