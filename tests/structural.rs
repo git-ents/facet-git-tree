@@ -4,12 +4,37 @@
 //!   structural.comparison.equality — same data produces the same root object ID
 
 use facet::Facet;
-use facet_git_tree::serialize;
+use facet_git_tree::{EntryKind, serialize};
 
 mod common;
-use common::{Config, HELLO_LEAF_BLOB_OID, Point, WithVec};
+use common::{Config, HELLO_LEAF_BLOB_OID, Point, WithVec, tree_entries};
 
 // --- structural.comparison.equality ---
+
+/// A struct is a plain tree of its scalar fields: the entries are exactly the
+/// field names — no sentinel entry, since only empty collections and
+/// `None`/`Null` carry the marker (`crate::marker`) — and each scalar field is
+/// a leaf blob rather than a sub-tree.
+#[test]
+fn struct_fields_are_blob_entries_of_a_plain_tree() {
+    let (root_id, store) = serialize(&Point { x: 1.0, y: 2.0 }).expect("serialize ok");
+
+    let entries = tree_entries(&store, &root_id);
+    let names: Vec<String> = entries.iter().map(|e| e.filename.to_string()).collect();
+    assert_eq!(
+        names,
+        vec!["x".to_string(), "y".to_string()],
+        "a struct tree must hold exactly its fields, with no sentinel entry"
+    );
+    for entry in &entries {
+        assert_eq!(
+            entry.mode.kind(),
+            EntryKind::Blob,
+            "scalar field {:?} must be a leaf blob, not a sub-tree",
+            entry.filename
+        );
+    }
+}
 
 /// Two identical values produce the same root object ID.
 #[test]
