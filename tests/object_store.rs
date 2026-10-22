@@ -1,8 +1,5 @@
 //! Tests for the in-memory [`ObjectStore`] — the `gix` `Write`/`Find` backend
 //! and its owned accessors.
-//!
-//! Unlike the serialization suites, these exercise code that is runnable today,
-//! independent of the not-yet-implemented `serialize`.
 
 use facet_git_tree::{EntryKind, EntryMode, ObjectStore, TreeEntry};
 use gix_object::{Find, Kind, Tree, Write};

@@ -31,7 +31,7 @@ pub use gix_hash::ObjectId;
 pub use gix_object::Object as GitObject;
 pub use gix_object::tree::{Entry as TreeEntry, EntryKind, EntryMode};
 
-pub use de::{check_key, deserialize, deserialize_into};
+pub use de::{check_key, deserialize};
 pub use error::{
     DeserializeError, KeyError, NormalFormError, SchemaError, SchemaReadError, SchemaWriteError,
     SerializeError, UniverseError,

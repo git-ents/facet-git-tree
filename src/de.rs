@@ -83,16 +83,6 @@ pub(crate) fn deserialize_at_depth<T: for<'a> facet::Facet<'a>>(
         .map_err(|e| DeserializeError::Reflect(format!("materialize failed: {e}")))
 }
 
-/// Deserialize the tree at `root` into an existing [`Partial`], mirroring
-/// `facet`'s `*_into` convention: the caller owns allocation and `build`.
-pub fn deserialize_into<'facet>(
-    partial: Partial<'facet, true>,
-    root: &ObjectId,
-    store: &(impl Find + ?Sized),
-) -> Result<Partial<'facet, true>, DeserializeError> {
-    deser_into(partial, root, store, 0)
-}
-
 pub(crate) fn find_object<'a, F: Find + ?Sized>(
     id: &ObjectId,
     buf: &'a mut Vec<u8>,
