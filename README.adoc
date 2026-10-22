@@ -84,4 +84,4 @@ Please refer to the in-source link:CONDUCT.md[code of conduct] for all behaviora
 == Contribution Guide
 
 Contributions are welcome.
-Please refer to the in-source link:CONTRIBUTING.adoc[contribution guide].
+Please refer to the in-source link:CONTRIBUTING.md[contribution guide].
