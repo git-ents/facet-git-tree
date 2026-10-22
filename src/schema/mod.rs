@@ -11,8 +11,6 @@
 #[cfg(feature = "value")]
 pub(crate) mod path;
 
-pub mod codec;
-pub mod pin;
 #[cfg(feature = "value")]
 pub mod read;
 #[cfg(feature = "value")]
@@ -40,18 +38,9 @@ use facet_value::Value;
 /// enum) the root reaches, keyed by the deterministic names that
 /// [`Node::Ref`] nodes use. A `BTreeMap` keeps the encoding order-independent
 /// of construction, so equal documents share an object id.
-///
-/// This type carries no format-version field: a stored document instead pins
-/// the schema-schema tree it was written against as a `schema` entry spliced
-/// onto the tree at write time — see `crate::schema::pin` — which is a
-/// storage-layer concern, not part of this Rust type.
 #[derive(Debug, Clone, PartialEq, Facet)]
 pub struct Schema {
     /// The kind/type name this schema describes.
-    ///
-    /// [`Self::LEGACY_KIND`] is used only when a reader decodes the historical
-    /// pre-`kind` `{root, defs}` representation. New schemas always carry the
-    /// publication/type name selected by the writer.
     pub kind: String,
     /// The schema of the value itself. Named user types appear as
     /// [`Node::Ref`] nodes resolved through `defs`.
@@ -61,13 +50,6 @@ pub struct Schema {
 }
 
 impl Schema {
-    /// Explicit kind used for a schema decoded from the pre-`kind` format.
-    ///
-    /// This sentinel is valid as a Git ref segment but is not selected by
-    /// [`schema_of`]. Compatibility callers that require a publication name
-    /// should replace it with [`Self::with_kind`] before writing.
-    pub const LEGACY_KIND: &'static str = "legacy-unknown";
-
     /// The kind embedded in a schema generated for a root with no valid
     /// publication name (an anonymous tuple or container).
     ///
@@ -79,16 +61,6 @@ impl Schema {
     /// [`Self::with_kind`] — the omission is a checked error, not a silent
     /// default.
     pub const ANONYMOUS_KIND: &'static str = "anonymous";
-}
-
-/// The legacy `{root, defs}` wire shape — a schema document without `kind` —
-/// read for compatibility only; new code must use [`Schema`].
-#[derive(Debug, Clone, PartialEq, Facet)]
-pub(crate) struct LegacySchema {
-    /// The schema of the value itself.
-    pub(crate) root: Node,
-    /// The named definition table.
-    pub(crate) defs: BTreeMap<String, Node>,
 }
 
 /// A single schema node: the shape of one value in the encoding.
@@ -446,9 +418,8 @@ impl Schema {
     /// says only that the document's kind is a usable ref-name segment.
     /// Publishability — refusing the
     /// [`ANONYMOUS_KIND`](Self::ANONYMOUS_KIND) sentinel, which carries no
-    /// provenance — is the publication boundary's job
-    /// ([`write_pinned`](Self::write_pinned)), not this function's, so
-    /// documents that predate that rule remain readable.
+    /// provenance — is the publication boundary's job, not this function's,
+    /// so documents that predate that rule remain readable.
     pub fn validate(&self) -> Result<(), SchemaError> {
         validate_kind_name(&self.kind)
     }

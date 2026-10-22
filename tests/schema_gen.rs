@@ -481,12 +481,6 @@ fn anonymous_kind_is_a_placeholder_publication_refuses() -> anyhow::Result<()> {
         Err(SchemaError::AnonymousKind)
     ));
 
-    let store = facet_git_tree::ObjectStore::default();
-    assert!(
-        doc.write_pinned(&store).is_err(),
-        "an anonymous schema must not be publishable"
-    );
-
     let named = doc.with_kind("triples")?;
     named.validate_publishable()?;
     Ok(())

@@ -311,69 +311,6 @@ pub enum SchemaError {
     MaxDepth(usize),
 }
 
-/// An error produced by the schema-schema pin.
-#[derive(Debug, thiserror::Error)]
-pub enum SchemaPinError {
-    /// The document pins a schema-schema generation this build does not speak.
-    ///
-    /// An oid pin gives equality only, never ordering, so this cannot
-    /// distinguish older from newer — only unrecognized.
-    #[error(
-        "schema tree {tree} was written against schema-schema {pinned}, which this build does \
-         not recognize; it speaks {}",
-        crate::schema::pin::known_generations()
-    )]
-    Unrecognized {
-        /// The schema tree carrying the unrecognized pin.
-        tree: ObjectId,
-        /// The pinned schema-schema tree id.
-        pinned: ObjectId,
-    },
-    /// The document carries no `schema` pin entry and is not itself a known
-    /// schema-schema root.
-    #[error("schema tree {0} carries no schema-schema pin and is not itself a known root")]
-    Unpinned(ObjectId),
-    /// Writing the document or its pinned schema-schema tree failed.
-    #[error(transparent)]
-    Serialize(#[from] SerializeError),
-    /// The embedded kind name failed Git ref-segment validation.
-    #[error(transparent)]
-    Schema(#[from] SchemaError),
-    /// A pre-`kind` generation tree lacks the exact historical representation
-    /// that reader expects.
-    #[error("legacy schema tree {tree} has invalid pre-kind representation: {reason}")]
-    LegacyFormat {
-        /// The schema tree that failed the compatibility check.
-        tree: ObjectId,
-        /// The violated compatibility invariant.
-        reason: &'static str,
-    },
-    /// Reading the pin entry or the document itself failed.
-    #[error(transparent)]
-    Deserialize(#[from] DeserializeError),
-    /// The canonical schema document did not survive the fixed-point check.
-    #[error("schema fixed point failed during {stage}: expected {expected}, observed {observed}")]
-    FixedPoint {
-        /// The operation that produced the unexpected digest.
-        stage: &'static str,
-        /// The compile-time or canonical expected digest.
-        expected: ObjectId,
-        /// The digest produced by this build.
-        observed: ObjectId,
-    },
-    /// The canonical schema document could not be decoded during bootstrap.
-    #[error("schema fixed point decode failed: expected {expected}, observed {observed}: {source}")]
-    FixedPointDecode {
-        /// The compile-time canonical digest expected by this build.
-        expected: ObjectId,
-        /// The tree presented to the normal schema reader.
-        observed: ObjectId,
-        /// The underlying decode failure.
-        #[source]
-        source: DeserializeError,
-    },
-}
-
 /// An error produced by schema-driven deserialization (`value` feature).
 #[derive(Debug, thiserror::Error)]
 pub enum SchemaReadError {

@@ -4,7 +4,6 @@
 //! documented lossy heuristic.
 
 use facet::{Def, Partial};
-use facet_value::Value;
 use gix_hash::Kind as HashKind;
 use gix_object::{Data, Find, Kind};
 use std::collections::BTreeSet;
@@ -22,19 +21,6 @@ use crate::{EntryKind, ObjectId, RawBlob, RawTree};
 /// without a bespoke closure every time.
 fn reflect(e: impl std::fmt::Display) -> DeserializeError {
     DeserializeError::Reflect(e.to_string())
-}
-
-/// Whether a decoder accepts the historical leaf-blob spelling.
-///
-/// `Strict` is the ordinary format and requires the mandatory trailing newline.
-/// `LegacyLeaves` is an explicit compatibility mode for reading pre-newline
-/// objects; it never changes what the serializer writes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DecodeMode {
-    /// Read only the current leaf-blob format.
-    Strict,
-    /// Also accept leaf blobs that predate the trailing newline.
-    LegacyLeaves,
 }
 
 /// Validate a user-supplied key for use as a Git tree entry name.
@@ -79,17 +65,6 @@ pub fn deserialize<T: for<'a> facet::Facet<'a>>(
     deserialize_at_depth(root, store, 0)
 }
 
-/// Decode a value while accepting pre-newline leaf blobs.
-///
-/// Separate from [`deserialize`]: callers must opt into compatibility with
-/// the historical object spelling explicitly.
-pub fn deserialize_legacy_leaves<T: for<'a> facet::Facet<'a>>(
-    root: &ObjectId,
-    store: &(impl Find + ?Sized),
-) -> Result<T, DeserializeError> {
-    deserialize_at_depth_mode(root, store, 0, DecodeMode::LegacyLeaves)
-}
-
 /// [`deserialize`], but with the recursion-depth budget starting at `depth`
 /// instead of `0`, so a caller already inside a larger deserialization
 /// (schema-driven reads route back through here) continues the same budget.
@@ -98,18 +73,9 @@ pub(crate) fn deserialize_at_depth<T: for<'a> facet::Facet<'a>>(
     store: &(impl Find + ?Sized),
     depth: usize,
 ) -> Result<T, DeserializeError> {
-    deserialize_at_depth_mode(root, store, depth, DecodeMode::Strict)
-}
-
-pub(crate) fn deserialize_at_depth_mode<T: for<'a> facet::Facet<'a>>(
-    root: &ObjectId,
-    store: &(impl Find + ?Sized),
-    depth: usize,
-    mode: DecodeMode,
-) -> Result<T, DeserializeError> {
     let partial = Partial::alloc::<T>()
         .map_err(|e| DeserializeError::Reflect(format!("alloc failed: {e}")))?;
-    let partial = deser_into(partial, root, store, depth, mode)?;
+    let partial = deser_into(partial, root, store, depth)?;
     let heap = partial
         .build()
         .map_err(|e| DeserializeError::Reflect(format!("build failed: {e}")))?;
@@ -124,7 +90,7 @@ pub fn deserialize_into<'facet>(
     root: &ObjectId,
     store: &(impl Find + ?Sized),
 ) -> Result<Partial<'facet, true>, DeserializeError> {
-    deser_into(partial, root, store, 0, DecodeMode::Strict)
+    deser_into(partial, root, store, 0)
 }
 
 pub(crate) fn find_object<'a, F: Find + ?Sized>(
@@ -168,36 +134,29 @@ pub(crate) fn find_tree_entries<F: Find + ?Sized>(
     tree_entries_from_data(&data, id)
 }
 
-pub(crate) fn find_blob_bytes_mode<F: Find + ?Sized>(
+pub(crate) fn find_blob_bytes<F: Find + ?Sized>(
     id: &ObjectId,
     store: &F,
-    mode: DecodeMode,
 ) -> Result<Vec<u8>, DeserializeError> {
     let mut buf = Vec::new();
     let data = find_object(id, &mut buf, store)?;
     if data.kind != Kind::Blob {
         return Err(DeserializeError::NotABlob(*id));
     }
-    strip_leaf_newline(id, data.data.to_owned(), mode)
+    strip_leaf_newline(id, data.data.to_owned())
 }
 
-/// Strip a leaf blob's trailing newline according to `mode`; strict mode
-/// reports absence as [`DeserializeError::MissingLeafNewline`], legacy mode
-/// also accepts the historical no-newline spelling.
+/// Strip a leaf blob's mandatory trailing newline, reporting its absence as
+/// [`DeserializeError::MissingLeafNewline`].
 pub(crate) fn strip_leaf_newline(
     id: &ObjectId,
     mut bytes: Vec<u8>,
-    mode: DecodeMode,
 ) -> Result<Vec<u8>, DeserializeError> {
-    // Both modes strip the mandatory trailing newline; legacy mode
-    // additionally accepts its historical absence.
-    match (mode, bytes.last().copied()) {
-        (DecodeMode::Strict | DecodeMode::LegacyLeaves, Some(b'\n')) => {
-            bytes.pop();
-            Ok(bytes)
-        }
-        (DecodeMode::LegacyLeaves, Some(_)) => Ok(bytes),
-        (_, _) => Err(DeserializeError::MissingLeafNewline(*id)),
+    if bytes.last().copied() == Some(b'\n') {
+        bytes.pop();
+        Ok(bytes)
+    } else {
+        Err(DeserializeError::MissingLeafNewline(*id))
     }
 }
 
@@ -241,15 +200,11 @@ pub(crate) fn map_pair_entries(
 }
 
 /// Validate an `Option` tree's entries, returning the `some` entry's object
-/// id, or `None` for the marker tree written for `None`. Legacy mode also
-/// accepts the historical literal empty tree as `None`.
+/// id, or `None` for the marker tree written for `None`.
 pub(crate) fn validate_option_entries(
     entries: &[(String, ObjectId, EntryKind)],
-    mode: DecodeMode,
 ) -> Result<Option<ObjectId>, DeserializeError> {
-    if crate::marker::is_marker(entries)
-        || (matches!(mode, DecodeMode::LegacyLeaves) && entries.is_empty())
-    {
+    if crate::marker::is_marker(entries) {
         return Ok(None);
     }
     let [(name, inner_oid, _)] = entries else {
@@ -270,15 +225,14 @@ pub(crate) fn validate_option_entries(
 /// `None` for the payload); every other variant's tag is a single-entry tree
 /// (returning `Some` of the payload id). The caller checks the returned form
 /// against the named variant's own kind; this function has no variant table.
-pub(crate) fn extract_enum_entry_mode<F: Find + ?Sized>(
+pub(crate) fn extract_enum_entry<F: Find + ?Sized>(
     oid: &ObjectId,
     store: &F,
-    mode: DecodeMode,
 ) -> Result<(String, Option<ObjectId>), DeserializeError> {
     let mut buf = Vec::new();
     let data = find_object(oid, &mut buf, store)?;
     if data.kind == Kind::Blob {
-        let bytes = strip_leaf_newline(oid, data.data.to_owned(), mode)?;
+        let bytes = strip_leaf_newline(oid, data.data.to_owned())?;
         let name = String::from_utf8(bytes).map_err(|_| DeserializeError::NonUtf8Blob(*oid))?;
         return Ok((name, None));
     }
@@ -356,7 +310,6 @@ fn deser_into<'facet, F: Find + ?Sized>(
     oid: &ObjectId,
     store: &F,
     depth: usize,
-    mode: DecodeMode,
 ) -> Result<Partial<'facet, true>, DeserializeError> {
     if depth > MAX_VALUE_DEPTH {
         return Err(DeserializeError::MaxDepth(MAX_VALUE_DEPTH));
@@ -389,12 +342,12 @@ fn deser_into<'facet, F: Find + ?Sized>(
     // encoding writes no type marker, so the value's shape is recovered
     // heuristically from the object graph itself.
     if matches!(classify(shape), ShapeClass::Dynamic) {
-        return deser_dynamic(partial, oid, store, depth, mode);
+        return deser_dynamic(partial, oid, store, depth);
     }
 
     // Scalar leaf: read blob, parse from str
     if matches!(classify(shape), ShapeClass::Scalar) {
-        let bytes = find_blob_bytes_mode(oid, store, mode)?;
+        let bytes = find_blob_bytes(oid, store)?;
         let s = std::str::from_utf8(&bytes).map_err(|_| DeserializeError::NonUtf8Blob(*oid))?;
         return partial
             .parse_from_str(s)
@@ -409,7 +362,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
     // `Vec<u8>` target takes the whole buffer in one set; other byte-leaf
     // shapes fill item by item below.
     if matches!(classify(shape), ShapeClass::Bytes) {
-        let bytes = find_blob_bytes_mode(oid, store, mode)?;
+        let bytes = find_blob_bytes(oid, store)?;
         if shape.is_type::<Vec<u8>>() {
             return partial.set::<Vec<u8>>(bytes).map_err(reflect);
         }
@@ -439,7 +392,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
         let mut partial = partial.begin_smart_ptr().map_err(reflect)?;
         if partial.is_building_smart_ptr_slice() {
             if pd.pointee.is_some_and(is_byte_seq) {
-                let bytes = find_blob_bytes_mode(oid, store, mode)?;
+                let bytes = find_blob_bytes(oid, store)?;
                 for b in bytes {
                     partial = partial.begin_list_item().map_err(reflect)?;
                     partial = partial.set::<u8>(b).map_err(reflect)?;
@@ -453,13 +406,13 @@ fn deser_into<'facet, F: Find + ?Sized>(
                 sort_by_ordinal(&mut entries)?;
                 for (_, child_oid, _) in entries {
                     partial = partial.begin_list_item().map_err(reflect)?;
-                    partial = deser_into(partial, &child_oid, store, depth + 1, mode)?;
+                    partial = deser_into(partial, &child_oid, store, depth + 1)?;
                     partial = partial.end().map_err(reflect)?;
                 }
             }
             return partial.end().map_err(reflect);
         }
-        partial = deser_into(partial, oid, store, depth + 1, mode)?;
+        partial = deser_into(partial, oid, store, depth + 1)?;
         return partial.end().map_err(reflect);
     }
 
@@ -470,7 +423,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
     // carry an `inner` shape but were never unwrapped on serialization.
     if shape.inner.is_some() && shape.vtable.has_try_borrow_inner() {
         let partial = partial.begin_inner().map_err(reflect)?;
-        let partial = deser_into(partial, oid, store, depth + 1, mode)?;
+        let partial = deser_into(partial, oid, store, depth + 1)?;
         return partial.end().map_err(reflect);
     }
 
@@ -499,7 +452,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
                     partial = partial.begin_field(field.name).map_err(|e| {
                         DeserializeError::Reflect(format!("begin_field {}: {e}", field.name))
                     })?;
-                    partial = deser_into(partial, &child_oid, store, depth + 1, mode)?;
+                    partial = deser_into(partial, &child_oid, store, depth + 1)?;
                     partial = partial.end().map_err(|e| {
                         DeserializeError::Reflect(format!("end field {}: {e}", field.name))
                     })?;
@@ -514,7 +467,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
             }
         }
         for (pos, m) in matched.iter().enumerate() {
-            if !*m && !crate::schema::pin::is_splice_entry(&entries[pos].0) {
+            if !*m {
                 return Err(DeserializeError::UnexpectedEntry {
                     entry: entries[pos].0.clone(),
                 });
@@ -534,7 +487,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
         let mut partial = partial.init_list().map_err(reflect)?;
         for (_, child_oid, _) in entries {
             partial = partial.begin_list_item().map_err(reflect)?;
-            partial = deser_into(partial, &child_oid, store, depth + 1, mode)?;
+            partial = deser_into(partial, &child_oid, store, depth + 1)?;
             partial = partial.end().map_err(reflect)?;
         }
         return Ok(partial);
@@ -553,7 +506,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
                 .parse::<usize>()
                 .expect("ordinal validated by sort_by_ordinal");
             partial = partial.begin_nth_field(idx).map_err(reflect)?;
-            partial = deser_into(partial, &child_oid, store, depth + 1, mode)?;
+            partial = deser_into(partial, &child_oid, store, depth + 1)?;
             partial = partial.end().map_err(reflect)?;
         }
         return Ok(partial);
@@ -579,7 +532,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
                 partial = parse_key_from_str(partial, &key)?;
                 partial = partial.end().map_err(reflect)?;
                 partial = partial.begin_value().map_err(reflect)?;
-                partial = deser_into(partial, &child_oid, store, depth + 1, mode)?;
+                partial = deser_into(partial, &child_oid, store, depth + 1)?;
                 partial = partial.end().map_err(reflect)?;
             }
         } else {
@@ -591,10 +544,10 @@ fn deser_into<'facet, F: Find + ?Sized>(
                     return Err(DeserializeError::DuplicateKey { oid: k_oid });
                 }
                 partial = partial.begin_key().map_err(reflect)?;
-                partial = deser_into(partial, &k_oid, store, depth + 1, mode)?;
+                partial = deser_into(partial, &k_oid, store, depth + 1)?;
                 partial = partial.end().map_err(reflect)?;
                 partial = partial.begin_value().map_err(reflect)?;
-                partial = deser_into(partial, &v_oid, store, depth + 1, mode)?;
+                partial = deser_into(partial, &v_oid, store, depth + 1)?;
                 partial = partial.end().map_err(reflect)?;
             }
         }
@@ -604,12 +557,12 @@ fn deser_into<'facet, F: Find + ?Sized>(
     // Option: empty tree → None, single "some"-named entry → Some(inner).
     if matches!(classify(shape), ShapeClass::Option) {
         let entries = find_tree_entries(oid, store)?;
-        let Some(inner_oid) = validate_option_entries(&entries, mode)? else {
+        let Some(inner_oid) = validate_option_entries(&entries)? else {
             // None — the partial already holds the default None.
             return Ok(partial);
         };
         let partial = partial.begin_some().map_err(reflect)?;
-        let partial = deser_into(partial, &inner_oid, store, depth + 1, mode)?;
+        let partial = deser_into(partial, &inner_oid, store, depth + 1)?;
         return partial.end().map_err(reflect);
     }
 
@@ -619,7 +572,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
     if matches!(classify(shape), ShapeClass::Enum)
         && let facet::Type::User(facet::UserType::Enum(et)) = shape.ty
     {
-        let (variant_name, inner_oid) = extract_enum_entry_mode(oid, store, mode)?;
+        let (variant_name, inner_oid) = extract_enum_entry(oid, store)?;
 
         // The variant's field layout comes from the type, not the tree: a tuple
         // variant (`TupleStruct`) keys by ordinal, a struct variant by name, and a
@@ -660,7 +613,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
 
         if newtype {
             partial = partial.begin_nth_field(0).map_err(reflect)?;
-            partial = deser_into(partial, &inner_oid, store, depth + 1, mode)?;
+            partial = deser_into(partial, &inner_oid, store, depth + 1)?;
             return partial.end().map_err(reflect);
         }
 
@@ -686,7 +639,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
             }
         }
         for (pos, m) in matched.iter().enumerate() {
-            if !*m && !crate::schema::pin::is_splice_entry(&inner_entries[pos].0) {
+            if !*m {
                 return Err(DeserializeError::UnexpectedEntry {
                     entry: inner_entries[pos].0.clone(),
                 });
@@ -701,7 +654,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
             } else {
                 partial = partial.begin_field(&name).map_err(reflect)?;
             }
-            partial = deser_into(partial, &child_oid, store, depth + 1, mode)?;
+            partial = deser_into(partial, &child_oid, store, depth + 1)?;
             partial = partial.end().map_err(reflect)?;
         }
         return Ok(partial);
@@ -719,8 +672,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
 ///   trailing newline), otherwise `Bytes`;
 /// - a non-empty tree whose entry names are all decimal ordinals is an Array;
 /// - any other tree — including the presence-marker tree written for `Null`
-///   and an empty `Array`/`Object` — is an Object; legacy mode additionally
-///   reads a literal empty tree as null.
+///   and an empty `Array`/`Object` — is an Object.
 ///
 /// So bool, numbers, char, datetime, … come back as `String`s of their
 /// textual form, and null as an empty `Object`. The depth guard is enforced
@@ -731,7 +683,6 @@ fn deser_dynamic<'facet, F: Find + ?Sized>(
     oid: &ObjectId,
     store: &F,
     depth: usize,
-    mode: DecodeMode,
 ) -> Result<Partial<'facet, true>, DeserializeError> {
     let mut buf = Vec::new();
     let data = find_object(oid, &mut buf, store)?;
@@ -739,7 +690,7 @@ fn deser_dynamic<'facet, F: Find + ?Sized>(
     // Blob → String or Bytes, decided by UTF-8 validity (of the content with
     // its mandatory trailing newline already stripped).
     if data.kind == Kind::Blob {
-        let bytes = strip_leaf_newline(oid, data.data.to_owned(), mode)?;
+        let bytes = strip_leaf_newline(oid, data.data.to_owned())?;
         return match String::from_utf8(bytes) {
             Ok(s) => partial.set::<String>(s).map_err(reflect),
             Err(e) => partial.set::<Vec<u8>>(e.into_bytes()).map_err(reflect),
@@ -747,18 +698,13 @@ fn deser_dynamic<'facet, F: Find + ?Sized>(
     }
 
     let mut entries = tree_entries_from_data(&data, oid)?;
-    let marker = crate::marker::is_marker(&entries);
-    if marker {
+    if crate::marker::is_marker(&entries) {
         entries.clear();
     }
-    if matches!(mode, DecodeMode::LegacyLeaves) && !marker && entries.is_empty() {
-        return partial.set::<Value>(Value::NULL).map_err(reflect);
-    }
 
-    // Non-empty + all-ordinal names → Array. In strict mode, and for the
-    // current marker tree in legacy mode, an empty tree reads as an Object:
-    // it is what both null and the empty Object serialize to, and an empty
-    // Object is the less lossy of the two readings.
+    // Non-empty + all-ordinal names → Array. An empty tree reads as an
+    // Object: it is what both null and the empty Object serialize to, and an
+    // empty Object is the less lossy of the two readings.
     let all_ordinal = !entries.is_empty()
         && entries
             .iter()
@@ -768,7 +714,7 @@ fn deser_dynamic<'facet, F: Find + ?Sized>(
         let mut partial = partial.init_list().map_err(reflect)?;
         for (_, child_oid, _) in entries {
             partial = partial.begin_list_item().map_err(reflect)?;
-            partial = deser_into(partial, &child_oid, store, depth + 1, mode)?;
+            partial = deser_into(partial, &child_oid, store, depth + 1)?;
             partial = partial.end().map_err(reflect)?;
         }
         return Ok(partial);
@@ -777,7 +723,7 @@ fn deser_dynamic<'facet, F: Find + ?Sized>(
     let mut partial = partial.init_map().map_err(reflect)?;
     for (name, child_oid, _) in entries {
         partial = partial.begin_object_entry(&name).map_err(reflect)?;
-        partial = deser_into(partial, &child_oid, store, depth + 1, mode)?;
+        partial = deser_into(partial, &child_oid, store, depth + 1)?;
         partial = partial.end().map_err(reflect)?;
     }
     Ok(partial)
