@@ -5,7 +5,7 @@
 
 ### ⚠ BREAKING CHANGES
 
-* remove the migration, schema-pinning, and schema-kind APIs; schema documents no longer carry `kind`, so previously published schema object ids change and documents written in the old shape no longer read
+* Remove the migration, schema-pinning, and schema-kind APIs; schema documents no longer carry `kind`, so previously published schema object ids change and documents written in the old shape no longer read
 
 ### chore
 
