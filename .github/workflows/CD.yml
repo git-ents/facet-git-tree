@@ -46,6 +46,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: true
+          build-warnings: deny
           toolchain: stable
       - name: Package crate
         run: |

@@ -132,6 +132,7 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           cache: true
+          build-warnings: deny
       - name: Install cargo-semver-checks
         uses: taiki-e/install-action@v2
         with:
