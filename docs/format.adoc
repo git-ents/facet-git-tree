@@ -1,0 +1,330 @@
+= Git-Tree Wire Format (frozen)
+
+This document freezes the on-disk wire format of `facet-git-tree`. It is
+normative and self-contained: where it disagrees with older narrative in
+`git-store`'s specification, this document wins.
+
+[NOTE]
+====
+This format replaces an earlier layout (PascalCase `Node` tags, a `StructField`
+wrapper, decimal `0000` ordinals, a `_` presence marker). There is no backward
+compatibility. "Frozen" here means *stable within a major version*; the format
+is still pre-alpha and may take a new major version.
+====
+
+== Versioning: the meta-schema is the LTS artifact
+
+The *schema-of-schemas* — the `Node`/`Schema` vocabulary, the `.schema`
+envelope, the `none`/`some` marker names, the ordinal scheme, and the `%`
+escape defined here — is the long-term-support artifact, versioned by a single
+major number. Changing any rule in this document is a major-version event.
+
+An *entity schema* is an ordinary stored value written in this format. It is
+derived once, stored, and **never re-derived** at read or write time. Because
+the meta-schema is frozen, a stored schema stays readable for the life of the
+major version regardless of how a deriver would spell it today. Two spellings
+of "the same" type are two different schemas; we keep one.
+
+The major version is carried in the commit trailer `Schema-Version:`. A *bare*
+tree with no accompanying commit has no version metadata and is interpreted
+under the reader's current major version only; cross-major reading of a bare
+tree is undefined and MUST be refused.
+
+== Envelope
+
+A document is a Git tree. Its entries are the value's own fields, plus a
+single reserved subtree named `.schema`:
+
+* Resolve the root node first (following `ref` nodes into `defs`). If the
+  resolved root is a struct, the value's fields sit directly at the root,
+  alongside `.schema`.
+* Otherwise (scalar, unit, enum, option, sequence, map root), the root tree is
+  `{ .value -> <encoded value>, .schema -> <schema tree> }`.
+
+`.schema`/`.value` are reserved **only at the root**; either appearing below the
+root is an error. No implementation may rely on entry position: `.schema` is
+looked up by name (a verbatim user key sorts before it whenever its first byte
+is below `0x2E`).
+
+== Entry names and escaping
+
+Classification is by the whole name, in this order:
+
+[cols="1,3"]
+|===
+| class | names
+
+| structural | `.schema`, `.value` (root only); `none`, `some` (in containers)
+| escaped | any name beginning with `%`
+| verbatim | everything else (below)
+|===
+
+`escape(name)` maps an arbitrary user string (struct field name, enum variant
+name, map key, def name) to a legal, collision-free entry name:
+
+. `name` is stored **verbatim** iff it is non-empty, every byte is in the set
+  `[A-Za-z0-9._-]`, its first byte is neither `.` nor `%`, and it is not
+  literally `none` or `some`.
+. Otherwise it is stored as `%` followed by a percent-encoding: every byte
+  outside `[A-Za-z0-9._-]`, and `%` itself, becomes `%XX` (uppercase hex).
+
+`unescape` is the exact inverse on the verbatim and escaped classes. A reader
+MUST reject a name where `escape(unescape(name)) != name` (so `%2f`, `%a`, and
+`%74itle` are rejected even though they decode), and MUST reject an escape
+whose decoded bytes are not valid UTF-8.
+
+.Escaping examples
+[cols="1,1,1"]
+|===
+| name | verbatim? | stored
+
+| `title` | yes | `title`
+| `author.name` | yes | `author.name`
+| `_` | yes | `_`
+| `none` | no — reserved | `%none`
+| `some` | no — reserved | `%some`
+| `.schema` | no — leading `.` | `%.schema`
+| `a/b` | no — `/` ∉ set | `%a%2Fb`
+| `a b` | no — space ∉ set | `%a%20b`
+| `naïve` | no — `ï` ∉ set | `na%C3%AFve`
+| _(empty)_ | no | `%`
+|===
+
+A name's *encoded* length MUST NOT exceed 255 bytes; an over-long user name is
+an error (percent-encoding can triple a multi-byte name).
+
+Escaping exists because Git forbids `""`, embedded `/` and NUL, `.`, `..`, and
+the `.git` family, while JSON keys and `facet` renames may be any of those, and
+because user names must never enter the `.`/`none`/`some` namespace. Escaping
+never produces a name beginning with `.`.
+
+NOTE: Case-insensitive filesystems collide `Title`/`title` and `git~1` aliases
+`.git`; these matter only if a tree is materialized to a working tree, which
+this codec never does. They are recorded, not resolved.
+
+== Leaves
+
+A *text leaf* is its raw representation followed by **exactly one** trailing
+`\n` byte, appended unconditionally (an empty string is the one-byte blob
+`\n`). On read, exactly one trailing `\n` is stripped; a text leaf whose last
+byte is not `\n` is malformed.
+
+A *binary leaf* (`bytes`, `cbor`) is its bytes verbatim, with **no** trailing
+byte.
+
+A unit enum variant's tag blob is a text leaf (escaped name + `\n`).
+
+[cols="1,2"]
+|===
+| type | blob
+
+| `bool` | `true` / `false`
+| integers | canonical decimal; no `+`, no leading zeros, no `-0`
+| `f32`/`f64` | see below
+| `char` | the character's UTF-8 encoding (exactly one scalar value)
+| `string` | UTF-8 bytes verbatim
+| `bytes` | bytes verbatim (no newline)
+| `cbor` | raw **canonical CBOR**, RFC 8949 core-deterministic (no newline)
+|===
+
+`isize`/`usize` are written as i64/u64 and range-checked on read, so a document
+written on a 64-bit host can fail to decode on a 32-bit one; this is recorded
+behavior.
+
+Floats (`f32`/`f64`) use the shortest string that round-trips (Ryu), formatted
+as the type itself (an `f32` is not widened to `f64`), always carrying a decimal
+point or an exponent (`1.0`, not `1`; lowercase `e`). Negative zero is
+normalized to positive zero on write. `nan`, `inf`, and `-inf` are **not
+representable**: writing them is an error, and a reader rejects those spellings.
+The reader verifies `format(parse(s)) == s`, rejecting any non-canonical form.
+
+`cbor` uses RFC 8949 core-deterministic encoding of the `facet` value (a
+byte-string leaf's content is the CBOR payload). A reader rejects a `cbor` blob
+that is not canonical or that has trailing bytes.
+
+The trailing newline is cosmetic (it removes `\ No newline at end of file`
+noise from every leaf diff) and makes every text leaf at least one byte,
+leaving the empty blob free for the marker. An empty `bytes`/`cbor` leaf shares
+the empty blob with the marker; this is unambiguous because the marker is a
+tree and a leaf is a blob.
+
+== Containers
+
+* **struct** — a tree of `escape(field) -> value`. Every field is always
+  written; on read a missing field is an error and an unknown entry is an
+  error. No `has_default` marker, no absent-field tolerance.
+* **tuple / tuple-variant fields / sequence elements (`List`, `Array`)** — a
+  tree named by positional ordinals: fixed-width **lowercase hex**, width 3,
+  `000`–`fff`.
+* **cap** — every tree is capped at 4096 entries (`0x1000`). Exceeding it on
+  write is an error; a schema declaring `Array.len` or a tuple arity above the
+  cap is rejected. Larger payloads are modeled as a `cbor` field — never
+  silently repacked.
+* **map** — only string keys are representable: entries are named
+  `escape(key) -> value`, and a schema whose `Map.key` node is anything other
+  than `String` is rejected. Non-string-keyed maps are modeled as `cbor`.
+  Maps are **unordered**; entries are written in escaped-name byte order.
+* **option** — `Some(x)` is `{ some -> x }`; `None` is the `none` marker.
+* **enum** — externally tagged. A unit variant is a bare tag blob. Any other
+  variant is a single-entry tree `{ escape(Variant) -> payload }`, where:
+  + a *tuple variant with exactly one field* encodes that field `directly`
+  (no ordinal wrapper); a tuple variant with two or more fields uses an ordinal
+  tree; a *struct variant* always uses a named-field tree (never direct).
+* **`Vec<u8>` / `[u8; N]` / `[u8]`** — a single `bytes` blob, not `List(U8)`.
+* **dynamic** (`facet_value::Value`) — written by the runtime kind: `Null` ->
+  `none` marker; `Bool`, `Number`, `Char`, `String`, `Bytes`, `DateTime`,
+  `Uuid`, `QName` -> text leaves; `Array` -> ordinal tree; `Object` ->
+  name-keyed tree (`Object` is unordered). There is **no on-disk tag**, so a
+  dynamic value is only recoverable by the lossy dynamic-read heuristic; exact
+  round-trip of a dynamic value is out of scope (`String("1")` and `Number(1)`
+  share a blob). `DateTime`, `Uuid`, and `QName` use the textual forms in
+  `git-store`'s specification and, being text leaves, carry the trailing `\n`.
+
+=== The `none` marker
+
+`None`, a dynamic `Null`, an empty collection, an empty struct, an empty tuple,
+and `unit` are all encoded as a non-empty tree holding exactly one entry:
+
+[source]
+----
+{ none -> <empty blob> }
+----
+
+The marker's *target* is the empty blob; the tree itself is never empty. This
+keeps the path visible to `git ls-tree -r`/`git diff` and avoids literal empty
+trees, which Git's index and merge machinery drop, changing a document's oid.
+No empty tree is ever written anywhere (except inside a `RawTree`, below), and
+the empty blob is always written explicitly.
+
+The name `none` is reserved (see escaping), as is `some`. Both are distinct
+structural names; a reader decides which is expected from the schema, never
+from the tree alone.
+
+== Schema (self-hosted)
+
+A schema is an ordinary value encoded by this same codec; there is no
+special-cased schema representation. The `.schema` subtree holds an **unbound**
+`Schema` value (no nested `.schema`), so `.schema/.schema/...` never forms —
+this is what makes self-hosting close (a quine over the bare schema). Decoding
+`.schema` bootstraps from the compiled-in `Schema`/`Node` types.
+
+[source,rust]
+----
+#[derive(Debug, Clone, PartialEq, facet::Facet)]
+pub struct Schema {
+    pub kind: String,                 // opaque entity-kind label, e.g. "Book"
+    pub root: Node,
+    pub defs: BTreeMap<String, Node>, // named types, keyed by Node::Ref name
+}
+
+#[derive(Debug, Clone, PartialEq, facet::Facet)]
+#[repr(u8)]
+pub enum Node {
+    Unit, Bool, Char, String,
+    I8, I16, I32, I64, I128, ISize,
+    U8, U16, U32, U64, U128, USize,
+    F32, F64, Bytes,
+    Cbor,      // opaque canonical-CBOR payload
+    RawTree,   // verbatim subtree reference
+    Dynamic,   // runtime-shaped value
+
+    List(Box<Node>),
+    Array { elem: Box<Node>, len: usize },
+    Map { key: Box<Node>, value: Box<Node> },   // key MUST be String
+    Optional(Box<Node>),
+    Tuple(Vec<Node>),
+    Struct(BTreeMap<String, Node>),
+    Enum(BTreeMap<String, VariantKind>),
+    Ref(String),
+}
+
+#[derive(Debug, Clone, PartialEq, facet::Facet)]
+#[repr(u8)]
+pub enum VariantKind {
+    Unit,
+    Tuple(Vec<Node>),
+    Struct(BTreeMap<String, Node>),
+}
+----
+
+A `Node` leaf variant is a bare blob holding its keyword (`unit`, `bool`,
+`char`, `string`, `i8` … `u128`, `isize`, `usize`, `f32`, `f64`, `bytes`,
+`cbor`, `rawtree`, `dynamic`); a composite variant is a single-entry tree
+`{ keyword -> payload }` (`list`, `array`, `map`, `optional`, `tuple`,
+`struct`, `enum`, `ref`). Keywords are exactly the lowercase variant names.
+
+* The `Struct` payload maps *field name -> `Node`* directly; the former
+  `StructField { node, has_default }` wrapper is removed.
+* `VariantKind::Newtype` is removed — it and `Struct` were indistinguishable on
+  the wire. A one-field tuple variant is `Tuple([n])`.
+* A `ref` whose target is absent is a *dangling* ref (rejected). A cycle of
+  refs not guarded by `Optional`/`List`/`Array`/`Map`/`Enum` is
+  *non-productive* and rejected. Schema decoding is depth-bounded.
+* `RawTree` (keyword `rawtree`) points at an existing tree oid without
+  re-encoding it: an opaque, arbitrarily-shaped subtree. It is exempt from the
+  no-empty-tree and mode rules, and MAY contain anything.
+
+[NOTE]
+====
+`kind` is an opaque label, not a type check — two schemas with different `kind`
+values are still different schemas by oid. It is not used to decode.
+====
+
+== Identity, equality, and commits
+
+* **EntityId** is the oid of the bound root tree (content-derived).
+* Document equality is equality of the canonical value **and** the canonical
+  schema, byte for byte. Object ids are comparable only within one hash format
+  (SHA-1 vs SHA-256); cross-format equality compares content, not oids.
+* The `doctor` tool verifies the codec's fixed point: that `S0` (the schema
+  describing `Schema`) decodes and re-encodes to itself. `S0`'s oid is pinned
+  as a golden constant **per hash format**.
+* `.schema` is the normative, reachable schema; the `Schema-commit:` trailer is
+  advisory (trailers are not traversed by gc/push).
+
+== Decode contract
+
+A reader MUST reject, rather than tolerate:
+
+* an unknown structural keyword, or `.schema`/`.value` below the root;
+* a malformed or non-canonical escape (see escaping);
+* an ordinal that is wrong-width, has an uppercase digit, or is a gap or a
+  duplicate; a count above the 4096 cap; or an `Array.len` that disagrees with
+  the entry count;
+* an entry whose object kind (blob vs tree) contradicts the schema; a mode
+  other than blob `100644` / tree `040000`;
+* an enum tree with ≠1 entry, or a `some`/`none` marker with ≠1 entry, or a
+  `none` whose target is not the empty blob;
+* an unknown enum variant; a struct with a missing field or an unknown entry;
+* a non-canonical number, boolean, float, or `-0.0`; a text leaf whose final
+  byte is not `\n`; a `char` that is not exactly one scalar; a non-canonical or
+  trailing-byte `cbor`;
+* a dangling ref, a non-productive ref cycle, or a `Map.key` that is not
+  `String`;
+* an unsorted or duplicate tree.
+
+Invariant: for every accepted tree `t`, `encode(decode(t)) == t`.
+
+== Git mechanics
+
+* Build trees with a real Git tree editor (`gix`), applying Git's bytewise
+  comparator with the implicit trailing-`/` rule; a naive `BTreeMap<String,_>`
+  sort emits `a` before `a.b` and produces a malformed tree.
+* Limits, all counted on the *encoded* tree: max name length 255 bytes; max
+  nesting depth 32; max nodes visited per decode `2^20` (1048576), counting
+  **visits, not unique oids** (the same subtree may be visited many times) —
+  this defuses a shared-subtree expansion bomb.
+* Respect path-component length limits; never rely on `.schema`'s position.
+
+== Frozen decisions
+
+* Ordinals: fixed-width lowercase hex, width 3, cap 4096; larger -> `cbor`.
+* Marker / `Some`: `none` / `some` (no dot). `.schema` / `.value` keep the dot
+  (root only).
+* Escape: whole-name classified; `.` structural, `%` escaped, else verbatim;
+  verbatim restricted to `[A-Za-z0-9._-]`.
+* Structs: emit every field; reject unknown; no defaults in the schema.
+* Big/opaque data: `cbor` leaf; non-string map keys: `cbor`.
+* Dynamic values are lossy (no tag); exact dynamic round-trip is out of scope.
+* Entity schema is a stored artifact, never re-derived; the meta-schema is the
+  LTS, migrated by hand.
