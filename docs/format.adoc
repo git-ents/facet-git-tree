@@ -131,12 +131,35 @@ A unit enum variant's tag blob is a text leaf (escaped name + `\n`).
 written on a 64-bit host can fail to decode on a 32-bit one; this is recorded
 behavior.
 
-Floats (`f32`/`f64`) use the shortest string that round-trips (Ryu), formatted
-as the type itself (an `f32` is not widened to `f64`), always carrying a decimal
-point or an exponent (`1.0`, not `1`; lowercase `e`). Negative zero is
-normalized to positive zero on write. `nan`, `inf`, and `-inf` are **not
-representable**: writing them is an error, and a reader rejects those spellings.
-The reader verifies `format(parse(s)) == s`, rejecting any non-canonical form.
+A float leaf is a *text leaf* (see above): its blob is the canonical text plus
+one trailing `\n`, which is stripped before parsing.
+
+Finite floats use the layout emitted by the `ryu` crate's `Buffer::format` for
+the field's own type — the shortest decimal that round-trips, with a decimal
+point or `e`-exponent exactly as `ryu` lays it out (`1.0`, `1e21`, `1e-7`) —
+and `f32` is formatted (and later parsed) as `f32`, never widened to `f64`. A
+finite literal that overflows the target type (e.g. `1e39` in an `f32`) is an
+error.
+
+Either zero is written `0.0`; the reader rejects any text that parses to negative
+zero (`-0.0`, `-0e0`).
+
+The non-finite values are encoded as the fixed lowercase spellings `nan`,
+`inf`, and `-inf` (no decimal point or exponent). Exactly these three are
+accepted; any other spelling (`NaN`, `+inf`, `infinity`, …) is an error. Every
+NaN bit pattern collapses to the single spelling `nan`, which decodes to the
+canonical quiet NaN (`0x7fc00000` for `f32`, `0x7ff8000000000000` for `f64`), so
+float round-trip is exact except for a NaN's payload/sign and the sign of zero —
+a recorded limitation, not an error.
+
+The reader verifies that re-formatting the parsed value reproduces `s` exactly,
+rejecting any non-canonical form.
+
+NOTE: These non-finite values (`nan`, `inf`, `-inf`) are not JSON literals. A
+JSON exporter MUST map them to the quoted strings `"nan"`, `"inf"`, `"-inf"`
+(which a schema-directed importer reverses); exporting them as `null` is lossy
+and export-only. The codec's own tree round-trips them, subject to the NaN and
+signed-zero limitation above.
 
 `cbor` uses RFC 8949 core-deterministic encoding of the `facet` value (a
 byte-string leaf's content is the CBOR payload). A reader rejects a `cbor` blob
@@ -325,6 +348,7 @@ Invariant: for every accepted tree `t`, `encode(decode(t)) == t`.
   verbatim restricted to `[A-Za-z0-9._-]`.
 * Structs: emit every field; reject unknown; no defaults in the schema.
 * Big/opaque data: `cbor` leaf; non-string map keys: `cbor`.
+* Non-finite floats are stored (`nan`/`inf`/`-inf`), not rejected.
 * Dynamic values are lossy (no tag); exact dynamic round-trip is out of scope.
 * Entity schema is a stored artifact, never re-derived; the meta-schema is the
   LTS, migrated by hand.
