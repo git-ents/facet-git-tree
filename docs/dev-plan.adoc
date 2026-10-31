@@ -1,0 +1,189 @@
+= Dev Plan: implement the frozen wire format
+
+This plan is self-contained and is intended to be handed to an orchestrator
+agent. Source of truth is link:format.adoc[`docs/format.adoc`] (committed at
+`cfed1d5`); where it disagrees with `git-store`'s specification, it wins.
+
+== 0. Model policy
+
+Every role — orchestration, coding, and review — uses the model **`gpt 6.1
+terra`**. No other model is used anywhere in this plan.
+
+== 1. Mission
+
+Implement the frozen on-disk wire format across the `facet-git-tree` codec crate
+and the `git-store` envelope. The current code implements the *old* format and
+must be reworked; backward compatibility is explicitly **not** required.
+
+== 2. Ground rules (all agents)
+
+* **Commits:** message form is `type: subject` (`feat`, `fix`, `docs`, `test`,
+  `refactor`). **No scopes, ever** (never `docs(format):`, never `set(x):`).
+* **Review before every commit:** before each commit, spawn a review agent
+  (model `gpt 6.1 terra`) on the staged diff, fix every finding, then commit. No
+  commit without a prior review pass.
+* **Hooks:** the repo runs pre-commit hooks (`typos`, `end-of-files`, later
+  `cargo fmt`, `cargo clippy`). Keep them green; `typos` rewrites British to
+  American spellings.
+* **Constraints:** `#![forbid(unsafe_code)]`; encode only via `gix`/`facet`; no
+  environment workarounds (no symlinks, env vars, shims, or system installs) —
+  repo fixes only.
+* **Concurrency:** one file has exactly one owner at a time. Never run two
+  agents that edit the same file.
+
+== 3. What the format requires (condensed)
+
+* **Envelope:** value fields at the root plus reserved `.schema`; a non-struct
+  root wraps as `{ .value -> v, .schema -> S }`. Look up `.schema` by name,
+  never by position.
+* **Names:** whole-name classification — `.schema`/`.value` (root) and
+  `none`/`some` (containers) are structural; a leading `%` is escaped; else
+  verbatim, where verbatim requires every byte in `[A-Za-z0-9._-]`, first byte
+  not `.`/`%`, and not literally `none`/`some`. Otherwise `%` plus
+  percent-encoding. A reader rejects non-canonical escapes and invalid UTF-8;
+  an encoded name is at most 255 bytes.
+* **Leaves:** text leaves are raw plus exactly one trailing `\n`; `bytes`/`cbor`
+  are raw, no newline. Integers are canonical decimal; floats use the `ryu`
+  layout plus `nan`/`inf`/`-inf`; `-0.0` becomes `0.0`; `cbor` is RFC 8949
+  core-deterministic.
+* **Containers:** a struct emits every field and rejects unknown entries;
+  list/tuple ordinals are fixed-width lowercase hex `000`–`fff`; every tree is
+  capped at 4096; map keys are string-only (else `cbor`); an enum's unit variant
+  is a bare tag blob, a one-field tuple variant encodes directly, a struct
+  variant is always named; `Vec<u8>` is `bytes`.
+* **Markers:** `None`/`null`/empty collection/empty struct/empty tuple/`unit`
+  are `{ none -> <empty blob> }`; `Some(x)` is `{ some -> x }`. No empty tree is
+  ever written; the empty blob is written explicitly.
+* **Schema:** self-hosted `Schema { kind, root, defs }`; `Node`/`VariantKind` per
+  `docs/format.adoc` (no `StructField`, no `Newtype`, add `Cbor`); `.schema` is
+  an *unbound* value; non-productive `ref` cycles are rejected; `Map.key` must
+  be `String`.
+* **Decode:** strict; the invariant `encode(decode(t)) == t` holds; limits are
+  name 255 bytes, depth 32, `2^20` visits.
+* **Versioning:** the meta-schema is the LTS; entity schemas are stored and never
+  re-derived; `S0`'s oid is pinned per hash format; `doctor` verifies the `S0`
+  fixed point.
+
+== 4. Workstreams
+
+=== W1 — codec types (`src/schema/mod.rs`, `src/lib.rs`)
+
+Replace `Schema`/`Node`/`VariantKind` with the frozen definitions; delete
+`StructField`/`has_default`/`FieldNode`; add `Cbor`; update `schema_of` to emit
+the new shapes (no canonicalization required). Update exports in `lib.rs`.
+
+_Acceptance:_ crate type-checks; `schema_of::<T>()` produces the frozen keywords.
+
+=== W2 — escaping and ordinals (`src/name.rs`, `src/ordinal.rs`)
+
+`escape`/`unescape` (whole-name rule, canonical rejection, UTF-8 check, 255-byte
+cap); ordinal encode/decode (fixed-width lowercase hex, width 3, cap 4096,
+reject wrong width, uppercase, gap, duplicate). Unit and property tests
+(round-trip, injectivity, disjointness from structural names).
+
+_Acceptance:_ property tests pass; `a/b`, `none`, `.schema`, `naïve` escape and
+unescape round-trip.
+
+=== W3 — encoder (`src/ser.rs`, `src/marker.rs`, `src/raw_blob.rs`)
+
+Apply W1/W2: hex ordinals; `none`/`some`; escape field/variant/map-key/def names;
+text-vs-binary newline rule; `bytes`/`cbor`; struct emit-all; enum variant rules;
+map string-keys; the 4096 cap becomes an error; non-struct root `.value`; no
+empty trees; dynamic by runtime kind.
+
+_Acceptance:_ the `Book`/`Task` fixtures encode to the exact trees in
+`docs/format.adoc`.
+
+=== W4 — decoder (`src/de.rs`)
+
+Enforce the full strict decode contract (every bullet in `docs/format.adoc` s
+"Decode contract") with the `encode(decode(t)) == t` invariant; depth and
+visit budget; a real Git tree comparator.
+
+_Acceptance:_ each contract bullet has a failing fixture that is rejected.
+
+=== W5 — schema-directed read/write (`src/schema/read.rs`, `src/schema/write.rs`, `src/schema/path.rs`)
+
+Drive W3/W4 from a `Schema`; handle `Cbor`, `Ref` resolution, ref-cycle
+rejection, and the `Map.key == String` check.
+
+_Acceptance:_ schema-directed round-trip for all fixtures.
+
+=== W6 — normal form (`src/normal_form/mod.rs`)
+
+Update the identity mini-codec to the new leaf/container rules (hex ordinals,
+markers, newline rules, escaping) so `Key`/`NormalForm` stay consistent with the
+wire format.
+
+_Acceptance:_ identity subtrees are stable and tested.
+
+=== W7 — git-store envelope (`git-store/crates/git-store/src/{store,identity,document}.rs`)
+
+`.schema`/`.value` envelope; `split_document` accepts `{value..., .schema}` and
+`{ .value, .schema }`; non-struct root support; `EntityId` is the oid of the
+bound tree; trailers `Schema-Version:`/`Schema-commit:` (advisory); update
+`RESERVED_TRAILERS`.
+
+_Acceptance:_ bind/split round-trip for struct and non-struct roots.
+
+=== W8 — doctor (git-store / codec tool)
+
+Implement the fixed-point check: `S0` decodes and re-encodes to itself; pin
+`S0`'s oid per hash format (SHA-1 and SHA-256). Only SHA-1 is checked today.
+
+_Acceptance:_ doctor fails if any format rule is perturbed.
+
+=== W9 — tests (`tests/`, fixtures)
+
+Rewrite and repurpose fixtures; fix `tests/check_key.rs` (it currently pins
+`.schema` as a *valid* key, which must be reversed); add the W4 reject-fixtures;
+add golden-tree tests for `Book`/`Task` from `docs/format.adoc`.
+
+_Acceptance:_ the full suite is green; golden trees are byte-identical.
+
+=== W10 — docs (`git-store/docs/specification.adoc`, `facet-git-tree/README.md`)
+
+Reconcile the git-store spec's Serialization/Deserialization/Schemas sections to
+`docs/format.adoc`; note that the format doc supersedes it.
+
+_Acceptance:_ no contradiction remains between the two documents.
+
+== 5. Sequencing
+
+. W1 then W2 (W2 can run in parallel with the tail of W1).
+. W3 and W4 in parallel (different files), both depending on W1/W2.
+. W5 after W3/W4.
+. W6 and W7 in parallel.
+. W8 after W7.
+. W9 continuously; W10 last.
+
+Partition rule for parallel coding agents: **never assign the same file to two
+agents.** Suggested split:
+`{schema/mod.rs, lib.rs}` |
+`{name.rs, ordinal.rs}` |
+`{set.rs, marker.rs}` |
+`{de.rs}` |
+`{schema/read.rs, schema/write.rs}` |
+`{normal_form/mod.rs}` |
+`{git-store envelope}` |
+`{tests}` |
+`{docs}`.
+
+== 6. Review gate
+
+After each workstream's edits are staged (before commit): spawn a review agent
+(model `gpt 6.1 terra`) with the staged diff plus the relevant `docs/format.adoc`
+sections; require concrete failing cases; fix all findings; then commit
+`type: subject` (no scope). If the reviewer disagrees with `docs/format.adoc`,
+the format doc wins — fix the code, not the spec.
+
+== 7. Definition of done
+
+* `cargo test` and `cargo clippy -- -D warnings` are green in `facet-git-tree`
+  and `git-store`.
+* Golden trees for `Book`/`Task` match `docs/format.adoc` byte-for-byte.
+* Every decode-contract bullet has a rejection test, and the property test
+  `encode(decode(t)) == t` passes on generated trees.
+* The `doctor` fixed-point check is implemented and passing for SHA-1 and
+  SHA-256.
+* The `git-store` spec is reconciled; every commit is reviewed and unscoped.
