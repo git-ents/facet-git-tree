@@ -86,7 +86,7 @@ whose decoded bytes are not valid UTF-8.
 | `.schema` | no — leading `.` | `%.schema`
 | `a/b` | no — `/` ∉ set | `%a%2Fb`
 | `a b` | no — space ∉ set | `%a%20b`
-| `naïve` | no — `ï` ∉ set | `na%C3%AFve`
+| `naïve` | no — `ï` ∉ set | `%na%C3%AFve`
 | _(empty)_ | no | `%`
 |===
 
