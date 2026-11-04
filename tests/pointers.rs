@@ -26,6 +26,9 @@ struct Pt {
     y: i32,
 }
 
+#[derive(Debug, Facet, PartialEq)]
+struct Eleven(i32, i32, i32, i32, i32, i32, i32, i32, i32, i32, i32);
+
 // --- sized pointees roundtrip ---
 
 /// `Box<T>` roundtrips, reconstructing the box around the decoded pointee.
@@ -68,6 +71,29 @@ fn pointer_is_transparent() {
     assert_eq!(bare, arced);
 }
 
+/// Pointer transparency also preserves tuple-struct ordinals across 9 -> a.
+#[test]
+fn boxed_tuple_struct_uses_hex_ordinals() {
+    let value = Box::new(Eleven(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10));
+    let (root, store) = serialize(&value).expect("serialize");
+    let (bare_root, _) = serialize(value.as_ref()).expect("serialize bare tuple struct");
+    assert_eq!(root, bare_root);
+    let entries = common::tree_entries(&store, &root);
+    assert_eq!(entries.len(), 11);
+    for (index, entry) in entries.iter().enumerate() {
+        assert_eq!(entry.filename.to_string(), format!("{index:03x}"));
+        assert_eq!(entry.mode.kind(), EntryKind::Blob);
+        assert_eq!(
+            store.get_blob(&entry.oid).expect("read object"),
+            Some(format!("{index}\n").into_bytes())
+        );
+    }
+    assert_eq!(
+        roundtrip(value),
+        Box::new(Eleven(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10))
+    );
+}
+
 // --- unsized slice pointees ---
 
 /// `Arc<[u8]>` roundtrips through the slice builder.
@@ -89,19 +115,24 @@ fn rc_and_box_byte_slice_roundtrip() {
 /// `Arc<[u8]>` lands as a single blob, like any other byte sequence.
 #[test]
 fn arc_byte_slice_is_a_single_blob() {
-    let bytes: &[u8] = b"\x7fELF\x02";
-    let (root, store) = serialize(&WithArcBytes {
-        blob: Arc::from(bytes),
-    })
-    .expect("serialize");
-    let (kind, oid) = common::get_tree_entry_mode(&store, &root, "blob");
-    assert_eq!(kind, EntryKind::Blob);
-    let mut expected = bytes.to_vec();
-    expected.push(b'\n');
-    assert_eq!(
-        store.get_blob(&oid).expect("read object").expect("blob"),
-        expected
-    );
+    for bytes in [b"".as_slice(), b"\x7fELF\x02", b"\0\xff\n"] {
+        let value = WithArcBytes {
+            blob: Arc::from(bytes),
+        };
+        let (root, store) = serialize(&value).expect("serialize");
+        let (kind, oid) = common::get_tree_entry_mode(&store, &root, "blob");
+        assert_eq!(kind, EntryKind::Blob);
+        assert_eq!(
+            store.get_blob(&oid).expect("read object").expect("blob"),
+            bytes
+        );
+        assert_eq!(
+            roundtrip(value),
+            WithArcBytes {
+                blob: Arc::from(bytes)
+            }
+        );
+    }
 }
 
 /// A non-`u8` slice pointee (`Arc<[u32]>`) is a tree, and roundtrips with order
@@ -110,10 +141,23 @@ fn arc_byte_slice_is_a_single_blob() {
 fn arc_u32_slice_roundtrip() {
     let values: Arc<[u32]> = Arc::from([10_u32, 20, 30].as_slice());
     let (root, store) = serialize(&values).expect("serialize");
-    assert!(
-        store.get_tree(&root).expect("read object").is_some(),
-        "a non-u8 slice must be a tree, not a blob"
-    );
+    let entries = store
+        .get_tree(&root)
+        .expect("read object")
+        .expect("a non-u8 slice must be a tree, not a blob");
+    assert_eq!(entries.len(), 3);
+    for (entry, (name, blob)) in entries.iter().zip([
+        ("000", b"10\n".as_slice()),
+        ("001", b"20\n".as_slice()),
+        ("002", b"30\n".as_slice()),
+    ]) {
+        assert_eq!(entry.filename, name);
+        assert_eq!(entry.mode.kind(), EntryKind::Blob);
+        assert_eq!(
+            store.get_blob(&entry.oid).expect("read object"),
+            Some(blob.to_vec())
+        );
+    }
     assert_eq!(roundtrip(values.clone()), values);
 }
 

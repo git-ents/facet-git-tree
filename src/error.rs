@@ -2,16 +2,13 @@
 
 use gix_hash::ObjectId;
 
-/// A user-supplied key cannot be used as a Git tree entry name.
+/// A user-supplied key has no representable encoded Git tree-entry name.
 ///
-/// Tree entry names double as path segments, so a key may not contain `/`
-/// or NUL, and may not equal the reserved presence-marker name (`"_"`):
-/// a real entry so named would be indistinguishable from the marker on read.
+/// User names are escaped as needed — including the empty string and names
+/// holding `/`, NUL, or a leading `.` — so the only way one fails is an
+/// encoded name longer than 255 bytes, which escaping can triple.
 #[derive(Debug, thiserror::Error)]
-#[error(
-    "invalid key {key:?}: not a usable git tree entry name (must be non-empty, must not contain \
-     '/' or NUL, must not be \".\" or \"..\", and must not equal the reserved marker \"_\")"
-)]
+#[error("invalid key {key:?}: encoded entry name exceeds 255 bytes")]
 pub struct KeyError {
     /// The offending key.
     pub key: String,
@@ -32,24 +29,6 @@ pub enum SerializeError {
     /// `'static`-friendly, so they are collapsed to text at this boundary.
     #[error("reflection error: {0}")]
     Reflect(String),
-    /// A map key's textual form is not valid UTF-8, so it cannot become a
-    /// Git tree entry name.
-    #[error("map key is not valid UTF-8")]
-    NonUtf8MapKey,
-    /// Two map pairs carry the same composite key.
-    ///
-    /// Pair entries are named by the pair sub-tree's object id and the pair
-    /// names its key, so two entries for one key can only mean the map's key
-    /// equality is broken (e.g. NaN float keys). A merged or foreign tree
-    /// carrying two pairs for one key is refused on read by
-    /// [`DeserializeError::DuplicateKey`] instead.
-    #[error(
-        "two map pairs carry the same key (key object {oid}); the map's key equality is broken"
-    )]
-    DuplicateKey {
-        /// The shared key object id.
-        oid: ObjectId,
-    },
     /// The value contains a type this encoding does not support.
     #[error("unsupported type for serialization: {0}")]
     Unsupported(&'static str),
@@ -97,14 +76,13 @@ pub enum DeserializeError {
     NonUtf8Blob(ObjectId),
     /// A leaf blob's final byte is not `\n`.
     ///
-    /// Every leaf blob carries exactly one mandatory trailing newline; a
-    /// leaf missing it is foreign or corrupt and is rejected rather than
-    /// accepted leniently. The presence marker (`crate::marker`) is a
-    /// separate structural object and is never checked.
-    #[error(
-        "leaf blob {0} is missing its mandatory trailing newline — it predates \
-         the trailing-newline leaf encoding and must be re-stored"
-    )]
+    /// Every text leaf carries exactly one mandatory trailing newline; a
+    /// blob without it is foreign or corrupt, not a text leaf, and is
+    /// rejected rather than accepted leniently. Binary leaves (typed byte
+    /// sequences and CBOR) are read through a separate, unchecked path, and
+    /// the presence marker (`crate::marker`) is a separate structural object
+    /// that is never checked.
+    #[error("leaf blob {0} is missing its mandatory trailing newline")]
     MissingLeafNewline(ObjectId),
     /// Deserialization exceeded the maximum supported nesting depth.
     #[error("maximum nesting depth ({0}) exceeded while deserializing")]
@@ -175,26 +153,11 @@ pub enum DeserializeError {
         /// The variant name.
         variant: String,
     },
-    /// A composite-key map pair sub-tree is missing its `k` or `v` entry.
-    #[error("map pair sub-tree missing {entry:?} entry")]
-    MissingMapPairEntry {
-        /// The missing entry name (`"k"` or `"v"`).
-        entry: &'static str,
-    },
-    /// A composite-key map tree holds two pairs for the same key.
+    /// A struct tree lacks an entry a field requires.
     ///
-    /// Either pair could be "the" value, so accepting both would silently
-    /// pick one.
-    #[error("map holds two pairs for the same key (key object {oid})")]
-    DuplicateKey {
-        /// The shared key object id.
-        oid: ObjectId,
-    },
-    /// A struct tree lacks the entry a non-defaulted field requires.
-    ///
-    /// Fields with a `facet` default may be absent; an `Option` field reads
-    /// as `None` when absent. Any other missing field means the tree does
-    /// not describe this type.
+    /// Every field is always written, defaults included, so a missing field
+    /// means the tree does not describe this type. An `Option` field is
+    /// present as the `none` marker rather than omitted.
     #[error("struct field {field:?} is missing from the tree")]
     MissingField {
         /// The field (or positional-ordinal name) the tree omits.

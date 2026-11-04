@@ -1,15 +1,12 @@
-//! Integration tests for byte-sequence encoding.
-//!
-//! Covers spec requirements:
-//!   serialization.design.bytes — `u8` sequences are stored as a single blob
-//!   deserialization.roundtrip  — deserialize(serialize(x)) must equal x
+//! Byte sequences are bare binary blobs, not newline-terminated text or trees.
 
 use facet::Facet;
-use facet_git_tree::{EntryKind, serialize};
+use facet_git_tree::{EntryKind, ObjectStore, deserialize, serialize};
+use gix_object::{Kind, Write as _};
 use rstest::rstest;
 
 mod common;
-use common::roundtrip;
+use common::{get_tree_entry_mode, roundtrip};
 
 #[derive(Debug, Facet, PartialEq)]
 struct WithBytes {
@@ -27,12 +24,11 @@ struct TwoBuffers {
     b: Vec<u8>,
 }
 
-/// `Vec<u8>` roundtrips for a range of contents, including empty, embedded NUL
-/// bytes, and the full byte range — none of which a textual encoding survives.
 #[rstest]
 #[case(vec![])]
 #[case(vec![0])]
 #[case(vec![0, 0, 0])]
+#[case(vec![b'\n'])]
 #[case(b"\x7fELF\x02\x01\x01".to_vec())]
 #[case((0u8..=255).collect())]
 fn vec_u8_roundtrip(#[case] bytes: Vec<u8>) {
@@ -44,40 +40,64 @@ fn vec_u8_roundtrip(#[case] bytes: Vec<u8>) {
     );
 }
 
-/// A fixed-size `[u8; N]` array roundtrips through its blob encoding.
 #[test]
 fn byte_array_roundtrip() {
+    let expected = WithByteArray {
+        hash: [0xde, 0xad, 0xbe, 0xef],
+    };
     assert_eq!(
         roundtrip(WithByteArray {
-            hash: [0xde, 0xad, 0xbe, 0xef]
+            hash: expected.hash
         }),
-        WithByteArray {
-            hash: [0xde, 0xad, 0xbe, 0xef]
-        }
-    );
-}
-
-/// A `Vec<u8>` field is stored as a single blob, not a per-byte tree, and that
-/// blob holds the bytes verbatim followed by the mandatory trailing newline
-/// every leaf blob carries (`serialization.design.leaves.encoding`).
-#[test]
-fn vec_u8_is_a_single_blob() {
-    let bytes = b"\x00\x01\x02hello\xff".to_vec();
-    let (root, store) = serialize(&WithBytes {
-        data: bytes.clone(),
-    })
-    .expect("serialize");
-    let (kind, oid) = common::get_tree_entry_mode(&store, &root, "data");
-    assert_eq!(kind, EntryKind::Blob, "byte sequence must be a blob");
-    let mut expected = bytes;
-    expected.push(b'\n');
-    assert_eq!(
-        store.get_blob(&oid).expect("read object").expect("blob"),
         expected
     );
 }
 
-/// Two byte-identical buffers deduplicate to the same blob object.
+#[rstest]
+#[case(vec![])]
+#[case(vec![0, 1, 2, b'\n', 0xff])]
+#[case(vec![b'a', b'\n', b'\n'])]
+fn vec_u8_is_one_blob_with_verbatim_contents(#[case] bytes: Vec<u8>) {
+    let input = WithBytes {
+        data: bytes.clone(),
+    };
+    let (root, store) = serialize(&input).expect("serialize");
+    let (kind, oid) = get_tree_entry_mode(&store, &root, "data");
+    assert_eq!(kind, EntryKind::Blob);
+    assert_eq!(store.get_blob(&oid).expect("read blob"), Some(bytes));
+    assert_eq!(
+        deserialize::<WithBytes>(&root, &store).expect("decode"),
+        input
+    );
+}
+
+#[test]
+fn fixed_array_is_one_binary_blob() {
+    let input = WithByteArray {
+        hash: [0, b'\n', 0xff, b'\n'],
+    };
+    let (root, store) = serialize(&input).expect("serialize");
+    let (kind, oid) = get_tree_entry_mode(&store, &root, "hash");
+    assert_eq!(kind, EntryKind::Blob);
+    assert_eq!(
+        store.get_blob(&oid).expect("read blob"),
+        Some(input.hash.to_vec())
+    );
+    assert_eq!(
+        deserialize::<WithByteArray>(&root, &store).expect("decode"),
+        input
+    );
+}
+
+#[test]
+fn byte_array_rejects_wrong_blob_lengths() {
+    let store = ObjectStore::default();
+    for bytes in [b"abc".as_slice(), b"abcde".as_slice()] {
+        let oid = store.write_buf(Kind::Blob, bytes).expect("write blob");
+        assert!(deserialize::<[u8; 4]>(&oid, &store).is_err());
+    }
+}
+
 #[test]
 fn identical_buffers_dedup() {
     let (root, store) = serialize(&TwoBuffers {
@@ -85,16 +105,44 @@ fn identical_buffers_dedup() {
         b: vec![1, 2, 3, 4],
     })
     .expect("serialize");
-    let (_, a_oid) = common::get_tree_entry_mode(&store, &root, "a");
-    let (_, b_oid) = common::get_tree_entry_mode(&store, &root, "b");
-    assert_eq!(a_oid, b_oid, "equal buffers must share one blob");
+    let (_, a_oid) = get_tree_entry_mode(&store, &root, "a");
+    let (_, b_oid) = get_tree_entry_mode(&store, &root, "b");
+    assert_eq!(a_oid, b_oid);
 }
 
-/// An empty `Vec<u8>` roundtrips as empty (an empty blob), not as a missing field.
 #[test]
-fn empty_vec_u8_roundtrip() {
+fn empty_bytes_share_marker_blob_but_not_marker_tree() {
+    let (empty_bytes, store) = serialize(&Vec::<u8>::new()).expect("serialize bytes");
     assert_eq!(
-        roundtrip(WithBytes { data: vec![] }),
-        WithBytes { data: vec![] }
+        store.get_blob(&empty_bytes).expect("read bytes"),
+        Some(vec![])
+    );
+
+    let (empty_list, list_store) = serialize(&Vec::<i32>::new()).expect("serialize list");
+    let marker = list_store
+        .get_tree(&empty_list)
+        .expect("read marker")
+        .expect("tree");
+    assert_eq!(marker.len(), 1);
+    assert_eq!(marker[0].filename, "none");
+    assert_eq!(marker[0].oid, empty_bytes);
+    assert_ne!(empty_list, empty_bytes);
+    assert_eq!(
+        deserialize::<Vec<u8>>(&empty_bytes, &store).expect("decode"),
+        Vec::<u8>::new()
+    );
+}
+
+#[test]
+fn byte_sequences_are_not_subject_to_the_tree_entry_cap() {
+    let bytes = vec![0xabu8; 4097];
+    let (root, store) = serialize(&bytes).expect("encode bytes");
+    assert_eq!(
+        store.get_blob(&root).expect("read bytes"),
+        Some(bytes.clone())
+    );
+    assert_eq!(
+        deserialize::<Vec<u8>>(&root, &store).expect("decode"),
+        bytes
     );
 }

@@ -1,28 +1,23 @@
-//! Integration tests for deserialization error paths.
+//! Strict bare-value decoding of foreign Git objects, per `docs/format.adoc`.
 //!
-//! These exercise the `DeserializeError` variants that only arise on read,
-//! against missing, mistyped, or externally-produced (foreign) trees — the
-//! robustness a git interop library must have:
-//!   DeserializeError::NotFound         — a referenced object is absent from the store
-//!   DeserializeError::NotATree         — an object expected to be a tree is another kind
-//!   DeserializeError::NonUtf8Name      — a foreign tree has a non-UTF-8 entry name
-//!   DeserializeError::InvalidOrdinal   — a sequence entry is not named by a decimal index
-//!   DeserializeError::DuplicateOrdinal — two sequence entries name the same numeric index
-//!   DeserializeError::MaxDepth         — a pathologically deep tree is rejected, not overflowed
-//!   DeserializeError::MislabeledOption — an Option tree's single entry is not named "some"
-//!   DeserializeError::MalformedOption  — a literal empty tree is not a valid `None`
-//!   DeserializeError::UnitVariantIsTree    — a unit variant tagged with a tree, not a blob
-//!   DeserializeError::VariantPayloadIsBlob — a non-unit variant tagged with a blob, not a tree
-//!   DeserializeError::MissingLeafNewline   — a leaf blob is missing its mandatory trailing newline
-//!   DeserializeError::MissingField     — a struct tree omits a non-defaulted field
-//!   DeserializeError::UnexpectedEntry  — a tree entry has no counterpart field
+//! These fixtures are written independently of the encoder. In particular,
+//! raw tree bytes preserve duplicate names, invalid modes, and bad ordering.
+
+#[cfg(feature = "value")]
+use std::cell::Cell;
+use std::collections::BTreeMap;
+use std::fmt::Debug;
 
 use facet::Facet;
 use facet_git_tree::{
-    DeserializeError, EntryKind, EntryMode, ObjectId, ObjectStore, TreeEntry, deserialize,
+    DeserializeError, EntryKind, EntryMode, ObjectId, ObjectStore, RawTree, TreeEntry, deserialize,
 };
-use gix_object::bstr::BString;
+#[cfg(feature = "value")]
+use gix_object::{Data, Find};
 use gix_object::{Kind, Tree, Write};
+
+#[cfg(feature = "value")]
+use facet_git_tree::{Node, Schema, SchemaReadError, deserialize_value_with_schema};
 
 mod common;
 use common::Point;
@@ -32,347 +27,767 @@ use common::Point;
 enum Shape {
     Unit,
     Circle { radius: f64 },
+    Pair(i32, String),
 }
 
-/// Write a tree of `(name, kind, oid)` entries and return its id.
-fn write_tree(store: &ObjectStore, entries: &[(&str, EntryKind, ObjectId)]) -> ObjectId {
+#[derive(Debug, Facet, PartialEq)]
+struct Strict {
+    a: i32,
+    #[facet(default)]
+    defaulted: i32,
+    optional: Option<String>,
+}
+
+#[derive(Debug, Facet, PartialEq)]
+struct Empty {}
+
+fn blob(store: &ObjectStore, bytes: &[u8]) -> ObjectId {
+    store.write_buf(Kind::Blob, bytes).expect("write blob")
+}
+
+/// Entries must already be in Git tree order.
+fn tree(store: &ObjectStore, entries: &[(&str, EntryKind, ObjectId)]) -> ObjectId {
     let entries = entries
         .iter()
         .map(|(name, kind, oid)| TreeEntry {
             mode: EntryMode::from(*kind),
-            filename: BString::from(*name),
+            filename: (*name).into(),
             oid: *oid,
         })
         .collect();
     store.write(&Tree { entries }).expect("write tree")
 }
 
-/// Deserializing from a root id absent from the store yields `NotFound`.
-#[test]
+/// Bypass tree editors so malformed modes, duplicates, and ordering survive.
+fn raw_tree(store: &ObjectStore, entries: &[(&[u8], &[u8], ObjectId)]) -> ObjectId {
+    let mut bytes = Vec::new();
+    for (mode, name, oid) in entries {
+        bytes.extend_from_slice(mode);
+        bytes.push(b' ');
+        bytes.extend_from_slice(name);
+        bytes.push(0);
+        bytes.extend_from_slice(oid.as_bytes());
+    }
+    store.write_buf(Kind::Tree, &bytes).expect("write raw tree")
+}
 
-fn missing_root_object_is_not_found() {
-    // An id produced in one store, queried in an empty one, is absent.
-    let written = ObjectStore::default();
-    let id = written.write_buf(Kind::Blob, b"hello").expect("write blob");
+fn marker(store: &ObjectStore) -> ObjectId {
+    let empty = blob(store, b"");
+    tree(store, &[("none", EntryKind::Blob, empty)])
+}
 
-    let empty = ObjectStore::default();
-    let result: Result<Point, _> = deserialize(&id, &empty);
+fn rejected<T: for<'a> Facet<'a> + Debug>(store: &ObjectStore, oid: &ObjectId) -> DeserializeError {
+    deserialize::<T>(oid, store).expect_err("foreign object must be rejected")
+}
+
+fn assert_reflect(error: &DeserializeError, expected: &str) {
     assert!(
-        matches!(result, Err(DeserializeError::NotFound(_))),
-        "absent root must be NotFound"
+        matches!(error, DeserializeError::Reflect(message) if message.contains(expected)),
+        "expected error containing {expected:?}, got {error:?}"
     );
 }
 
-/// Deserializing where the root id points to a blob yields `NotATree`.
 #[test]
-
-fn blob_root_is_not_a_tree() {
+fn missing_object_and_wrong_root_kind_are_distinguished() {
     let store = ObjectStore::default();
-    let blob_id = store
-        .write_buf(Kind::Blob, b"not a tree")
-        .expect("write blob");
-
-    let result: Result<Point, _> = deserialize(&blob_id, &store);
+    let absent = blob(&store, b"1\n");
+    let empty_store = ObjectStore::default();
+    let error = rejected::<Point>(&empty_store, &absent);
     assert!(
-        matches!(result, Err(DeserializeError::NotATree(_))),
-        "blob root must be NotATree"
+        matches!(error, DeserializeError::NotFound(id) if id == absent),
+        "{error:?}"
+    );
+    let error = rejected::<Point>(&store, &absent);
+    assert!(
+        matches!(error, DeserializeError::NotATree(id) if id == absent),
+        "{error:?}"
     );
 }
 
-/// A foreign tree with a non-UTF-8 entry name is rejected as `NonUtf8Name`.
 #[test]
-
-fn non_utf8_entry_name_is_rejected() {
+fn literal_empty_trees_are_rejected_except_for_raw_tree() {
     let store = ObjectStore::default();
-    let blob = store.write_buf(Kind::Blob, b"v").expect("write blob");
-
-    // Only an externally-produced tree can contain a non-UTF-8 name, which is
-    // exactly the foreign input read must tolerate (and reject cleanly).
-    let tree = Tree {
-        entries: vec![TreeEntry {
-            mode: EntryMode::from(EntryKind::Blob),
-            filename: BString::from(vec![0xff_u8, 0xfe]),
-            oid: blob,
-        }],
-    };
-    let tree_id = store.write(&tree).expect("write tree");
-
-    let result: Result<Point, _> = deserialize(&tree_id, &store);
-    assert!(
-        matches!(result, Err(DeserializeError::NonUtf8Name(_))),
-        "non-UTF-8 entry name must be NonUtf8Name"
-    );
+    let empty = tree(&store, &[]);
+    for error in [
+        rejected::<Option<i32>>(&store, &empty),
+        rejected::<Vec<i32>>(&store, &empty),
+        rejected::<BTreeMap<String, i32>>(&store, &empty),
+        rejected::<()>(&store, &empty),
+        rejected::<Empty>(&store, &empty),
+    ] {
+        assert_reflect(&error, "is empty; use the none marker");
+    }
+    // RawTree is explicitly exempt from the no-empty-tree rule.
+    assert_eq!(deserialize::<RawTree>(&empty, &store).unwrap().oid(), empty);
 }
 
-/// A foreign sequence tree with a non-numeric entry name is rejected rather than
-/// silently misordered.
 #[test]
-fn non_numeric_sequence_ordinal_is_rejected() {
+fn none_and_some_have_distinct_exact_marker_shapes() {
     let store = ObjectStore::default();
-    let elem = store.write_buf(Kind::Blob, b"1").expect("write blob");
-    // A Vec element must be named by its decimal index; "x" never is.
-    let tree_id = write_tree(&store, &[("x", EntryKind::Blob, elem)]);
-
-    let result: Result<Vec<i64>, _> = deserialize(&tree_id, &store);
-    assert!(
-        matches!(result, Err(DeserializeError::InvalidOrdinal(name)) if name == "x"),
-        "non-numeric ordinal must be InvalidOrdinal"
+    let none = marker(&store);
+    let five = blob(&store, b"5\n");
+    let some = tree(&store, &[("some", EntryKind::Blob, five)]);
+    let some_none = tree(&store, &[("some", EntryKind::Tree, none)]);
+    assert_eq!(deserialize::<Option<i32>>(&none, &store).unwrap(), None);
+    assert_eq!(deserialize::<Option<i32>>(&some, &store).unwrap(), Some(5));
+    assert_eq!(
+        deserialize::<Option<Option<i32>>>(&some_none, &store).unwrap(),
+        Some(None)
     );
-}
+    assert_eq!(
+        deserialize::<Vec<i32>>(&none, &store).unwrap(),
+        Vec::<i32>::new()
+    );
+    assert_eq!(deserialize::<Empty>(&none, &store).unwrap(), Empty {});
 
-/// A foreign sequence tree with two entries naming the same numeric ordinal
-/// (`"0"` and `"0000"`, distinct strings that parse to the same index) is
-/// rejected rather than silently resolved by insertion or lexical order.
-#[test]
-fn duplicate_sequence_ordinal_is_rejected() {
-    let store = ObjectStore::default();
-    let a = store.write_buf(Kind::Blob, b"1").expect("write blob");
-    let b = store.write_buf(Kind::Blob, b"2").expect("write blob");
-    let tree_id = write_tree(
+    let nonempty = blob(&store, b"\n");
+    let bad_none = tree(&store, &[("none", EntryKind::Blob, nonempty)]);
+    let error = rejected::<Option<i32>>(&store, &bad_none);
+    assert_reflect(&error, "is not an empty blob");
+    let none_tree = tree(&store, &[("none", EntryKind::Tree, none)]);
+    let error = rejected::<Option<i32>>(&store, &none_tree);
+    assert_reflect(&error, "none marker must have blob mode");
+    let mislabeled = tree(&store, &[("other", EntryKind::Blob, five)]);
+    let error = rejected::<Option<i32>>(&store, &mislabeled);
+    assert!(
+        matches!(&error, DeserializeError::MislabeledOption { name } if name == "other"),
+        "{error:?}"
+    );
+    let two = tree(
         &store,
-        &[("0", EntryKind::Blob, a), ("0000", EntryKind::Blob, b)],
+        &[
+            ("none", EntryKind::Blob, blob(&store, b"")),
+            ("some", EntryKind::Blob, five),
+        ],
     );
-
-    let result: Result<Vec<i64>, _> = deserialize(&tree_id, &store);
+    let error = rejected::<Option<i32>>(&store, &two);
     assert!(
-        matches!(result, Err(DeserializeError::DuplicateOrdinal(0))),
-        "duplicate ordinal must be rejected, got {result:?}"
-    );
-}
-
-/// A foreign `Option` tree whose single entry is not named `some` is rejected
-/// rather than read positionally.
-#[test]
-fn mislabeled_option_entry_is_rejected() {
-    let store = ObjectStore::default();
-    let inner = store.write_buf(Kind::Blob, b"5").expect("write blob");
-    let tree_id = write_tree(&store, &[("nope", EntryKind::Blob, inner)]);
-
-    let result: Result<Option<i32>, _> = deserialize(&tree_id, &store);
-    assert!(
-        matches!(&result, Err(DeserializeError::MislabeledOption { name }) if name == "nope"),
-        "mislabeled Option entry must be rejected, got {result:?}"
+        matches!(error, DeserializeError::MalformedOption { found: 2 }),
+        "{error:?}"
     );
 }
 
-/// `None` is written as the presence-marker tree; a literal empty tree is
-/// foreign input, rejected as `MalformedOption { found: 0 }` rather than
-/// accepted as `None`.
 #[test]
-fn literal_empty_tree_is_not_a_valid_option() {
+fn structural_names_and_noncanonical_escapes_are_rejected() {
     let store = ObjectStore::default();
-    let tree_id = write_tree(&store, &[]);
-
-    let result: Result<Option<i32>, _> = deserialize(&tree_id, &store);
+    let value = blob(&store, b"v\n");
+    // A nested map must not interpret reserved document or marker names as keys.
+    for name in [".schema", ".value", "some"] {
+        let inner = tree(&store, &[(name, EntryKind::Blob, value)]);
+        let root = tree(&store, &[("outer", EntryKind::Tree, inner)]);
+        let error = rejected::<BTreeMap<String, BTreeMap<String, String>>>(&store, &root);
+        assert_reflect(&error, "invalid encoded name");
+    }
+    for name in ["%a%2fb", "%a%2", "%74itle", "%%FF"] {
+        let root = tree(&store, &[(name, EntryKind::Blob, value)]);
+        let error = rejected::<BTreeMap<String, String>>(&store, &root);
+        assert_reflect(&error, "invalid encoded name");
+    }
+    let root = raw_tree(&store, &[(b"100644", b"\xff", value)]);
+    let error = rejected::<BTreeMap<String, String>>(&store, &root);
     assert!(
-        matches!(result, Err(DeserializeError::MalformedOption { found: 0 })),
-        "a literal empty tree must not decode as None, got {result:?}"
+        matches!(error, DeserializeError::NonUtf8Name(_)),
+        "{error:?}"
+    );
+    let canonical = tree(&store, &[("%a%2Fb", EntryKind::Blob, value)]);
+    assert_eq!(
+        deserialize::<BTreeMap<String, String>>(&canonical, &store).unwrap(),
+        BTreeMap::from([("a/b".into(), "v".into())])
     );
 }
 
-/// A foreign tree tagging a unit variant (`Shape::Unit`) with a tree
-/// instead of the required bare name-blob is rejected as `UnitVariantIsTree`.
 #[test]
-fn unit_variant_tagged_with_tree_is_rejected() {
+fn ordinals_require_three_lowercase_hex_digits_without_gaps_or_duplicates() {
     let store = ObjectStore::default();
-    let payload = write_tree(&store, &[]);
-    let tree_id = write_tree(&store, &[("Unit", EntryKind::Tree, payload)]);
-
-    let result: Result<Shape, _> = deserialize(&tree_id, &store);
+    let one = blob(&store, b"1\n");
+    for name in ["0", "00", "0000", "00g"] {
+        let root = tree(&store, &[(name, EntryKind::Blob, one)]);
+        let error = rejected::<Vec<i32>>(&store, &root);
+        assert!(
+            matches!(&error, DeserializeError::InvalidOrdinal(actual) if actual == name),
+            "{name}: {error:?}"
+        );
+    }
+    // The uppercase digit occurs at the correct numeric index, so the only
+    // defect is its case. Its lowercase neighbor must decode successfully.
+    let mut entries: Vec<_> = (0..10)
+        .map(|index| (format!("{index:03x}"), EntryKind::Blob, one))
+        .collect();
+    entries.push(("00A".into(), EntryKind::Blob, one));
+    let refs: Vec<_> = entries
+        .iter()
+        .map(|(n, k, id)| (n.as_str(), *k, *id))
+        .collect();
+    let upper = tree(&store, &refs);
+    let error = rejected::<Vec<i32>>(&store, &upper);
     assert!(
-        matches!(&result, Err(DeserializeError::UnitVariantIsTree { variant }) if variant == "Unit"),
-        "a unit variant tagged with a tree must be rejected, got {result:?}"
+        matches!(&error, DeserializeError::InvalidOrdinal(name) if name == "00A"),
+        "{error:?}"
+    );
+    entries.last_mut().unwrap().0 = "00a".into();
+    let refs: Vec<_> = entries
+        .iter()
+        .map(|(n, k, id)| (n.as_str(), *k, *id))
+        .collect();
+    let lower = tree(&store, &refs);
+    assert_eq!(
+        deserialize::<Vec<i32>>(&lower, &store).unwrap(),
+        vec![1; 11]
+    );
+
+    let gap = tree(
+        &store,
+        &[("000", EntryKind::Blob, one), ("002", EntryKind::Blob, one)],
+    );
+    let error = rejected::<Vec<i32>>(&store, &gap);
+    assert_reflect(&error, "ordinal gap: expected 001, found 002");
+    let duplicate = raw_tree(
+        &store,
+        &[(b"100644", b"000", one), (b"100644", b"000", one)],
+    );
+    let error = rejected::<Vec<i32>>(&store, &duplicate);
+    // A raw tree may spell one name twice; that is caught as a duplicate
+    // entry name while reading the tree, before ordinal validation runs.
+    // `DuplicateOrdinal` is the fallback for distinct spellings of one index,
+    // which the canonical fixed-width hex encoding cannot produce.
+    assert!(
+        matches!(&error, DeserializeError::Reflect(message) if message.contains("contains duplicate name \"000\"")),
+        "two entries named 000 must be rejected as a duplicate name, got {error:?}"
     );
 }
 
-/// A foreign object naming a non-unit variant (`Shape::Circle`) that is
-/// itself a bare blob, rather than the required payload tree, is rejected as
-/// `VariantPayloadIsBlob`.
 #[test]
-fn non_unit_variant_tagged_with_blob_is_rejected() {
+fn legacy_composite_schema_keyword_is_rejected() {
+    // `newtype` was a pre-freeze composite `Node` keyword. Its payload tree
+    // decodes structurally but names no current variant, so it is refused.
     let store = ObjectStore::default();
-    // A well-formed leaf blob (trailing newline included) so this exercises
-    // the variant-shape mismatch specifically, not `MissingLeafNewline`.
-    let blob_id = store
-        .write_buf(Kind::Blob, b"Circle\n")
-        .expect("write blob");
+    let inner = blob(&store, b"i32\n");
+    let payload = tree(&store, &[("list", EntryKind::Blob, inner)]);
+    let root = tree(&store, &[("newtype", EntryKind::Tree, payload)]);
+    let error = rejected::<facet_git_tree::Node>(&store, &root);
+    assert_reflect(&error, "unknown enum variant \"newtype\"");
+}
 
-    let result: Result<Shape, _> = deserialize(&blob_id, &store);
+#[test]
+fn out_of_range_integers_are_rejected_on_read() {
+    let store = ObjectStore::default();
+
+    // Values too large for a narrower target are refused, not truncated.
+    let too_big_for_u8 = blob(&store, b"300\n");
+    let error = rejected::<u8>(&store, &too_big_for_u8);
     assert!(
-        matches!(
-            &result,
-            Err(DeserializeError::VariantPayloadIsBlob { variant }) if variant == "Circle"
+        matches!(&error, DeserializeError::Parse { shape, text, .. } if *shape == "u8" && text == "300"),
+        "300 must not read as u8, got {error:?}"
+    );
+
+    let below_i8 = blob(&store, b"-129\n");
+    let error = rejected::<i8>(&store, &below_i8);
+    assert!(
+        matches!(&error, DeserializeError::Parse { shape, .. } if *shape == "i8"),
+        "-129 must not read as i8, got {error:?}"
+    );
+
+    // A signed spelling is non-canonical for an unsigned target.
+    let negative = blob(&store, b"-1\n");
+    let error = rejected::<u64>(&store, &negative);
+    assert!(
+        matches!(&error, DeserializeError::Parse { shape, reason, .. } if *shape == "u64" && reason == "non-canonical integer"),
+        "-1 must not read as u64, got {error:?}"
+    );
+
+    // `isize`/`usize` guard magnitudes their storage cannot hold, before the
+    // platform-width narrowing that only a 32-bit target would also exercise.
+    let beyond_i64 = blob(&store, b"9223372036854775808\n");
+    let error = rejected::<isize>(&store, &beyond_i64);
+    assert!(
+        matches!(&error, DeserializeError::Parse { shape, reason, .. } if *shape == "isize" && reason == "outside i64 range"),
+        "i64::MAX + 1 must not read as isize, got {error:?}"
+    );
+
+    let beyond_u64 = blob(&store, b"18446744073709551616\n");
+    let error = rejected::<usize>(&store, &beyond_u64);
+    assert!(
+        matches!(&error, DeserializeError::Parse { shape, reason, .. } if *shape == "usize" && reason == "outside u64 range"),
+        "u64::MAX + 1 must not read as usize, got {error:?}"
+    );
+}
+
+#[test]
+fn tuple_variant_ordinal_gap_is_not_a_missing_named_field() {
+    let store = ObjectStore::default();
+    let one = blob(&store, b"1\n");
+    let text = blob(&store, b"two\n");
+    let payload = tree(
+        &store,
+        &[
+            ("000", EntryKind::Blob, one),
+            ("002", EntryKind::Blob, text),
+        ],
+    );
+    let root = tree(&store, &[("Pair", EntryKind::Tree, payload)]);
+    let error = rejected::<Shape>(&store, &root);
+    assert_reflect(&error, "ordinal gap: expected 001, found 002");
+}
+
+#[test]
+fn tree_entry_cap_and_fixed_array_length_are_enforced() {
+    let store = ObjectStore::default();
+    let one = blob(&store, b"1\n");
+    let names: Vec<_> = (0..=4096).map(|index| format!("{index:03x}")).collect();
+    let entries: Vec<_> = names
+        .iter()
+        .map(|name| (name.as_str(), EntryKind::Blob, one))
+        .collect();
+    let at_cap = tree(&store, &entries[..4096]);
+    assert_eq!(
+        deserialize::<Vec<i32>>(&at_cap, &store).unwrap().len(),
+        4096
+    );
+    // The extra four-digit name sorts before the three-digit names beginning
+    // with 2..f. Keep the raw tree Git-ordered so only the cap is at issue.
+    let mut over_entries = entries.clone();
+    over_entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    let over_cap = tree(&store, &over_entries);
+    let error = rejected::<Vec<i32>>(&store, &over_cap);
+    assert_reflect(&error, "exceeds the maximum of 4096 entries");
+    let short = tree(&store, &[("000", EntryKind::Blob, one)]);
+    let error = rejected::<[i32; 2]>(&store, &short);
+    assert_reflect(&error, "sequence length mismatch: expected 2, found 1");
+    let long = tree(
+        &store,
+        &[
+            ("000", EntryKind::Blob, one),
+            ("001", EntryKind::Blob, one),
+            ("002", EntryKind::Blob, one),
+        ],
+    );
+    let error = rejected::<[i32; 2]>(&store, &long);
+    assert_reflect(&error, "sequence length mismatch: expected 2, found 3");
+}
+
+#[test]
+fn entry_modes_and_referenced_object_kinds_are_checked() {
+    let store = ObjectStore::default();
+    let one = blob(&store, b"1\n");
+    let invalid_mode = raw_tree(&store, &[(b"100755", b"000", one)]);
+    let error = rejected::<Vec<i32>>(&store, &invalid_mode);
+    assert_reflect(&error, "invalid or non-canonical entry mode");
+    let blob_as_tree = tree(&store, &[("some", EntryKind::Tree, one)]);
+    let error = rejected::<Option<i32>>(&store, &blob_as_tree);
+    assert!(
+        matches!(error, DeserializeError::NotATree(id) if id == one),
+        "{error:?}"
+    );
+    let subtree = marker(&store);
+    let tree_as_blob = tree(&store, &[("some", EntryKind::Blob, subtree)]);
+    let error = rejected::<Option<i32>>(&store, &tree_as_blob);
+    assert!(
+        matches!(error, DeserializeError::NotABlob(id) if id == subtree),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn enum_tags_have_one_entry_and_the_expected_payload_shape() {
+    let store = ObjectStore::default();
+    let value = blob(&store, b"1\n");
+    let payload = marker(&store);
+    let multiple = tree(
+        &store,
+        &[
+            ("Circle", EntryKind::Tree, payload),
+            ("Pair", EntryKind::Tree, payload),
+        ],
+    );
+    let error = rejected::<Shape>(&store, &multiple);
+    assert!(
+        matches!(error, DeserializeError::MalformedEnum { found: 2 }),
+        "{error:?}"
+    );
+    let unit_as_tree = tree(&store, &[("Unit", EntryKind::Tree, payload)]);
+    let error = rejected::<Shape>(&store, &unit_as_tree);
+    assert!(
+        matches!(&error, DeserializeError::UnitVariantIsTree { variant } if variant == "Unit"),
+        "{error:?}"
+    );
+    let pair_as_blob = blob(&store, b"Pair\n");
+    let error = rejected::<Shape>(&store, &pair_as_blob);
+    assert!(
+        matches!(&error, DeserializeError::VariantPayloadIsBlob { variant } if variant == "Pair"),
+        "{error:?}"
+    );
+    let unknown = tree(&store, &[("Unknown", EntryKind::Blob, value)]);
+    let error = rejected::<Shape>(&store, &unknown);
+    assert_reflect(&error, "unknown enum variant \"Unknown\"");
+    let bad_keyword = blob(&store, b"not_a_schema_node\n");
+    let error = rejected::<facet_git_tree::Node>(&store, &bad_keyword);
+    assert_reflect(&error, "unknown enum variant \"not_a_schema_node\"");
+}
+
+#[test]
+fn every_struct_field_is_required_even_if_optional_or_defaulted() {
+    let store = ObjectStore::default();
+    let a = blob(&store, b"7\n");
+    let defaulted = blob(&store, b"0\n");
+    let none = marker(&store);
+    let valid = tree(
+        &store,
+        &[
+            ("a", EntryKind::Blob, a),
+            ("defaulted", EntryKind::Blob, defaulted),
+            ("optional", EntryKind::Tree, none),
+        ],
+    );
+    assert_eq!(
+        deserialize::<Strict>(&valid, &store).unwrap(),
+        Strict {
+            a: 7,
+            defaulted: 0,
+            optional: None
+        }
+    );
+    let fixtures = [
+        (
+            tree(
+                &store,
+                &[
+                    ("defaulted", EntryKind::Blob, defaulted),
+                    ("optional", EntryKind::Tree, none),
+                ],
+            ),
+            "a",
         ),
-        "a non-unit variant tagged with a blob must be rejected, got {result:?}"
+        (
+            tree(
+                &store,
+                &[
+                    ("a", EntryKind::Blob, a),
+                    ("optional", EntryKind::Tree, none),
+                ],
+            ),
+            "defaulted",
+        ),
+        (
+            tree(
+                &store,
+                &[
+                    ("a", EntryKind::Blob, a),
+                    ("defaulted", EntryKind::Blob, defaulted),
+                ],
+            ),
+            "optional",
+        ),
+    ];
+    for (root, missing) in fixtures {
+        let error = rejected::<Strict>(&store, &root);
+        assert!(
+            matches!(&error, DeserializeError::MissingField { field } if field == missing),
+            "{missing}: {error:?}"
+        );
+    }
+    let unknown = tree(
+        &store,
+        &[
+            ("a", EntryKind::Blob, a),
+            ("defaulted", EntryKind::Blob, defaulted),
+            ("optional", EntryKind::Tree, none),
+            ("z", EntryKind::Blob, a),
+        ],
     );
-}
-
-/// A leaf blob missing its mandatory trailing newline — here, a unit
-/// variant's name blob written without it — is rejected as
-/// `MissingLeafNewline` rather than silently accepted as if the byte were
-/// optional. Per `serialization.design.leaves.encoding`, the rule is
-/// "exactly one, always present", not "at most one".
-#[test]
-fn leaf_blob_missing_trailing_newline_is_rejected() {
-    let store = ObjectStore::default();
-    let blob_id = store.write_buf(Kind::Blob, b"Unit").expect("write blob");
-
-    let result: Result<Shape, _> = deserialize(&blob_id, &store);
+    let error = rejected::<Strict>(&store, &unknown);
     assert!(
-        matches!(&result, Err(DeserializeError::MissingLeafNewline(oid)) if *oid == blob_id),
-        "a leaf blob without its trailing newline must be MissingLeafNewline, got {result:?}"
+        matches!(&error, DeserializeError::UnexpectedEntry { entry } if entry == "z"),
+        "{error:?}"
+    );
+    let radius = blob(&store, b"1.0\n");
+    let extra = tree(
+        &store,
+        &[
+            ("extra", EntryKind::Blob, a),
+            ("radius", EntryKind::Blob, radius),
+        ],
+    );
+    let root = tree(&store, &[("Circle", EntryKind::Tree, extra)]);
+    let error = rejected::<Shape>(&store, &root);
+    assert!(
+        matches!(&error, DeserializeError::UnexpectedEntry { entry } if entry == "extra"),
+        "{error:?}"
     );
 }
 
-/// A self-referential type whose foreign tree nests past the depth guard is
-/// rejected with `MaxDepth` instead of overflowing the stack.
 #[test]
-fn excessively_deep_tree_is_rejected() {
+fn noncanonical_scalar_text_and_missing_newline_are_rejected() {
+    let store = ObjectStore::default();
+    let missing_newline = blob(&store, b"Unit");
+    let error = rejected::<Shape>(&store, &missing_newline);
+    assert!(
+        matches!(error, DeserializeError::MissingLeafNewline(id) if id == missing_newline),
+        "{error:?}"
+    );
+    for text in ["+1", "01", "-0"] {
+        let root = blob(&store, format!("{text}\n").as_bytes());
+        let error = rejected::<i32>(&store, &root);
+        assert!(
+            matches!(&error, DeserializeError::Parse { text: actual, .. } if actual == text),
+            "{error:?}"
+        );
+    }
+    for text in ["-0.0", "1.00", "NaN"] {
+        let root = blob(&store, format!("{text}\n").as_bytes());
+        let error = rejected::<f64>(&store, &root);
+        assert!(
+            matches!(&error, DeserializeError::Parse { text: actual, .. } if actual == text),
+            "{error:?}"
+        );
+    }
+    let boolean = blob(&store, b"True\n");
+    let error = rejected::<bool>(&store, &boolean);
+    assert!(
+        matches!(&error, DeserializeError::Parse { text, .. } if text == "True"),
+        "{error:?}"
+    );
+    let character = blob(&store, b"ab\n");
+    let error = rejected::<char>(&store, &character);
+    assert!(
+        matches!(&error, DeserializeError::Parse { text, .. } if text == "ab"),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn unsorted_and_duplicate_trees_are_rejected() {
+    let store = ObjectStore::default();
+    let value = blob(&store, b"1\n");
+    let unsorted = raw_tree(
+        &store,
+        &[(b"100644", b"b", value), (b"100644", b"a", value)],
+    );
+    let error = rejected::<BTreeMap<String, i32>>(&store, &unsorted);
+    assert_reflect(&error, "not in Git entry order");
+    let duplicate = raw_tree(
+        &store,
+        &[(b"100644", b"a", value), (b"100644", b"a", value)],
+    );
+    let error = rejected::<BTreeMap<String, i32>>(&store, &duplicate);
+    assert_reflect(&error, "contains duplicate name \"a\"");
+}
+
+#[cfg(feature = "value")]
+fn schema(root: Node, defs: BTreeMap<String, Node>) -> Schema {
+    Schema {
+        kind: "test".into(),
+        root,
+        defs,
+    }
+}
+
+#[cfg(feature = "value")]
+#[test]
+fn invalid_refs_cycles_and_non_string_map_keys_are_rejected() {
+    let store = ObjectStore::default();
+    let root = blob(&store, b"ok\n");
+    let dangling = schema(Node::Ref("missing".into()), BTreeMap::new());
+    let error = deserialize_value_with_schema(&root, &dangling, &store).unwrap_err();
+    assert!(
+        matches!(&error, SchemaReadError::UnknownRef(name) if name == "missing"),
+        "{error:?}"
+    );
+    let cycle = schema(
+        Node::Ref("A".into()),
+        BTreeMap::from([("A".into(), Node::Ref("A".into()))]),
+    );
+    let error = deserialize_value_with_schema(&root, &cycle, &store).unwrap_err();
+    assert!(
+        matches!(&error, SchemaReadError::Deserialize(DeserializeError::Reflect(message)) if message.contains("unguarded reference cycle")),
+        "{error:?}"
+    );
+    let bad_key = schema(
+        Node::Map {
+            key: Box::new(Node::I32),
+            value: Box::new(Node::String),
+        },
+        BTreeMap::new(),
+    );
+    let error = deserialize_value_with_schema(&root, &bad_key, &store).unwrap_err();
+    assert!(
+        matches!(&error, SchemaReadError::Deserialize(DeserializeError::Reflect(message)) if message.contains("map key must be literally String")),
+        "{error:?}"
+    );
+}
+
+#[cfg(feature = "value")]
+#[test]
+fn cbor_must_be_canonical_and_contain_exactly_one_item() {
+    let store = ObjectStore::default();
+    let doc = schema(Node::Cbor, BTreeMap::new());
+    let canonical = blob(&store, &[0]);
+    assert!(deserialize_value_with_schema(&canonical, &doc, &store).is_ok());
+    for bytes in [&[0x18, 0x00][..], &[0x00, 0x00][..]] {
+        let root = blob(&store, bytes);
+        let error = deserialize_value_with_schema(&root, &doc, &store).unwrap_err();
+        assert!(
+            matches!(&error, SchemaReadError::Deserialize(DeserializeError::Reflect(message)) if message.contains("invalid CBOR blob")),
+            "{bytes:02x?}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn typed_recursive_value_enforces_encoded_depth_boundary() {
     #[derive(Debug, Facet)]
     struct DeepNode {
         children: Vec<DeepNode>,
     }
 
-    let store = ObjectStore::default();
-    // A leaf node: `{ children: [] }`.
-    let empty_list = write_tree(&store, &[]);
-    let mut node = write_tree(&store, &[("children", EntryKind::Tree, empty_list)]);
-    // Each wrap adds a `struct → list → struct` layer (~2 levels of recursion);
-    // 100 wraps is comfortably past the guard.
-    for _ in 0..100 {
-        let list = write_tree(&store, &[("0000", EntryKind::Tree, node)]);
-        node = write_tree(&store, &[("children", EntryKind::Tree, list)]);
-    }
-
-    let result: Result<DeepNode, _> = deserialize(&node, &store);
-    assert!(
-        matches!(result, Err(DeserializeError::MaxDepth(_))),
-        "deeply nested tree must be MaxDepth, got {result:?}"
-    );
-}
-
-// --- struct / enum field correspondence (MissingField, UnexpectedEntry) ---
-
-/// A struct tree missing a non-defaulted field is reported with the field's
-/// name, as [`DeserializeError::MissingField`].
-#[test]
-fn missing_struct_field_is_reported_by_name() {
-    let store = ObjectStore::default();
-    let x_blob = store.write_buf(Kind::Blob, b"1.0\n").expect("write blob");
-    let tree = write_tree(&store, &[("x", EntryKind::Blob, x_blob)]);
-
-    let result: Result<Point, _> = deserialize(&tree, &store);
-    assert!(
-        matches!(result, Err(DeserializeError::MissingField { field }) if field == "y"),
-        "missing field must be MissingField naming \"y\""
-    );
-}
-
-/// A struct tree carrying an entry the target type does not define is
-/// rejected: without this, a foreign tree sharing one field name would read
-/// "successfully" with the extra entry silently dropped.
-#[test]
-fn unexpected_struct_entry_is_rejected() {
-    let store = ObjectStore::default();
-    let x_blob = store.write_buf(Kind::Blob, b"1.0\n").expect("write blob");
-    let y_blob = store.write_buf(Kind::Blob, b"2.0\n").expect("write blob");
-    let tree = write_tree(
-        &store,
-        &[
-            ("x", EntryKind::Blob, x_blob),
-            ("y", EntryKind::Blob, y_blob),
-            ("z", EntryKind::Blob, x_blob),
-        ],
-    );
-
-    let result: Result<Point, _> = deserialize(&tree, &store);
-    assert!(
-        matches!(result, Err(DeserializeError::UnexpectedEntry { entry }) if entry == "z"),
-        "extra entry must be UnexpectedEntry naming \"z\""
-    );
-}
-
-/// A field of `Option` type is defaulted to `None` when its tree entry is
-/// absent — the one missing-field case where "absent" has an unambiguous
-/// reading — so data written by an older type without the field reads
-/// cleanly into a type that later gained the field.
-#[test]
-fn missing_option_field_reads_as_none() {
-    #[derive(Debug, Facet, PartialEq)]
-    struct Newer {
-        a: i32,
-        /// An arbitrary optional field.
-        b: Option<String>,
+    fn nested_nodes(store: &ObjectStore, wraps: usize) -> ObjectId {
+        let empty_list = marker(store);
+        let mut node = tree(store, &[("children", EntryKind::Tree, empty_list)]);
+        for _ in 0..wraps {
+            let list = tree(store, &[("000", EntryKind::Tree, node)]);
+            node = tree(store, &[("children", EntryKind::Tree, list)]);
+        }
+        node
     }
 
     let store = ObjectStore::default();
-    let a = store.write_buf(Kind::Blob, b"7\n").expect("write blob");
-    let tree = write_tree(&store, &[("a", EntryKind::Blob, a)]);
-
-    let got: Newer = deserialize(&tree, &store).expect("Option field defaults to None");
-    assert_eq!(got, Newer { a: 7, b: None });
+    // At 15 wraps the terminal marker blob is at encoded depth 32.
+    let at_limit = nested_nodes(&store, 15);
+    let mut current: DeepNode = deserialize(&at_limit, &store).expect("depth 32 must be allowed");
+    for _ in 0..15 {
+        assert_eq!(current.children.len(), 1);
+        current = current.children.pop().unwrap();
+    }
+    assert!(current.children.is_empty());
+    let too_deep = nested_nodes(&store, 16);
+    let error = rejected::<DeepNode>(&store, &too_deep);
+    assert!(matches!(error, DeserializeError::MaxDepth(32)), "{error:?}");
 }
 
-/// An enum tuple variant whose ordinal entries have a gap (`0000`, `0002`)
-/// is reported as a missing field naming the gap, not an opaque build error.
-#[test]
-fn tuple_variant_ordinal_gap_is_reported() {
-    #[derive(Debug, Facet, PartialEq)]
-    #[repr(u8)]
-    enum Tagged {
-        Unit,
-        Pair(i32, String),
-        Named {
-            /// An arbitrary field.
-            a: i32,
-        },
+#[cfg(feature = "value")]
+fn nested_maps(store: &ObjectStore, levels: usize) -> ObjectId {
+    let mut current = blob(store, b"leaf\n");
+    let mut kind = EntryKind::Blob;
+    for _ in 0..levels {
+        current = tree(store, &[("x", kind, current)]);
+        kind = EntryKind::Tree;
     }
+    current
+}
 
+#[cfg(feature = "value")]
+#[test]
+fn encoded_depth_32_is_allowed_and_depth_33_is_rejected() {
     let store = ObjectStore::default();
-    let one = store.write_buf(Kind::Blob, b"1\n").expect("write blob");
-    let text = store.write_buf(Kind::Blob, b"two\n").expect("write blob");
-    let payload = write_tree(
-        &store,
-        &[
-            ("0000", EntryKind::Blob, one),
-            ("0002", EntryKind::Blob, text),
-        ],
-    );
-    let tree = write_tree(&store, &[("Pair", EntryKind::Tree, payload)]);
-
-    let result: Result<Tagged, _> = deserialize(&tree, &store);
+    let doc = schema(Node::Dynamic, BTreeMap::new());
+    let at_limit = nested_maps(&store, 32);
     assert!(
-        matches!(result, Err(DeserializeError::MissingField { field }) if field == "0001"),
-        "the ordinal gap must be MissingField naming \"0001\""
+        deserialize_value_with_schema(&at_limit, &doc, &store).is_ok(),
+        "depth 32 must be allowed"
+    );
+    let too_deep = nested_maps(&store, 33);
+    let error = deserialize_value_with_schema(&too_deep, &doc, &store).unwrap_err();
+    assert!(
+        matches!(
+            error,
+            SchemaReadError::Deserialize(DeserializeError::MaxDepth(32))
+        ),
+        "{error:?}"
     );
 }
 
-/// A struct variant carrying an entry no field defines is rejected with the
-/// entry's name, exactly as a struct's extra entries are.
-#[test]
-fn struct_variant_unexpected_entry_is_rejected() {
-    #[derive(Debug, Facet, PartialEq)]
-    #[repr(u8)]
-    enum Tagged {
-        Unit,
-        Named {
-            /// An arbitrary field.
-            a: i32,
-        },
+#[cfg(feature = "value")]
+struct CountingStore<'a> {
+    store: &'a ObjectStore,
+    finds: Cell<usize>,
+}
+
+#[cfg(feature = "value")]
+impl Find for CountingStore<'_> {
+    fn try_find<'a>(
+        &self,
+        id: &gix_hash::oid,
+        buffer: &'a mut Vec<u8>,
+    ) -> Result<Option<Data<'a>>, gix_object::find::Error> {
+        self.finds.set(self.finds.get() + 1);
+        self.store.try_find(id, buffer)
     }
+}
 
+#[cfg(feature = "value")]
+fn sequence_of_shared(
+    store: &ObjectStore,
+    child: ObjectId,
+    kind: EntryKind,
+    count: usize,
+) -> ObjectId {
+    let entries = (0..count)
+        .map(|index| TreeEntry {
+            mode: EntryMode::from(kind),
+            filename: format!("{index:03x}").into(),
+            oid: child,
+        })
+        .collect();
+    store
+        .write(&Tree { entries })
+        .expect("write shared sequence")
+}
+
+#[cfg(feature = "value")]
+#[test]
+fn visit_budget_counts_each_occurrence_of_shared_oids() {
+    const LIMIT: usize = 1_048_576;
     let store = ObjectStore::default();
-    let one = store.write_buf(Kind::Blob, b"1\n").expect("write blob");
-    let text = store.write_buf(Kind::Blob, b"two\n").expect("write blob");
-    let payload = write_tree(
-        &store,
-        &[("a", EntryKind::Blob, one), ("b", EntryKind::Blob, text)],
+    let leaf = blob(&store, b"1\n");
+    let full = sequence_of_shared(&store, leaf, EntryKind::Blob, 4095);
+    let short = sequence_of_shared(&store, leaf, EntryKind::Blob, 4094);
+    let mut branches = (0..256)
+        .map(|i| (format!("{i:03x}"), EntryKind::Tree, full))
+        .collect::<Vec<_>>();
+    branches.last_mut().unwrap().2 = short;
+    let refs: Vec<_> = branches
+        .iter()
+        .map(|(n, k, id)| (n.as_str(), *k, *id))
+        .collect();
+    let at_limit = tree(&store, &refs);
+    branches.last_mut().unwrap().2 = full;
+    let refs: Vec<_> = branches
+        .iter()
+        .map(|(n, k, id)| (n.as_str(), *k, *id))
+        .collect();
+    let over_limit = tree(&store, &refs);
+    let doc = schema(
+        Node::List(Box::new(Node::List(Box::new(Node::I32)))),
+        BTreeMap::new(),
     );
-    let tree = write_tree(&store, &[("Named", EntryKind::Tree, payload)]);
+    let counted = CountingStore {
+        store: &store,
+        finds: Cell::new(0),
+    };
 
-    let result: Result<Tagged, _> = deserialize(&tree, &store);
+    // 1 root + 255 * (1 tree + 4095 leaves) + (1 tree + 4094 leaves).
+    let result = deserialize_value_with_schema(&at_limit, &doc, &counted);
     assert!(
-        matches!(result, Err(DeserializeError::UnexpectedEntry { entry }) if entry == "b"),
-        "extra variant entry must be UnexpectedEntry naming \"b\""
+        result.is_ok(),
+        "exactly {LIMIT} visits must succeed: {result:?}"
     );
+    drop(result);
+    assert_eq!(counted.finds.get(), LIMIT);
+    counted.finds.set(0);
+    // One more visit, but only three distinct reachable oids in this graph.
+    let error = deserialize_value_with_schema(&over_limit, &doc, &counted).unwrap_err();
+    assert!(
+        matches!(&error, SchemaReadError::Deserialize(DeserializeError::Reflect(message)) if message.contains("maximum decode visits (1048576) exceeded")),
+        "{error:?}"
+    );
+    assert_eq!(
+        counted.finds.get(),
+        LIMIT,
+        "the over-budget object must not be fetched"
+    );
+
+    counted.finds.set(0);
+    let error = deserialize::<Vec<Vec<i32>>>(&over_limit, &counted)
+        .expect_err("typed reads must share the visit limit");
+    assert_reflect(&error, "maximum decode visits (1048576) exceeded");
+    assert_eq!(counted.finds.get(), LIMIT);
 }

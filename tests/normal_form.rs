@@ -73,13 +73,18 @@ fn identity() -> NormalForm {
     ]))
 }
 
-/// The frozen mapping is a change detector on purpose: this hash is a
-/// published identity, so a mapping change must break loudly here rather than
-/// silently re-home every anchor id in existence.
+/// Pin the frozen bare-value mapping to an independently computed Git object id.
 #[test]
 fn identity_hash_is_frozen() {
     let (oid, _store) = normal_form::hash(&identity()).unwrap();
-    assert_eq!(oid.to_string(), "8e50840508db65f7296d8cbedaee54a042efe948");
+    assert_eq!(oid.to_string(), "7d2884d1a44281adbdc4072e9c5e98bca4f26ea9");
+
+    let value = Identity {
+        genesis_rev: [0x11; 20],
+        path: "src/refdb.rs".to_owned(),
+        span: (4180, 4630),
+    };
+    assert_eq!(serialize(&value).unwrap().0, oid);
 }
 
 /// Likewise for one value of each scalar family, plus the empty composite.
@@ -88,27 +93,27 @@ fn scalar_hashes_are_frozen() {
     let cases: [(NormalForm, &str); 8] = [
         (
             NormalForm::Bool(true),
-            "6b2aaa7640726588bcd3d57e1de4b1315b7f315e",
+            "27ba77ddaf61532f217964734769a42cdabc17dc",
         ),
         (
             NormalForm::U32(4630),
-            "22866326a657064681eda6590703ab22e510f93f",
+            "686eea158cb3eef1ecff4f96f87b6a3e7c2feda4",
         ),
         (
             NormalForm::I64(-1),
-            "8663f7de5dd7a79b04f7fcc4fea0046e2659a1a1",
+            "3a2e3f4984a0ee55900f8c7894844c563d2c2744",
         ),
         (
             NormalForm::F64(1.5),
-            "a1c26dc1fcd2a8afd2f6e90e3edf3b85a16213cc",
+            "c239c60cba28a79a295acb60a122b8c46eb57271",
         ),
         (
             NormalForm::Char('é'),
-            "4b04fff51468d8ab5201ab02b725dc477bc7cb45",
+            "c6003325155f475bd7c87731607525dce73be9cf",
         ),
         (
             NormalForm::Str("src/refdb.rs".to_owned()),
-            "913276d4b9c715e40a79ed2244b28a26c4cb43e6",
+            "f5c542d7957dd11b84a5febe05816dd81122a5d9",
         ),
         (
             NormalForm::Bytes(vec![0xde, 0xad, 0xbe, 0xef]),
@@ -116,7 +121,7 @@ fn scalar_hashes_are_frozen() {
         ),
         (
             NormalForm::List(Vec::new()),
-            "4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+            "13dca1c9c6e39ea21ef7a4049bfcb4a9e2628a5c",
         ),
     ];
     for (value, expected) in cases {
@@ -125,33 +130,42 @@ fn scalar_hashes_are_frozen() {
     }
 }
 
-/// Leaf blobs carry the frozen bytes themselves, with no trailing newline —
-/// the general codec's newline is a readability affordance of a format that is
-/// still free to change.
+/// Text leaves have a trailing newline; binary leaves are stored verbatim.
 #[test]
 fn leaf_blobs_hold_exactly_the_frozen_bytes() {
     let (oid, store) = normal_form::hash(&NormalForm::U32(4630)).unwrap();
     assert_eq!(
         store.get_blob(&oid).expect("read object").unwrap(),
-        4630u32.to_be_bytes()
+        b"4630\n"
     );
 
     let (oid, store) = normal_form::hash(&NormalForm::Bool(false)).unwrap();
-    assert_eq!(store.get_blob(&oid).expect("read object").unwrap(), [0x00]);
+    assert_eq!(
+        store.get_blob(&oid).expect("read object").unwrap(),
+        b"false\n"
+    );
 
     let (oid, store) = normal_form::hash(&NormalForm::Str("ab".to_owned())).unwrap();
-    assert_eq!(store.get_blob(&oid).expect("read object").unwrap(), b"ab");
+    assert_eq!(store.get_blob(&oid).expect("read object").unwrap(), b"ab\n");
+
+    let (oid, store) = normal_form::hash(&NormalForm::Bytes(vec![0xde, 0xad, 0xbe, 0xef])).unwrap();
+    assert_eq!(
+        store.get_blob(&oid).expect("read object").unwrap(),
+        [0xde, 0xad, 0xbe, 0xef]
+    );
+
+    let (oid, store) = normal_form::hash(&NormalForm::List(Vec::new())).unwrap();
+    let entries = store.get_tree(&oid).expect("read object").unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].filename.to_string(), "none");
+    assert_eq!(entries[0].mode.kind(), facet_git_tree::EntryKind::Blob);
+    assert!(store.get_blob(&entries[0].oid).unwrap().unwrap().is_empty());
 }
 
-/// List entries are named by eight-digit ordinal; struct entries by field
-/// name; map entries by the key's name form.
+/// Lists use three-digit lowercase hexadecimal ordinals; map keys are escaped.
 #[test]
 fn composite_entry_names_are_frozen() {
-    let (oid, store) = normal_form::hash(&NormalForm::List(vec![
-        NormalForm::U8(0),
-        NormalForm::U8(1),
-    ]))
-    .unwrap();
+    let (oid, store) = normal_form::hash(&NormalForm::List(vec![NormalForm::U8(0); 17])).unwrap();
     let names: Vec<String> = store
         .get_tree(&oid)
         .expect("read object")
@@ -159,11 +173,19 @@ fn composite_entry_names_are_frozen() {
         .iter()
         .map(|entry| entry.filename.to_string())
         .collect();
-    assert_eq!(names, ["00000000", "00000001"]);
+    assert_eq!(
+        names,
+        [
+            "000", "001", "002", "003", "004", "005", "006", "007", "008", "009", "00a", "00b",
+            "00c", "00d", "00e", "00f", "010"
+        ]
+    );
 
     let (oid, store) = normal_form::hash(&NormalForm::Map(BTreeMap::from([
-        (Key::U16(7), NormalForm::U8(0)),
-        (Key::U16(11), NormalForm::U8(1)),
+        (Key::Str("7".to_owned()), NormalForm::U8(0)),
+        (Key::Str("11".to_owned()), NormalForm::U8(1)),
+        (Key::Str("some".to_owned()), NormalForm::U8(2)),
+        (Key::Str("a/b".to_owned()), NormalForm::U8(3)),
     ])))
     .unwrap();
     let names: Vec<String> = store
@@ -173,19 +195,40 @@ fn composite_entry_names_are_frozen() {
         .iter()
         .map(|entry| entry.filename.to_string())
         .collect();
-    assert_eq!(names, ["11", "7"]);
+    assert_eq!(names, ["%a%2Fb", "%some", "11", "7"]);
 }
 
-/// A key whose name form is not a usable path segment is refused, rather than
-/// producing a tree git could not hold.
+/// String keys are escaped, including names that were invalid in the old format.
 #[test]
-fn unusable_map_key_names_are_refused() {
+fn map_key_names_are_escaped_and_invalid_keys_are_refused() {
+    for (name, expected) in [
+        ("", "%"),
+        ("a/b", "%a%2Fb"),
+        (".", "%."),
+        ("..", "%.."),
+        ("_", "_"),
+        ("none", "%none"),
+        ("some", "%some"),
+        (".schema", "%.schema"),
+        ("%", "%%25"),
+        ("\0", "%%00"),
+        ("naïve", "%na%C3%AFve"),
+    ] {
+        let value = NormalForm::Map(BTreeMap::from([(
+            Key::Str(name.to_owned()),
+            NormalForm::U8(0),
+        )]));
+        let (oid, store) = normal_form::hash(&value).unwrap();
+        let entries = store.get_tree(&oid).expect("read object").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].filename.to_string(), expected);
+    }
+
     for key in [
-        Key::Str(String::new()),
-        Key::Str("a/b".to_owned()),
-        Key::Str(".".to_owned()),
-        Key::Str("..".to_owned()),
-        Key::Str("_".to_owned()),
+        Key::U16(7),
+        Key::Bool(true),
+        Key::Str("a".repeat(256)),
+        Key::Str("é".repeat(43)),
     ] {
         let value = NormalForm::Map(BTreeMap::from([(key, NormalForm::U8(0))]));
         assert!(matches!(
@@ -195,14 +238,31 @@ fn unusable_map_key_names_are_refused() {
     }
 }
 
-/// A `NormalForm::Struct` is public data — its field names are only as good
-/// as whoever constructed the map — so `hash_into` checks them against the
-/// same tree-entry-name rules a map key gets, rather than trusting the
-/// "fixed by the type" argument that only holds for derive-produced types.
+/// Struct field names follow the same escaping and encoded-length limit as keys.
 #[test]
-fn unusable_struct_field_names_are_refused() {
-    for name in ["", "a/b", ".", "..", "_"] {
+fn struct_field_names_are_escaped_and_overlong_names_are_refused() {
+    for (name, expected) in [
+        ("", "%"),
+        ("a/b", "%a%2Fb"),
+        (".", "%."),
+        ("..", "%.."),
+        ("_", "_"),
+        ("none", "%none"),
+        ("some", "%some"),
+        (".schema", "%.schema"),
+        ("%", "%%25"),
+        ("\0", "%%00"),
+        ("naïve", "%na%C3%AFve"),
+    ] {
         let value = NormalForm::Struct(BTreeMap::from([(name.to_owned(), NormalForm::U8(0))]));
+        let (oid, store) = normal_form::hash(&value).unwrap();
+        let entries = store.get_tree(&oid).expect("read object").unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].filename.to_string(), expected);
+    }
+
+    for name in ["a".repeat(256), "é".repeat(43)] {
+        let value = NormalForm::Struct(BTreeMap::from([(name.clone(), NormalForm::U8(0))]));
         assert!(matches!(
             normal_form::hash(&value),
             Err(facet_git_tree::NormalFormError::InvalidFieldName { field }) if field == name
@@ -274,7 +334,7 @@ fn the_marker_lands_in_the_schema_document() {
         panic!("Binding is a named-field struct");
     };
     assert_eq!(
-        fields["identity"].node,
+        fields["identity"],
         Node::Ref(format!("{IDENTITY_DEF_PREFIX}0"))
     );
 }

@@ -7,8 +7,9 @@
 //!       `git diff`/`ls-tree -r`; every other variant is a tree with exactly
 //!       one entry, externally tagged: the entry name is the active variant,
 //!       its value encodes the payload — struct variant fields are named by
-//!       field name, tuple variant fields by zero-padded zero-based index
-//!       (0000, …)
+//!       escaped field name; a one-field tuple variant encodes the field
+//!       directly, and multi-field tuple variants use three-digit lowercase
+//!       hexadecimal ordinals (000, 001, …).
 
 use facet::Facet;
 use facet_git_tree::{EntryKind, serialize};
@@ -22,8 +23,20 @@ use common::{find_entry, roundtrip, tree_entries};
 #[repr(u8)]
 enum Shape {
     Unit,
-    Circle { radius: f64 },
+    Circle {
+        radius: f64,
+    },
     Pair(i32, i32),
+    Text(String),
+    Numbers(Vec<i32>),
+    Bytes(Vec<u8>),
+    #[facet(rename = "none")]
+    Reserved,
+    #[facet(rename = "a/b")]
+    Renamed {
+        #[facet(rename = "some")]
+        value: i32,
+    },
 }
 
 #[derive(Debug, Facet, PartialEq)]
@@ -41,7 +54,7 @@ struct WithPriority {
 
 // --- structure ---
 
-/// An enum value is a tree with exactly one entry, named after the active variant.
+/// A non-unit enum value is a tree with exactly one entry, named after the active variant.
 #[test]
 fn enum_is_single_entry_tree() {
     let (root_id, store) = serialize(&Shape::Circle { radius: 1.0 }).expect("serialize ok");
@@ -69,7 +82,7 @@ fn unit_variant_is_a_bare_name_blob() {
             .expect("unit variant must serialize to a blob"),
         b"Unit\n",
         "a unit variant's entire encoding is a blob holding the variant name, \
-         plus the mandatory trailing newline every leaf blob carries"
+         plus the mandatory trailing newline for text leaves"
     );
 }
 
@@ -151,22 +164,115 @@ fn tuple_variant_is_named() {
 fn struct_variant_fields_named_by_field() {
     let (root_id, store) = serialize(&Shape::Circle { radius: 2.5 }).expect("serialize ok");
     let circle = find_entry(&store, &root_id, "Circle");
+    assert_eq!(circle.mode.kind(), EntryKind::Tree);
+    let fields = tree_entries(&store, &circle.oid);
+    assert_eq!(fields.len(), 1);
     let radius = find_entry(&store, &circle.oid, "radius");
     assert_eq!(
         radius.mode.kind(),
         EntryKind::Blob,
         "`radius` must be a leaf blob"
     );
+    assert_eq!(
+        store.get_blob(&radius.oid).expect("read blob"),
+        Some(b"2.5\n".to_vec())
+    );
 }
 
-/// Tuple-variant fields are encoded under the variant entry, named by their
-/// zero-padded, zero-based index (`0000`, `0001`, …).
+/// Multi-field tuple variants use width-three lowercase hexadecimal ordinals.
 #[test]
 fn tuple_variant_fields_named_by_index() {
     let (root_id, store) = serialize(&Shape::Pair(7, 13)).expect("serialize ok");
     let pair = find_entry(&store, &root_id, "Pair");
-    let _ = find_entry(&store, &pair.oid, "0000");
-    let _ = find_entry(&store, &pair.oid, "0001");
+    assert_eq!(pair.mode.kind(), EntryKind::Tree);
+    let fields = tree_entries(&store, &pair.oid);
+    assert_eq!(fields.len(), 2);
+    for (entry, (name, blob)) in fields
+        .iter()
+        .zip([("000", b"7\n".as_slice()), ("001", b"13\n".as_slice())])
+    {
+        assert_eq!(entry.filename, name);
+        assert_eq!(entry.mode.kind(), EntryKind::Blob);
+        assert_eq!(
+            store.get_blob(&entry.oid).expect("read object"),
+            Some(blob.to_vec())
+        );
+    }
+}
+
+/// A single tuple field is the tag's direct target, not an ordinal wrapper.
+#[test]
+fn single_tuple_variant_field_is_direct() {
+    let text = Shape::Text("payload\n".into());
+    let (root, store) = serialize(&text).expect("serialize text variant");
+    let entries = tree_entries(&store, &root);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].filename, "Text");
+    assert_eq!(entries[0].mode.kind(), EntryKind::Blob);
+    assert_eq!(
+        store.get_blob(&entries[0].oid).expect("read text"),
+        Some(b"payload\n\n".to_vec())
+    );
+    assert_eq!(roundtrip(text), Shape::Text("payload\n".into()));
+
+    let numbers = Shape::Numbers(vec![7, 13]);
+    let (root, store) = serialize(&numbers).expect("serialize list variant");
+    let entries = tree_entries(&store, &root);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].filename, "Numbers");
+    assert_eq!(entries[0].mode.kind(), EntryKind::Tree);
+    let elements = tree_entries(&store, &entries[0].oid);
+    assert_eq!(elements.len(), 2);
+    for (entry, (name, blob)) in elements
+        .iter()
+        .zip([("000", b"7\n".as_slice()), ("001", b"13\n".as_slice())])
+    {
+        assert_eq!(entry.filename, name);
+        assert_eq!(entry.mode.kind(), EntryKind::Blob);
+        assert_eq!(
+            store.get_blob(&entry.oid).expect("read object"),
+            Some(blob.to_vec())
+        );
+    }
+    assert_eq!(roundtrip(numbers), Shape::Numbers(vec![7, 13]));
+
+    let bytes = Shape::Bytes(vec![0, 0xff, b'\n']);
+    let (root, store) = serialize(&bytes).expect("serialize bytes variant");
+    let entries = tree_entries(&store, &root);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].filename, "Bytes");
+    assert_eq!(entries[0].mode.kind(), EntryKind::Blob);
+    assert_eq!(
+        store.get_blob(&entries[0].oid).expect("read bytes"),
+        Some(vec![0, 0xff, b'\n'])
+    );
+    assert_eq!(roundtrip(bytes), Shape::Bytes(vec![0, 0xff, b'\n']));
+}
+
+#[test]
+fn variant_and_field_names_are_escaped() {
+    let (root, store) = serialize(&Shape::Reserved).expect("serialize unit");
+    assert_eq!(
+        store.get_blob(&root).expect("read tag"),
+        Some(b"%none\n".to_vec())
+    );
+    assert_eq!(roundtrip(Shape::Reserved), Shape::Reserved);
+
+    let value = Shape::Renamed { value: 42 };
+    let (root, store) = serialize(&value).expect("serialize struct variant");
+    let entries = tree_entries(&store, &root);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].filename, "%a%2Fb");
+    assert_eq!(entries[0].mode.kind(), EntryKind::Tree);
+    let fields = tree_entries(&store, &entries[0].oid);
+    assert_eq!(fields.len(), 1);
+    assert_eq!(fields[0].filename, "%some");
+    assert_eq!(fields[0].mode.kind(), EntryKind::Blob);
+    assert_eq!(
+        store.get_blob(&fields[0].oid).expect("read field"),
+        Some(b"42\n".to_vec())
+    );
+    assert_eq!(roundtrip(value), Shape::Renamed { value: 42 });
 }
 
 // --- equality ---

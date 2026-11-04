@@ -1,12 +1,10 @@
 //! Integration tests for leaf value normalization on write.
 //!
-//! Covers spec requirement:
-//!   serialization.design.normalization.leaves
-//!     — negative zero must be normalized to positive zero
-//!     — NaN must be normalized to the unquoted string "nan"
+//! The frozen format requires both signs of zero to be written as `0.0\n`
+//! and every NaN payload to be written as `nan\n`.
 
 use facet::Facet;
-use facet_git_tree::{EntryKind, serialize};
+use facet_git_tree::{EntryKind, deserialize, serialize};
 
 #[derive(Debug, Facet)]
 struct WithF32 {
@@ -70,6 +68,9 @@ fn f64_negative_zero_normalized_to_positive_zero() {
         pos_zero, neg_zero,
         "f64 -0.0 must serialize identically to +0.0"
     );
+    assert_eq!(pos_zero, b"0.0\n");
+    let (id, store) = serialize(&WithF64 { v: -0.0 }).unwrap();
+    assert_eq!(deserialize::<WithF64>(&id, &store).unwrap().v.to_bits(), 0);
 }
 
 /// f32 negative zero and positive zero produce identical blob content.
@@ -82,6 +83,9 @@ fn f32_negative_zero_normalized_to_positive_zero() {
         pos_zero, neg_zero,
         "f32 -0.0 must serialize identically to +0.0"
     );
+    assert_eq!(pos_zero, b"0.0\n");
+    let (id, store) = serialize(&WithF32 { v: -0.0 }).unwrap();
+    assert_eq!(deserialize::<WithF32>(&id, &store).unwrap().v.to_bits(), 0);
 }
 
 /// Two structs that differ only in the sign of zero produce the same root object ID.
@@ -110,6 +114,11 @@ fn f64_nan_normalized_to_string_nan() {
         bytes, b"nan\n",
         "f64 NaN must serialize to the unquoted string `nan`"
     );
+    let (id, store) = serialize(&WithF64 { v: f64::NAN }).unwrap();
+    assert_eq!(
+        deserialize::<WithF64>(&id, &store).unwrap().v.to_bits(),
+        0x7ff8_0000_0000_0000
+    );
 }
 
 /// f32 NaN serializes to the unquoted string literal "nan".
@@ -121,23 +130,29 @@ fn f32_nan_normalized_to_string_nan() {
         bytes, b"nan\n",
         "f32 NaN must serialize to the unquoted string `nan`"
     );
+    let (id, store) = serialize(&WithF32 { v: f32::NAN }).unwrap();
+    assert_eq!(
+        deserialize::<WithF32>(&id, &store).unwrap().v.to_bits(),
+        0x7fc0_0000
+    );
 }
 
-/// All NaN bit patterns serialize to the same "nan" blob, not to distinct values.
+/// Quiet and signaling NaNs of either sign share the canonical NaN blob.
 #[test]
 
 fn different_nan_payloads_normalize_identically() {
-    // Construct two different NaN payloads via bit manipulation.
-    let nan1 = f64::from_bits(0x7FF8_0000_0000_0001);
-    let nan2 = f64::from_bits(0x7FF0_0000_0000_0001);
-    assert!(nan1.is_nan());
-    assert!(nan2.is_nan());
-
-    let bytes1 = serialize_scalar_f64(nan1);
-    let bytes2 = serialize_scalar_f64(nan2);
-    assert_eq!(
-        bytes1, bytes2,
-        "all NaN payloads must normalize to the same representation"
-    );
-    assert_eq!(bytes1, b"nan\n");
+    for bits in [
+        0x7ff8_0000_0000_0001,
+        0x7ff0_0000_0000_0001,
+        0xfff8_0000_0000_1234,
+    ] {
+        let value = f64::from_bits(bits);
+        assert!(value.is_nan());
+        assert_eq!(serialize_scalar_f64(value), b"nan\n", "f64 {bits:#x}");
+    }
+    for bits in [0x7fc0_0001, 0x7f80_0001, 0xffc0_1234] {
+        let value = f32::from_bits(bits);
+        assert!(value.is_nan());
+        assert_eq!(serialize_scalar_f32(value), b"nan\n", "f32 {bits:#x}");
+    }
 }

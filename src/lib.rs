@@ -1,26 +1,36 @@
 //! Serialize [`facet::Facet`] values to, and deserialize them from, Git trees.
 //!
 //! A value is encoded as a graph of Git objects — scalars and strings as blobs,
-//! structs, enums, and collections as trees — addressed by SHA-1 exactly as Git
-//! would compute them. The bundled [`ObjectStore`] is an in-memory backend, but
-//! the entry points are generic over `gix`'s `Find` and `Write` traits, so a
-//! real `gix` repository or object database works just as well.
+//! structs, enums, and collections as trees — addressed exactly as Git would
+//! compute them, in either the SHA-1 or the SHA-256 object format. The bundled
+//! [`ObjectStore`] is an in-memory backend, but the entry points are generic
+//! over `gix`'s [`Find`](gix_object::Find) and [`Write`](gix_object::Write)
+//! traits, so a real `gix` repository or object database works just as well.
 //!
-//! # Field matching
+//! The on-disk layout is the frozen format in `docs/format.adoc`; there is no
+//! backward compatibility with earlier layouts.
 //!
-//! Typed reads are strict: a missing field errors unless it has a `facet`
-//! default or is an `Option`; an unmatched tree entry errors with
-//! [`DeserializeError::UnexpectedEntry`]; a duplicated composite map key
-//! errors on both write ([`SerializeError::DuplicateKey`]) and read.
+//! # Strictness
+//!
+//! Reads are strict: a struct emits every field, so a missing field and an
+//! unknown entry are both errors ([`DeserializeError::MissingField`],
+//! [`DeserializeError::UnexpectedEntry`]); tree entries must be correctly
+//! ordered and sized; and leaf text must be canonical. A scalar, sequence, map,
+//! option, unit, or enum root is wrapped as `{ .value -> v, .schema -> S }` by
+//! the `git-store` envelope rather than by this bare codec.
 #![forbid(unsafe_code)]
 
 pub mod attr;
+mod cbor;
 mod classify;
 mod de;
 mod error;
+mod float;
 mod limits;
 mod marker;
+mod name;
 pub mod normal_form;
+mod ordinal;
 mod raw_blob;
 mod raw_tree;
 pub mod schema;
@@ -46,6 +56,6 @@ pub use raw_tree::RawTree;
 pub use schema::read::{deserialize_value_with_schema, validate_with_schema};
 #[cfg(feature = "value")]
 pub use schema::write::serialize_value_with_schema;
-pub use schema::{Node, Schema, StructField, VariantKind, schema_of};
+pub use schema::{Node, Schema, VariantKind, schema_of};
 pub use ser::{serialize, serialize_into};
 pub use store::ObjectStore;

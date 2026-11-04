@@ -1,106 +1,155 @@
-//! Table-driven tests for [`check_key`], the write-side tree-entry-name validator.
+//! Entry-name validation and escaping for bare typed maps.
 
 use std::collections::HashMap;
 
-use facet_git_tree::{KeyError, SerializeError, check_key, serialize};
+use facet_git_tree::{KeyError, ObjectId, ObjectStore, check_key, deserialize, serialize};
+use gix_object::{Kind, Write as _};
 use rstest::rstest;
 
-mod common;
-use common::WithMap;
-
-/// Names that are valid tree entry names and so are accepted. Leading-dot
-/// keys are ordinary data — canonical git only refuses the exact names `.`
-/// and `..`, not names that merely begin with a dot.
+/// User names are accepted when their canonical encoded names fit the limit.
 #[rstest]
-#[case("name")]
-#[case("field0")]
-#[case("0001")] // a zero-padded ordinal name is a perfectly ordinary key
-#[case(".env")]
-#[case(".schema")]
-#[case(".variant")]
-fn accepts_valid_keys(#[case] key: &str) {
-    assert!(check_key(key).is_ok(), "{key:?} should be accepted");
-}
+#[case("name", "name")]
+#[case("author.name", "author.name")]
+#[case("000", "000")]
+#[case("_", "_")]
+#[case("none", "%none")]
+#[case("some", "%some")]
+#[case(".schema", "%.schema")]
+#[case(".value", "%.value")]
+#[case(".", "%.")]
+#[case("..", "%..")]
+#[case(".git", "%.git")]
+#[case("a/b", "%a%2Fb")]
+#[case("a b", "%a%20b")]
+// The prose specifies a '%' prefix for every escaped name; the example in
+// format.adoc omits that prefix for this one case.
+#[case("naïve", "%na%C3%AFve")]
+#[case("", "%")]
+#[case("a\0b", "%a%00b")]
+#[case("%", "%%25")]
+fn accepts_and_encodes_user_names(#[case] key: &str, #[case] encoded: &str) {
+    assert!(check_key(key).is_ok(), "{key:?} should be representable");
 
-/// Names canonical git refuses outright when creating a tree — verified
-/// against `git mktree`/`git fsck` — rejected here so this codec can never
-/// emit a tree canonical git would call malformed.
-#[rstest]
-#[case("")] // empty filename: "error: empty filename in tree entry"
-#[case(".")] // fsck's hasDot
-#[case("..")] // fsck's hasDotdot
-fn rejects_names_canonical_git_refuses(#[case] key: &str) {
-    assert!(
-        matches!(check_key(key), Err(KeyError { key: k }) if k == key),
-        "{key:?} should be rejected as a name canonical git refuses"
+    let input = HashMap::from([(key.to_owned(), "value".to_owned())]);
+    let (root, store) = serialize(&input).expect("encode typed map");
+    let entries = store.get_tree(&root).expect("read map").expect("tree");
+    assert_eq!(entries.len(), 1);
+    let actual: &[u8] = entries[0].filename.as_ref();
+    assert_eq!(actual, encoded.as_bytes());
+    assert_eq!(entries[0].mode.value(), 0o100644);
+    assert_eq!(
+        store.get_blob(&entries[0].oid).expect("read value"),
+        Some(b"value\n".to_vec())
     );
+    let decoded: HashMap<String, String> = deserialize(&root, &store).expect("decode typed map");
+    assert_eq!(decoded, input);
+    let (reencoded, _) = serialize(&decoded).expect("re-encode typed map");
+    assert_eq!(reencoded, root);
 }
 
-/// Keys containing the path separator are rejected as [`KeyError`], which
-/// carries the offending key.
-#[rstest]
-#[case("a/b")]
-#[case("/")]
-#[case("nested/key")]
-#[case("trailing/")]
-fn rejects_keys_with_slash(#[case] key: &str) {
-    assert!(
-        matches!(check_key(key), Err(KeyError { key: k }) if k == key),
-        "{key:?} should be rejected as KeyError carrying the offending key"
-    );
-}
-
-/// The reserved presence-marker name (`"_"`, written for an empty collection
-/// or `None`/`Null`) is rejected for the same reason `/` is: a real dynamic
-/// entry named exactly that would otherwise be indistinguishable, on read,
-/// from the marker.
 #[test]
-fn rejects_the_reserved_marker_key() {
-    assert!(
-        matches!(check_key("_"), Err(KeyError { key }) if key == "_"),
-        "\"_\" must be rejected as the reserved presence-marker key"
-    );
+fn encoded_name_limit_counts_prefix_and_percent_encoding() {
+    let valid = [
+        "a".repeat(255),
+        format!(".{}", "a".repeat(253)),
+        "/".repeat(84),
+    ];
+    for key in valid {
+        assert!(check_key(&key).is_ok(), "{key:?} should fit");
+        let input = HashMap::from([(key, "value".to_owned())]);
+        let (root, store) = serialize(&input).expect("encode boundary name");
+        let entries = store.get_tree(&root).expect("read map").expect("tree");
+        assert!(entries[0].filename.len() <= 255);
+        let decoded: HashMap<String, String> = deserialize(&root, &store).expect("decode map");
+        assert_eq!(decoded, input);
+    }
+
+    let invalid = [
+        "a".repeat(256),
+        format!(".{}", "a".repeat(254)),
+        "/".repeat(85),
+    ];
+    for key in invalid {
+        assert!(
+            matches!(check_key(&key), Err(KeyError { key: ref actual }) if actual == &key),
+            "{key:?} should exceed the encoded limit"
+        );
+        let input = HashMap::from([(key, "value".to_owned())]);
+        assert!(
+            serialize(&input).is_err(),
+            "overlong map key must be rejected"
+        );
+    }
 }
 
-/// NUL-bearing keys are rejected here rather than at the object backend: NUL
-/// terminates a tree entry's name in the on-disk format, so `gix` can only
-/// report an opaque backend error (no key, no path, no hint), while
-/// [`check_key`] still has the name in hand as user data and can report it as
-/// a [`KeyError`].
-#[rstest]
-#[case("a\0b")]
-#[case("\0")]
-#[case("leading\0")]
-fn rejects_keys_with_nul(#[case] key: &str) {
-    assert!(
-        matches!(check_key(key), Err(KeyError { key: k }) if k == key),
-        "{key:?} should be rejected as KeyError carrying the offending key"
+#[test]
+fn distinct_user_names_do_not_collide_with_structural_markers_or_each_other() {
+    let input: HashMap<String, String> = [
+        "", "%", "none", "some", ".schema", ".value", "a/b", "a%2Fb", "_",
+    ]
+    .into_iter()
+    .map(|key| (key.to_owned(), format!("value {key}")))
+    .collect();
+    let (root, store) = serialize(&input).expect("encode map");
+    let entries = store.get_tree(&root).expect("read map").expect("tree");
+    let names: Vec<&[u8]> = entries
+        .iter()
+        .map(|entry| entry.filename.as_ref())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            b"%".as_slice(),
+            b"%%25",
+            b"%.schema",
+            b"%.value",
+            b"%a%252Fb",
+            b"%a%2Fb",
+            b"%none",
+            b"%some",
+            b"_"
+        ]
     );
+    let decoded: HashMap<String, String> = deserialize(&root, &store).expect("decode map");
+    assert_eq!(decoded, input);
 }
 
-// --- integration: `serialize` must apply `check_key` to typed map keys ---
+fn foreign_map(name: &[u8]) -> (ObjectId, ObjectStore) {
+    let store = ObjectStore::default();
+    let value = store
+        .write_buf(Kind::Blob, b"value\n")
+        .expect("write value");
+    let mut bytes = b"100644 ".to_vec();
+    bytes.extend_from_slice(name);
+    bytes.push(0);
+    bytes.extend_from_slice(value.as_bytes());
+    let root = store.write_buf(Kind::Tree, &bytes).expect("write raw tree");
+    (root, store)
+}
 
-/// The typed map path — `serialize` over a `HashMap` field — runs every key
-/// through `check_key`, surfacing a refusal as [`SerializeError::Key`]. This
-/// is the only test that crosses `serialize` into that call site; without it
-/// the check could be dropped from the encoder and every remaining test
-/// (direct `check_key` unit tests, or the dynamic path exercised in
-/// `value_serialize`) would still pass.
-#[rstest]
-#[case("a/b")] // path separator
-#[case("_")] // the reserved presence-marker name
-#[case("a\0b")] // NUL terminates a tree entry's name on disk
-#[case("")] // empty filename
-#[case(".")] // fsck's hasDot
-#[case("..")] // fsck's hasDotdot
-fn serialize_rejects_invalid_typed_map_keys(#[case] key: &str) {
-    let mut table = HashMap::new();
-    table.insert(key.to_string(), "v".to_string());
-    assert!(
-        matches!(
-            serialize(&WithMap { table }),
-            Err(SerializeError::Key(KeyError { key: k })) if k == key
-        ),
-        "typed map key {key:?} must be rejected by serialize"
-    );
+#[test]
+fn rejects_noncanonical_foreign_names_and_structural_names() {
+    for name in [
+        b"%74itle".as_slice(),
+        b"%title",
+        b"%a%2fb",
+        b"%a%2",
+        b"%%GG",
+        b"%%FF",
+        b"a b",
+        b"a%2Fb",
+        b".schema",
+        b".value",
+        b"none",
+        b"some",
+        b"\xff",
+    ] {
+        let (root, store) = foreign_map(name);
+        assert!(
+            deserialize::<HashMap<String, String>>(&root, &store).is_err(),
+            "accepted foreign entry name {name:?}"
+        );
+    }
+    let (root, store) = foreign_map(&vec![b'x'; 256]);
+    assert!(deserialize::<HashMap<String, String>>(&root, &store).is_err());
 }

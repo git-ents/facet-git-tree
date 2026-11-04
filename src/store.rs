@@ -3,7 +3,7 @@
 use std::io::Read;
 
 use gix_hash::Kind as HashKind;
-use gix_object::{Data, Find, Kind, ObjectRef, Write};
+use gix_object::{Data, Find, Kind, Write};
 
 use crate::error::DeserializeError;
 use crate::{GitObject, ObjectId, TreeEntry};
@@ -27,7 +27,7 @@ pub struct ObjectStore(gix_odb::memory::Proxy<NoBackend>);
 
 impl Default for ObjectStore {
     fn default() -> Self {
-        Self(gix_odb::memory::Proxy::new(NoBackend, HashKind::Sha1))
+        Self::with_hash_kind(HashKind::Sha1)
     }
 }
 
@@ -40,6 +40,14 @@ impl std::fmt::Debug for ObjectStore {
 }
 
 impl ObjectStore {
+    /// Create an empty store that hashes new objects with `hash_kind`.
+    ///
+    /// [`Default`] selects SHA-1; pass [`HashKind::Sha256`] for SHA-256.
+    /// As with `gix`'s proxy, writes with a known ID trust the caller's ID.
+    pub fn with_hash_kind(hash_kind: HashKind) -> Self {
+        Self(gix_odb::memory::Proxy::new(NoBackend, hash_kind))
+    }
+
     /// Decode and return the object stored under `id`, if present.
     ///
     /// Corrupt and missing are distinguished: a failed fetch surfaces as
@@ -57,7 +65,7 @@ impl ObjectStore {
             return Ok(None);
         };
         let decode = |source| DeserializeError::Decode { oid: *id, source };
-        ObjectRef::from_bytes(data.data, data.kind, HashKind::Sha1)
+        data.decode()
             .map_err(decode)?
             .into_owned()
             .map_err(decode)
@@ -181,5 +189,106 @@ impl Write for NoBackend {
         _id: ObjectId,
     ) -> Result<ObjectId, gix_object::write::Error> {
         Err("NoBackend: writes are handled by the in-memory proxy".into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{EntryKind, EntryMode};
+    use gix_object::Tree;
+
+    #[test]
+    fn hashes_and_reads_git_objects_in_both_formats() {
+        let cases = [
+            (
+                HashKind::Sha1,
+                "b6fc4c620b67d95f953a5c1c1230aaab5db5a1b0",
+                "bc787e446f83ed260a7e22c65583e1bf1423813e",
+            ),
+            (
+                HashKind::Sha256,
+                "8aec4e4876f854f688d0ebfc8f37598f38e5fd6903cccc850ca36591175aeb60",
+                "1203e33ca4c968086cd181967aba60b4e14a5fb0c355c152d15db69f7ac6f639",
+            ),
+        ];
+        for (hash_kind, blob_hex, tree_hex) in cases {
+            let store = ObjectStore::with_hash_kind(hash_kind);
+            let blob = store.write_buf(Kind::Blob, b"hello").unwrap();
+            assert_eq!(blob.kind(), hash_kind);
+            assert_eq!(blob.to_string(), blob_hex);
+            assert_eq!(
+                store.get_blob(&blob).unwrap().as_deref(),
+                Some(&b"hello"[..])
+            );
+
+            let tree = Tree {
+                entries: ["a", "b"]
+                    .into_iter()
+                    .map(|name| TreeEntry {
+                        mode: EntryMode::from(EntryKind::Blob),
+                        filename: name.into(),
+                        oid: blob,
+                    })
+                    .collect(),
+            };
+            let tree_id = store.write(&tree).unwrap();
+            assert_eq!(tree_id.kind(), hash_kind);
+            assert_eq!(tree_id.to_string(), tree_hex);
+            assert_eq!(store.get_tree(&tree_id).unwrap(), Some(tree.entries));
+
+            let mut buf = Vec::new();
+            assert_eq!(
+                store
+                    .try_find(&tree_id, &mut buf)
+                    .unwrap()
+                    .unwrap()
+                    .object_hash,
+                hash_kind
+            );
+        }
+    }
+
+    #[test]
+    fn default_store_uses_sha1() {
+        let store = ObjectStore::default();
+        let id = store.write_buf(Kind::Blob, b"hello").unwrap();
+        assert_eq!(id.kind(), HashKind::Sha1);
+    }
+
+    #[test]
+    fn get_decodes_using_the_fetched_objects_hash_kind() {
+        let source = ObjectStore::with_hash_kind(HashKind::Sha256);
+        let blob = source.write_buf(Kind::Blob, b"hello").unwrap();
+        let tree = Tree {
+            entries: vec![TreeEntry {
+                mode: EntryMode::from(EntryKind::Blob),
+                filename: "hello".into(),
+                oid: blob,
+            }],
+        };
+        let id = source.write(&tree).unwrap();
+        let mut buf = Vec::new();
+        let data = source.try_find(&id, &mut buf).unwrap().unwrap();
+
+        // Known-ID writes intentionally retain gix's ability to store an object
+        // under an ID of a different kind from the store's normal write format.
+        let target = ObjectStore::default();
+        target
+            .write_buf_with_known_id(Kind::Tree, data.data, id)
+            .unwrap();
+        assert_eq!(target.get_tree(&id).unwrap(), Some(tree.entries));
+    }
+
+    #[test]
+    fn malformed_tree_is_a_decode_error_for_either_hash_kind() {
+        for hash_kind in [HashKind::Sha1, HashKind::Sha256] {
+            let store = ObjectStore::with_hash_kind(hash_kind);
+            let id = store.write_buf(Kind::Tree, b"100644 bad\0short").unwrap();
+            assert!(matches!(
+                store.get(&id),
+                Err(DeserializeError::Decode { .. })
+            ));
+        }
     }
 }

@@ -11,10 +11,12 @@
 //!     — the `Node`/`Schema` shapes asserted here are the public,
 //!       semver-major on-disk contract.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use facet::Facet;
-use facet_git_tree::{Node, RawTree, Schema, SchemaError, StructField, VariantKind, schema_of};
+use facet_git_tree::{
+    Node, RawTree, Schema, SchemaError, VariantKind, deserialize, schema_of, serialize,
+};
 
 mod common;
 use common::{
@@ -24,24 +26,7 @@ use common::{
 
 // --- helpers ---
 
-/// [`Node::Struct`] fields, all non-defaulted — the common case in this file.
-fn fields(pairs: Vec<(&str, Node)>) -> BTreeMap<String, StructField> {
-    pairs
-        .into_iter()
-        .map(|(k, v)| {
-            (
-                k.into(),
-                StructField {
-                    node: v,
-                    has_default: false,
-                },
-            )
-        })
-        .collect()
-}
-
-/// A struct enum variant's fields, which carry no default marker.
-fn variant_fields(pairs: Vec<(&str, Node)>) -> BTreeMap<String, Node> {
+fn fields(pairs: Vec<(&str, Node)>) -> BTreeMap<String, Node> {
     pairs.into_iter().map(|(k, v)| (k.into(), v)).collect()
 }
 
@@ -53,8 +38,9 @@ fn re(name: &str) -> Node {
     Node::Ref(name.into())
 }
 
-fn doc(root: Node, defs: Vec<(&str, Node)>) -> Schema {
+fn doc(kind: &str, root: Node, defs: Vec<(&str, Node)>) -> Schema {
     Schema {
+        kind: kind.into(),
         root,
         defs: defs.into_iter().map(|(k, v)| (k.into(), v)).collect(),
     }
@@ -71,7 +57,7 @@ fn point_def() -> Node {
 fn point_schema() -> anyhow::Result<()> {
     assert_eq!(
         schema_of::<Point>()?,
-        doc(re("Point"), vec![("Point", point_def())])
+        doc("Point", re("Point"), vec![("Point", point_def())])
     );
     Ok(())
 }
@@ -82,6 +68,7 @@ fn person_schema() -> anyhow::Result<()> {
     assert_eq!(
         schema_of::<Person>()?,
         doc(
+            "Person",
             re("Person"),
             vec![(
                 "Person",
@@ -96,32 +83,17 @@ fn person_schema() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `#[facet(default)]` on a field sets `StructField::has_default`, the
-/// field-level default-presence marker; every other field's marker is unset.
+/// Defaulted fields have the same required-field schema as all other fields.
 #[test]
-fn defaulted_field_schema_marks_has_default() -> anyhow::Result<()> {
+fn defaulted_field_has_no_special_schema_marker() -> anyhow::Result<()> {
     assert_eq!(
         schema_of::<WithDefault>()?,
         doc(
+            "WithDefault",
             re("WithDefault"),
             vec![(
                 "WithDefault",
-                Node::Struct(BTreeMap::from([
-                    (
-                        "label".to_owned(),
-                        StructField {
-                            node: Node::String,
-                            has_default: false,
-                        }
-                    ),
-                    (
-                        "count".to_owned(),
-                        StructField {
-                            node: Node::U32,
-                            has_default: true,
-                        }
-                    ),
-                ]))
+                Node::Struct(fields(vec![("label", Node::String), ("count", Node::U32)]))
             )]
         )
     );
@@ -134,6 +106,7 @@ fn nested_schema() -> anyhow::Result<()> {
     assert_eq!(
         schema_of::<Nested>()?,
         doc(
+            "Nested",
             re("Nested"),
             vec![
                 (
@@ -158,6 +131,7 @@ fn with_vec_schema() -> anyhow::Result<()> {
     assert_eq!(
         schema_of::<WithVec>()?,
         doc(
+            "WithVec",
             re("WithVec"),
             vec![(
                 "WithVec",
@@ -174,6 +148,7 @@ fn with_array_schema() -> anyhow::Result<()> {
     assert_eq!(
         schema_of::<WithArray>()?,
         doc(
+            "WithArray",
             re("WithArray"),
             vec![(
                 "WithArray",
@@ -196,6 +171,7 @@ fn with_map_schema() -> anyhow::Result<()> {
     assert_eq!(
         schema_of::<WithMap>()?,
         doc(
+            "WithMap",
             re("WithMap"),
             vec![(
                 "WithMap",
@@ -218,6 +194,7 @@ fn with_optional_schema() -> anyhow::Result<()> {
     assert_eq!(
         schema_of::<WithOptional>()?,
         doc(
+            "WithOptional",
             re("WithOptional"),
             vec![(
                 "WithOptional",
@@ -234,6 +211,7 @@ fn byte_seq_schema_is_bytes() -> anyhow::Result<()> {
     assert_eq!(
         schema_of::<Vec<u8>>()?,
         Schema {
+            kind: "Vec".into(),
             root: Node::Bytes,
             defs: BTreeMap::new(),
         }
@@ -241,57 +219,86 @@ fn byte_seq_schema_is_bytes() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Only string keys have a native map schema; other key types are CBOR.
+#[test]
+fn non_string_key_maps_have_opaque_cbor_schema() -> anyhow::Result<()> {
+    assert_eq!(schema_of::<HashMap<i32, String>>()?.root, Node::Cbor);
+    assert_eq!(schema_of::<BTreeMap<(u8, u8), String>>()?.root, Node::Cbor);
+    Ok(())
+}
+
+#[test]
+fn array_length_is_bounded_by_the_tree_entry_cap() -> anyhow::Result<()> {
+    assert_eq!(
+        schema_of::<[i32; 4096]>()?.root,
+        Node::Array {
+            elem: Box::new(Node::I32),
+            len: 4096,
+        }
+    );
+    assert!(
+        matches!(
+            schema_of::<[i32; 4097]>(),
+            Err(SchemaError::UnsupportedShape(_))
+        ),
+        "an array schema cannot declare more than 4096 entries"
+    );
+    Ok(())
+}
+
 // --- unit ---
 
-/// `()` has no textual rendering — `scalar_bytes` has no `Display`/`FromStr`
-/// path for it either — so a field of type `()` cannot be described by a
-/// schema, mirroring the encoder's own refusal.
+/// Both `()` and a unit-valued field use the unit marker schema.
 #[test]
-fn unit_field_schema_errors() {
+fn unit_field_schema_is_unit() -> anyhow::Result<()> {
     #[derive(Facet)]
     struct WithUnit {
         u: (),
     }
-    let err = schema_of::<WithUnit>().unwrap_err();
-    assert!(
-        matches!(err, SchemaError::UnsupportedScalar("()")),
-        "expected UnsupportedScalar(\"()\"), got {err:?}"
+    assert_eq!(schema_of::<()>()?, doc("()", Node::Unit, vec![]));
+    assert_eq!(
+        schema_of::<WithUnit>()?,
+        doc(
+            "WithUnit",
+            re("WithUnit"),
+            vec![("WithUnit", Node::Struct(fields(vec![("u", Node::Unit)])))]
+        )
     );
+    Ok(())
 }
 
-/// A unit struct still yields `Node::Unit`: unlike `()`, it has a real
-/// (empty-tree) encoding to describe — it is simply reached through the
-/// struct branch, not the scalar table `()` is refused from.
+/// A unit struct is a named definition whose body is `Node::Unit`.
 #[test]
 fn unit_struct_schema_is_unit() -> anyhow::Result<()> {
     #[derive(Facet)]
     struct Marker;
     assert_eq!(
         schema_of::<Marker>()?,
-        doc(re("Marker"), vec![("Marker", Node::Unit)])
+        doc("Marker", re("Marker"), vec![("Marker", Node::Unit)])
     );
     Ok(())
 }
 
 // --- enums ---
 
-/// Each variant's payload kind matches the encoder's classification: unit,
-/// newtype (single-field tuple), tuple, and struct.
+/// Unit, tuple and struct variants retain their distinct payload kinds;
+/// a single-field tuple has no separate schema variant.
 #[test]
 fn enum_schema() -> anyhow::Result<()> {
     assert_eq!(
         schema_of::<Event>()?,
         doc(
+            "Event",
             re("Event"),
             vec![(
                 "Event",
                 Node::Enum(variants(vec![
                     ("Ping", VariantKind::Unit),
-                    ("Message", VariantKind::Newtype(Box::new(Node::String))),
+                    ("Message", VariantKind::Tuple(vec![Node::String])),
                     ("Move", VariantKind::Tuple(vec![Node::I32, Node::I32])),
                     (
                         "Login",
-                        VariantKind::Struct(variant_fields(vec![
+                        VariantKind::Struct(fields(vec![
                             ("user", Node::String),
                             ("ok", Node::Bool),
                         ]))
@@ -300,6 +307,140 @@ fn enum_schema() -> anyhow::Result<()> {
             )]
         )
     );
+    Ok(())
+}
+
+/// Effective names remain user names in the schema; escaping happens on disk.
+#[test]
+fn schema_uses_effective_names_without_pre_escaping() -> anyhow::Result<()> {
+    #[derive(Facet)]
+    struct Renamed {
+        #[facet(rename = "none")]
+        presence: String,
+        #[facet(rename = ".schema")]
+        schema: u32,
+        task: RenamedTask,
+    }
+
+    #[derive(Facet)]
+    #[repr(u8)]
+    #[facet(rename_all = "snake_case")]
+    enum RenamedTask {
+        #[facet(rename = "some")]
+        Wait,
+        LongTask(String),
+        Named {
+            #[facet(rename = "a/b")]
+            label: String,
+        },
+    }
+
+    let tasks = [
+        RenamedTask::Wait,
+        RenamedTask::LongTask("payload".into()),
+        RenamedTask::Named { label: "x".into() },
+    ];
+    for task in tasks {
+        let (root, store) = serialize(&task)?;
+        match task {
+            RenamedTask::Wait => {
+                assert_eq!(store.get_blob(&root)?.as_deref(), Some(&b"%some\n"[..]));
+            }
+            RenamedTask::LongTask(payload) => {
+                let tag = common::find_entry(&store, &root, "long_task");
+                assert_eq!(
+                    store.get_blob(&tag.oid)?,
+                    Some(format!("{payload}\n").into_bytes())
+                );
+            }
+            RenamedTask::Named { label } => {
+                let tag = common::find_entry(&store, &root, "named");
+                let field = common::find_entry(&store, &tag.oid, "%a%2Fb");
+                assert_eq!(
+                    store.get_blob(&field.oid)?,
+                    Some(format!("{label}\n").into_bytes())
+                );
+            }
+        }
+    }
+    let schema = schema_of::<Renamed>()?;
+    assert_eq!(schema.kind, "Renamed");
+    let Node::Ref(root_name) = &schema.root else {
+        panic!("named struct must have a reference root");
+    };
+    let Some(Node::Struct(root_fields)) = schema.defs.get(root_name) else {
+        panic!("root must resolve to struct fields");
+    };
+    assert_eq!(
+        root_fields,
+        &fields(vec![
+            ("none", Node::String),
+            (".schema", Node::U32),
+            ("task", re("RenamedTask")),
+        ])
+    );
+    assert_eq!(
+        schema.defs.get("RenamedTask"),
+        Some(&Node::Enum(variants(vec![
+            ("some", VariantKind::Unit),
+            ("long_task", VariantKind::Tuple(vec![Node::String])),
+            (
+                "named",
+                VariantKind::Struct(fields(vec![("a/b", Node::String)])),
+            ),
+        ])))
+    );
+    Ok(())
+}
+
+/// A complete bare schema uses ordinary frozen `Node`/`VariantKind` trees.
+#[test]
+fn frozen_schema_wire_golden_and_roundtrip() -> anyhow::Result<()> {
+    let schema = doc(
+        "Demo",
+        re("Root"),
+        vec![(
+            "Root",
+            Node::Struct(fields(vec![
+                ("count", Node::U32),
+                (
+                    "event",
+                    Node::Enum(variants(vec![
+                        ("Ping", VariantKind::Unit),
+                        ("Message", VariantKind::Tuple(vec![Node::String])),
+                    ])),
+                ),
+            ])),
+        )],
+    );
+    let (root, store) = serialize(&schema)?;
+    // Independently hashed Git objects for the exact frozen layout below.
+    assert_eq!(root.to_string(), "12660b786043b54b79da3c0f6ea135e16f9a92d0");
+    let root_entries = common::tree_entries(&store, &root);
+    let names: Vec<&[u8]> = root_entries
+        .iter()
+        .map(|entry| entry.filename.as_ref())
+        .collect();
+    assert_eq!(names, [b"defs".as_slice(), b"kind", b"root"]);
+    let kind = common::find_entry(&store, &root, "kind");
+    assert_eq!(store.get_blob(&kind.oid)?.as_deref(), Some(&b"Demo\n"[..]));
+    let defs = common::find_entry(&store, &root, "defs");
+    let root_def = common::find_entry(&store, &defs.oid, "Root");
+    let structure = common::find_entry(&store, &root_def.oid, "struct");
+    let count = common::find_entry(&store, &structure.oid, "count");
+    assert_eq!(store.get_blob(&count.oid)?.as_deref(), Some(&b"u32\n"[..]));
+    let event = common::find_entry(&store, &structure.oid, "event");
+    let enum_payload = common::find_entry(&store, &event.oid, "enum");
+    let message = common::find_entry(&store, &enum_payload.oid, "Message");
+    let tuple = common::find_entry(&store, &message.oid, "tuple");
+    let first = common::find_entry(&store, &tuple.oid, "000");
+    assert_eq!(
+        store.get_blob(&first.oid)?.as_deref(),
+        Some(&b"string\n"[..])
+    );
+    let decoded: Schema = deserialize(&root, &store)?;
+    assert_eq!(decoded, schema);
+    assert_eq!(serialize(&decoded)?.0, root);
     Ok(())
 }
 
@@ -315,6 +456,7 @@ fn raw_tree_field_schema() -> anyhow::Result<()> {
     assert_eq!(
         schema_of::<WithRaw>()?,
         doc(
+            "WithRaw",
             re("WithRaw"),
             vec![(
                 "WithRaw",
@@ -331,6 +473,7 @@ fn value_field_schema_is_dynamic() -> anyhow::Result<()> {
     assert_eq!(
         schema_of::<WithValue>()?,
         doc(
+            "WithValue",
             re("WithValue"),
             vec![(
                 "WithValue",
@@ -350,6 +493,7 @@ fn recursive_schema_uses_ref() -> anyhow::Result<()> {
     assert_eq!(
         schema_of::<TreeNode>()?,
         doc(
+            "TreeNode",
             re("TreeNode"),
             vec![(
                 "TreeNode",
@@ -389,6 +533,7 @@ fn name_collision_disambiguated() -> anyhow::Result<()> {
     assert_eq!(
         schema_of::<Both>()?,
         doc(
+            "Both",
             re("Both"),
             vec![
                 (
@@ -405,12 +550,13 @@ fn name_collision_disambiguated() -> anyhow::Result<()> {
 
 // --- transparency ---
 
-/// A smart pointer collapses to its pointee's schema: `Box<T>` and `T` are
-/// indistinguishable, exactly as they are indistinguishable on disk.
+/// A smart pointer collapses to its pointee's schema, but keeps its own kind.
 #[test]
 fn box_schema_collapses() -> anyhow::Result<()> {
     let boxed = schema_of::<Box<Point>>()?;
     let point = schema_of::<Point>()?;
+    assert_eq!(boxed.kind, "Box");
+    assert_eq!(point.kind, "Point");
     assert_eq!(boxed.root, point.root);
     assert_eq!(boxed.defs, point.defs);
     Ok(())
@@ -425,6 +571,7 @@ fn transparent_newtype_schema_collapses() -> anyhow::Result<()> {
     assert_eq!(
         schema_of::<Hex>()?,
         Schema {
+            kind: "Hex".into(),
             root: Node::String,
             defs: BTreeMap::new(),
         }
@@ -451,8 +598,13 @@ fn excessively_nested_shape_schema_is_rejected() {
         matches!(err, SchemaError::MaxDepth(3)),
         "expected MaxDepth(3), got {err:?}"
     );
-    // The same shape is comfortably within the real bound.
-    assert!(schema_of::<Nested>().is_ok());
+    // The same shape is comfortably within the real bound: the default-bound
+    // entry point produces the full optional chain rather than failing.
+    let mut expected = Node::I32;
+    for _ in 0..5 {
+        expected = Node::Optional(Box::new(expected));
+    }
+    assert_eq!(schema_of::<Nested>().unwrap().root, expected);
 }
 
 /// The explicit-bound entry point at the default bound reproduces

@@ -3,12 +3,11 @@
 //! Covers spec requirement:
 //!   serialization.design.dynamic
 //!     — a dynamic value serializes as its runtime kind's typed encoding:
-//!       strings and bytes as raw blobs, booleans and numbers as their textual
-//!       form, arrays as ordinal-keyed trees, objects as sorted name-keyed
-//!       trees with validated keys, and null as the presence-marker tree.
+//!       scalar kinds as text leaves, arrays as ordinal-keyed trees, objects
+//!       as sorted trees with escaped names, and null as the `none` marker.
 
-use facet_git_tree::{EntryKind, SerializeError, serialize};
-use facet_value::{VDateTime, VObject, Value, value};
+use facet_git_tree::{EntryKind, serialize};
+use facet_value::{VArray, VDateTime, VObject, Value, value};
 
 mod common;
 use common::{HELLO_LEAF_BLOB_OID, WithValue, find_entry, tree_entries};
@@ -30,6 +29,18 @@ fn string_blob_matches_typed_string() -> anyhow::Result<()> {
             .expect("blob"),
         b"hello\n"
     );
+    Ok(())
+}
+
+/// Dynamic bytes are a text leaf: their bytes are followed by one newline.
+#[test]
+fn bytes_are_text_leaves() -> anyhow::Result<()> {
+    for bytes in [vec![], vec![0xff, 0, b'\n'], b"hello".to_vec()] {
+        let (root, store) = serialize(&Value::from(bytes.clone()))?;
+        let mut expected = bytes;
+        expected.push(b'\n');
+        assert_eq!(store.get_blob(&root)?.as_deref(), Some(expected.as_slice()));
+    }
     Ok(())
 }
 
@@ -68,12 +79,9 @@ fn numbers_are_decimal_blobs() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Null is the presence-marker tree (`crate::marker`): a single blob entry
-/// named `"_"`, not a literal empty tree, which would be invisible to
-/// `git ls-tree -r`/`diff` — exactly the invisibility the marker exists to
-/// avoid. The empty blob is the marker's alone: every leaf blob carries
-/// a mandatory trailing newline, so `""` and empty bytes do not collide
-/// with it.
+/// Null is the `none` marker tree: a single entry pointing to an empty blob,
+/// not a literal empty tree that would be invisible to `git ls-tree -r`/`diff`.
+/// Empty binary leaves share its blob but not its tree.
 #[test]
 fn null_is_marker_tree() -> anyhow::Result<()> {
     let (root, store) = serialize(&Value::NULL)?;
@@ -83,7 +91,7 @@ fn null_is_marker_tree() -> anyhow::Result<()> {
         1,
         "Null must be the single-entry marker tree"
     );
-    assert_eq!(entries[0].filename, "_");
+    assert_eq!(entries[0].filename, "none");
     assert_eq!(entries[0].mode.kind(), EntryKind::Blob);
     assert_eq!(
         store
@@ -106,8 +114,10 @@ fn array_is_ordinal_tree() -> anyhow::Result<()> {
         .into_iter()
         .map(|e| e.filename.to_string())
         .collect();
-    assert_eq!(names, ["0000", "0001", "0002"]);
-    let first = find_entry(&store, &root, "0000");
+    assert_eq!(names, ["000", "001", "002"]);
+    let (typed_root, _) = serialize(&vec!["a".to_string(), "b".to_string(), "c".to_string()])?;
+    assert_eq!(root, typed_root);
+    let first = find_entry(&store, &root, "000");
     assert_eq!(
         store
             .get_blob(&first.oid)
@@ -115,6 +125,27 @@ fn array_is_ordinal_tree() -> anyhow::Result<()> {
             .expect("blob"),
         b"a\n"
     );
+    Ok(())
+}
+
+/// Ordinals remain hexadecimal beyond the decimal digits.
+#[test]
+fn array_ordinals_are_lowercase_hex() -> anyhow::Result<()> {
+    let mut array = VArray::new();
+    for i in 0..17 {
+        array.push(i);
+    }
+    let (root, store) = serialize(&Value::from(array))?;
+    let entries = tree_entries(&store, &root);
+    assert_eq!(entries.len(), 17);
+    for (i, entry) in entries.iter().enumerate() {
+        assert_eq!(entry.filename.to_string(), format!("{i:03x}"));
+        assert_eq!(entry.mode.kind(), EntryKind::Blob);
+        assert_eq!(
+            store.get_blob(&entry.oid)?.as_deref(),
+            Some(format!("{i}\n").as_bytes())
+        );
+    }
     Ok(())
 }
 
@@ -142,30 +173,81 @@ fn object_is_sorted_name_keyed_tree() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// An empty object is the same marker tree as null (indistinguishable on
-/// disk — a documented heuristic collision, unaffected by the marker).
+/// Null, an empty array, an empty object, unit, and a typed empty sequence
+/// share the same marker tree.
 #[test]
 fn empty_object_is_marker_tree() -> anyhow::Result<()> {
     let (root, store) = serialize(&Value::from(VObject::new()))?;
     let entries = tree_entries(&store, &root);
     assert_eq!(entries.len(), 1, "empty Object must be the marker tree");
-    assert_eq!(entries[0].filename, "_");
-    // The marker tree is one object: null and the empty object share an OID.
+    assert_eq!(entries[0].filename, "none");
+    assert_eq!(entries[0].mode.kind(), EntryKind::Blob);
+    assert_eq!(
+        store.get_blob(&entries[0].oid)?.as_deref(),
+        Some(b"".as_slice())
+    );
+
     let (null_root, _) = serialize(&Value::NULL)?;
+    let (array_root, _) = serialize(&Value::from(VArray::new()))?;
+    let (unit_root, _) = serialize(&())?;
+    let (sequence_root, _) = serialize(&Vec::<String>::new())?;
     assert_eq!(root, null_root);
+    assert_eq!(root, array_root);
+    assert_eq!(root, unit_root);
+    assert_eq!(root, sequence_root);
+
+    // An empty binary leaf shares the marker target, but is a blob, not a tree.
+    let (empty_bytes, _) = serialize(&Vec::<u8>::new())?;
+    assert_eq!(entries[0].oid, empty_bytes);
+    assert_ne!(root, empty_bytes);
     Ok(())
 }
 
 // --- key validation ---
 
-/// Object keys become tree entry names (path segments), so a key containing
-/// `/` is rejected, exactly as for typed map keys.
+/// Arbitrary object keys use canonical escaped names, including a slash.
 #[test]
-fn object_key_with_slash_is_rejected() {
+fn object_keys_are_escaped() -> anyhow::Result<()> {
     let mut obj = VObject::new();
-    obj.insert("bad/key", "x");
-    let err = serialize(&Value::from(obj)).unwrap_err();
-    assert!(matches!(err, SerializeError::Key(_)), "got {err:?}");
+    for (key, value) in [
+        ("bad/key", "slash"),
+        ("none", "reserved"),
+        ("some", "present"),
+        (".schema", "dot"),
+        ("", "empty"),
+        ("naïve", "unicode"),
+    ] {
+        obj.insert(key, value);
+    }
+    let (root, store) = serialize(&Value::from(obj))?;
+    for (encoded, value) in [
+        ("%bad%2Fkey", "slash\n"),
+        ("%none", "reserved\n"),
+        ("%some", "present\n"),
+        ("%.schema", "dot\n"),
+        ("%", "empty\n"),
+        ("%na%C3%AFve", "unicode\n"),
+    ] {
+        let entry = find_entry(&store, &root, encoded);
+        assert_eq!(entry.mode.kind(), EntryKind::Blob, "{encoded}");
+        assert_eq!(
+            store.get_blob(&entry.oid)?.as_deref(),
+            Some(value.as_bytes()),
+            "{encoded}"
+        );
+    }
+    assert_eq!(tree_entries(&store, &root).len(), 6);
+    Ok(())
+}
+
+/// The length limit applies to the encoded name, not just the original key.
+#[test]
+fn object_key_over_encoded_length_limit_is_rejected() {
+    for key in ["a".repeat(256), format!(".{}", "a".repeat(254))] {
+        let mut obj = VObject::new();
+        obj.insert(key.as_str(), "x");
+        assert!(serialize(&Value::from(obj)).is_err(), "key {key:?}");
+    }
 }
 
 // --- composition with typed values ---

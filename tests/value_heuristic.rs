@@ -3,9 +3,10 @@
 //! Covers spec requirement:
 //!   deserialization.dynamic.heuristic
 //!     — with no type marker on disk, a dynamic read recovers shape from the
-//!       object graph: a UTF-8 blob is a String, any other blob is Bytes, a
-//!       non-empty tree with all-ordinal names is an Array, and any other tree
-//!       (including the empty tree) is an Object.
+//!       object graph: a UTF-8 text leaf is a String, a non-UTF-8 blob is
+//!       Bytes, a contiguous ordinal tree is an Array, the `none` marker is
+//!       Null, and other named trees are Objects. Kinds with the same encoding
+//!       collide.
 
 use std::collections::HashMap;
 
@@ -20,7 +21,7 @@ use common::{Person, WithMap};
 
 // --- blobs ---
 
-/// A blob whose bytes are valid UTF-8 reads back as a String.
+/// A text leaf whose contents are valid UTF-8 reads back as a String.
 #[test]
 fn utf8_blob_reads_as_string() -> anyhow::Result<()> {
     let (root, store) = serialize(&"hello".to_string())?;
@@ -29,11 +30,21 @@ fn utf8_blob_reads_as_string() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A blob with invalid UTF-8 reads back as Bytes.
+/// A dynamic `Bytes` value, whose text leaf is not valid UTF-8, reads back as
+/// the same `Bytes`.
+///
+/// A dynamic `Bytes` is written as a text leaf (raw bytes plus one trailing
+/// `\n`), unlike a typed `Vec<u8>` `bytes` leaf, so the fixture must go through
+/// the dynamic writer for the heuristic to see a valid encoding.
 #[test]
 fn non_utf8_blob_reads_as_bytes() -> anyhow::Result<()> {
     let data: Vec<u8> = vec![0xff, 0xfe, 0x00];
-    let (root, store) = serialize(&data)?;
+    let dynamic = Value::from(data.clone());
+    let (root, store) = serialize(&dynamic)?;
+    assert_eq!(
+        store.get_blob(&root)?.as_deref(),
+        Some([data.as_slice(), b"\n"].concat().as_slice())
+    );
     let v: Value = deserialize(&root, &store)?;
     assert_eq!(v, Value::from(data));
     Ok(())
@@ -41,8 +52,8 @@ fn non_utf8_blob_reads_as_bytes() -> anyhow::Result<()> {
 
 // --- trees ---
 
-/// A non-empty tree whose entry names are all decimal ordinals reads back as
-/// an Array, in ordinal order.
+/// A non-empty tree with contiguous three-digit lowercase hexadecimal
+/// ordinals reads back as an Array, in ordinal order.
 #[test]
 fn ordinal_tree_reads_as_array() -> anyhow::Result<()> {
     let items = vec!["x".to_string(), "y".to_string()];
@@ -64,13 +75,13 @@ fn named_tree_reads_as_object() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The empty tree reads back as an empty Object — the designated reading for
-/// the null/empty-Object collision.
+/// The `none` marker reads back as Null; it also represents empty containers
+/// and unit.
 #[test]
-fn empty_tree_reads_as_empty_object() -> anyhow::Result<()> {
+fn marker_tree_reads_as_null() -> anyhow::Result<()> {
     let (root, store) = serialize(&Value::NULL)?;
     let v: Value = deserialize(&root, &store)?;
-    assert_eq!(v, value!({}));
+    assert_eq!(v, Value::NULL);
     Ok(())
 }
 
@@ -79,11 +90,41 @@ fn empty_tree_reads_as_empty_object() -> anyhow::Result<()> {
 #[test]
 fn mixed_ordinal_and_named_tree_reads_as_object() -> anyhow::Result<()> {
     let mut table = HashMap::new();
-    table.insert("0000".to_string(), "a".to_string());
+    table.insert("000".to_string(), "a".to_string());
     table.insert("name".to_string(), "b".to_string());
     let (root, store) = serialize(&WithMap { table })?;
     let v: Value = deserialize(&root, &store)?;
-    assert_eq!(v, value!({ "table": { "0000": "a", "name": "b" } }));
+    assert_eq!(v, value!({ "table": { "000": "a", "name": "b" } }));
+    Ok(())
+}
+
+/// Noncontiguous ordinal-looking names can be object keys, so they must not
+/// be decoded as an array with missing elements.
+#[test]
+fn noncontiguous_ordinal_names_read_as_object() -> anyhow::Result<()> {
+    let original = value!({ "000": "x", "002": "y" });
+    let (root, store) = serialize(&original)?;
+    let decoded: Value = deserialize(&root, &store)?;
+    assert_eq!(decoded, original);
+    assert_eq!(serialize(&decoded)?.0, root);
+    Ok(())
+}
+
+/// Escaped object keys are decoded back to their original user names.
+#[test]
+fn escaped_names_read_as_object_keys() -> anyhow::Result<()> {
+    let original = value!({
+        "bad/key": "slash",
+        "none": "reserved",
+        "some": "present",
+        ".schema": "dot",
+        "": "empty",
+        "naïve": "unicode"
+    });
+    let (root, store) = serialize(&original)?;
+    let decoded: Value = deserialize(&root, &store)?;
+    assert_eq!(decoded, original);
+    assert_eq!(serialize(&decoded)?.0, root);
     Ok(())
 }
 
@@ -116,7 +157,7 @@ fn depth_beyond_max_is_rejected() -> anyhow::Result<()> {
             .write(&gix_object::Tree {
                 entries: vec![TreeEntry {
                     mode: EntryMode::from(EntryKind::Tree),
-                    filename: "0000".into(),
+                    filename: "000".into(),
                     oid: root,
                 }],
             })

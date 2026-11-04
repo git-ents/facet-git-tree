@@ -1,5 +1,5 @@
 //! Schema-directed serialization: encoding a full-fidelity
-//! [`facet_value::Value`] as a Git tree guided by a [`Schema`].
+//! [`facet_value::Value`] as a Git object guided by a [`Schema`].
 //!
 //! The write-side mirror of [`schema::read`](crate::schema::read). A dynamic
 //! value parsed from JSON does not, on its own, know which typed encoding a
@@ -11,33 +11,35 @@
 //! and therefore the same object ids — that the equivalent typed value would
 //! produce through [`serialize`](crate::serialize).
 //!
-//! Encoding is validation: the walk fails with the offending path the moment
-//! a value diverges from what its schema node accepts. The accepted set is
-//! exactly the image of
-//! [`deserialize_value_with_schema`](crate::deserialize_value_with_schema),
-//! plus the two deterministic bridges a JSON-authored value forces: a
-//! lossless integer into a float field, and a string into a `Bytes` field.
+//! Encoding validates the schema and value. JSON-authored values may use
+//! lossless integers and the strings `nan`, `inf`, and `-inf` for floats,
+//! and UTF-8 strings for `Bytes`. CBOR nodes require opaque canonical bytes.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use facet::Peek;
 use facet_value::{VArray, VNumber, Value};
 use gix_object::Write;
 
 use crate::error::{SchemaWriteError, SerializeError};
+use crate::float::{format_f32, format_f64};
 use crate::limits::MAX_VALUE_DEPTH;
+use crate::ordinal::{self, MAX_TREE_ENTRIES};
 use crate::schema::path::Path;
-use crate::schema::{FieldNode, Node, Schema, VariantKind, is_scalar_schema, value_kind};
-use crate::ser::{float_text, serialize_node, write_leaf_blob};
-use crate::{EntryKind, EntryMode, ObjectId, TreeEntry, check_key};
+use crate::schema::{Node, Schema, VariantKind, value_kind};
+use crate::ser::{serialize_node, write_binary_blob, write_leaf_blob};
+use crate::{EntryKind, EntryMode, ObjectId, TreeEntry};
 
-/// Serialize `value` into `store` as the tree `doc` describes, returning the
-/// root [`ObjectId`].
+/// Serialize the bare value described by `doc` into `store`.
 ///
-/// `store` is any `gix` [`Write`] sink, exactly as for
-/// [`serialize_into`](crate::serialize_into). The write fails — with the path
-/// in `value` at which the mismatch occurred — if the value does not conform
-/// to the schema, rather than emitting a lossy or ambiguous encoding.
+/// The returned object may be a tree or a blob; no `.schema` envelope is
+/// added. The full schema is validated before any value objects are written.
+/// A `Cbor` value must be bytes containing exactly one canonical CBOR item;
+/// those bytes are stored verbatim, without a binary or newline wrapper.
+/// An unwrapped null denotes `None`, so `Some(None)` and `Some(())` cannot be
+/// represented through this `Value` API. `store` is any `gix` [`Write`] sink,
+/// as for [`serialize_into`](crate::serialize_into). Value mismatches identify
+/// the offending path.
 ///
 /// ```
 /// use facet::Facet;
@@ -64,6 +66,7 @@ pub fn serialize_value_with_schema<W: Write + ?Sized>(
     doc: &Schema,
     store: &W,
 ) -> Result<ObjectId, SchemaWriteError> {
+    crate::schema::read::validate_schema(doc).map_err(schema_error)?;
     let (oid, _kind) = write_node(value, &doc.root, doc, store, &Path::ROOT, 0)?;
     Ok(oid)
 }
@@ -74,9 +77,8 @@ pub fn serialize_value_with_schema<W: Write + ?Sized>(
 /// caller embedding it in a parent tree can set the entry mode exactly as the
 /// typed encoder does.
 ///
-/// `depth` counts every hop — including [`Node::Ref`] resolution — against
-/// the same [`MAX_VALUE_DEPTH`] limit that bounds deserialization, so a `Ref`-to-`Ref`
-/// cycle in the schema fails rather than recursing unboundedly.
+/// `depth` counts encoded nesting levels against [`MAX_VALUE_DEPTH`];
+/// resolving a [`Node::Ref`] does not add a tree level.
 fn write_node<W: Write + ?Sized>(
     value: &Value,
     schema: &Node,
@@ -85,16 +87,11 @@ fn write_node<W: Write + ?Sized>(
     path: &Path,
     depth: usize,
 ) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
-    if depth > MAX_VALUE_DEPTH {
-        return Err(SchemaWriteError::MaxDepth {
-            path: path.show(),
-            depth: MAX_VALUE_DEPTH,
-        });
-    }
+    check_depth(path, depth)?;
     match schema {
         Node::Unit => {
             if value.is_null() {
-                tree(store, vec![])
+                marker_tree(store)
             } else {
                 Err(expected(path, "null", value))
             }
@@ -134,36 +131,33 @@ fn write_node<W: Write + ?Sized>(
         Node::U128 => unsigned_blob::<u128, W>(value, "U128", path, store),
         Node::USize => unsigned_blob::<u64, W>(value, "USize", path, store),
         Node::F64 => {
-            let n = as_number(value, path)?;
-            // A float-backed number is rendered at any magnitude; an
-            // integer-backed one must be exactly representable, else refused.
-            let f = if n.is_float() {
-                n.to_f64_lossy()
-            } else {
-                n.to_f64().ok_or_else(|| unrepresentable(path, "F64"))?
-            };
-            blob(store, &float_text(f))
+            let f = float64(value, path)?;
+            blob(store, format_f64(f).as_bytes())
         }
         Node::F32 => {
-            let n = as_number(value, path)?;
-            let f: f32 = if n.is_float() {
-                n.to_f64_lossy() as f32
-            } else {
-                n.to_f32().ok_or_else(|| unrepresentable(path, "F32"))?
-            };
-            blob(store, &float_text(f))
+            let f = float32(value, path)?;
+            blob(store, format_f32(f).as_bytes())
         }
         // `Bytes` reads back as raw bytes; a JSON author who cannot express a
         // byte string writes an ordinary string, whose UTF-8 bytes become the
         // blob — the same blob a typed `Vec<u8>` of those bytes produces.
         Node::Bytes => {
             if let Some(b) = value.as_bytes() {
-                blob(store, b.as_slice())
+                binary_blob(store, b.as_slice())
             } else if let Some(s) = value_str(value) {
-                blob(store, s.as_bytes())
+                binary_blob(store, s.as_bytes())
             } else {
                 Err(expected(path, "bytes or string", value))
             }
+        }
+        Node::Cbor => {
+            let bytes = value
+                .as_bytes()
+                .ok_or_else(|| expected(path, "canonical CBOR bytes", value))?;
+            crate::cbor::validate(bytes.as_slice()).map_err(|error| {
+                SerializeError::Reflect(format!("at {}: invalid CBOR: {error}", path.show()))
+            })?;
+            binary_blob(store, bytes.as_slice())
         }
         Node::Struct(fields) => write_named_tree(value, fields, doc, store, path, depth),
         Node::Tuple(elems) => {
@@ -171,59 +165,59 @@ fn write_node<W: Write + ?Sized>(
             if arr.len() != elems.len() {
                 return Err(length_mismatch(path, elems.len(), arr.len()));
             }
-            write_seq(arr, |i| &elems[i], doc, store, path, depth, false)
+            write_seq(arr, |i| &elems[i], doc, store, path, depth)
         }
         Node::List(elem) => {
             let arr = as_array(value, path)?;
-            write_seq(arr, |_| elem, doc, store, path, depth, true)
+            write_seq(arr, |_| elem, doc, store, path, depth)
         }
         Node::Array { elem, len } => {
             let arr = as_array(value, path)?;
             if arr.len() != *len {
                 return Err(length_mismatch(path, *len, arr.len()));
             }
-            write_seq(arr, |_| elem, doc, store, path, depth, true)
+            write_seq(arr, |_| elem, doc, store, path, depth)
         }
-        // The key schema decides the layout, exactly as it does on read: a
-        // scalar key is a name-keyed object; a composite key is an array of
-        // `{ k, v }` pairs. An empty map (either layout) writes the presence
-        // marker instead of a literal empty tree, per `crate::marker`.
-        Node::Map { key, value: val } => {
-            if is_scalar_schema(key) {
-                let obj = as_object(value, path)?;
-                let mut entries = Vec::with_capacity(obj.len());
-                for (k, v) in obj.iter() {
-                    let k = k.as_str();
-                    check_key(k).map_err(SerializeError::from)?;
-                    let (oid, kind) = write_node(v, val, doc, store, &path.field(k), depth + 1)?;
-                    entries.push(TreeEntry {
-                        mode: EntryMode::from(kind),
-                        filename: k.into(),
-                        oid,
-                    });
-                }
-                entries.sort();
-                if entries.is_empty() {
-                    return marker_tree(store);
-                }
-                return tree(store, entries);
+        Node::Map { value: val, .. } => {
+            // `validate_schema` has already checked every map, including
+            // those in unused definitions and inactive variants.
+            let obj = as_object(value, path)?;
+            check_tree_len(obj.len(), path)?;
+            let mut entries = Vec::with_capacity(obj.len());
+            for (key, value) in obj.iter() {
+                let key = key.as_str();
+                let filename = escaped_name(key, path)?;
+                let (oid, kind) = write_node(value, val, doc, store, &path.field(key), depth + 1)?;
+                entries.push(TreeEntry {
+                    mode: EntryMode::from(kind),
+                    filename: filename.into(),
+                    oid,
+                });
             }
-            write_composite_map(value, key, val, doc, store, path, depth)
+            tree(store, entries, path)
         }
         Node::Optional(inner) => {
             if value.is_null() {
-                // None: the presence marker, not a literal empty tree — see
-                // `crate::marker`.
+                // An unwrapped Value cannot distinguish None from Some(None)
+                // or Some(()); null selects None.
                 return marker_tree(store);
             }
-            let (oid, kind) = write_node(value, inner, doc, store, &path.field("some"), depth + 1)?;
+            let (oid, kind) = write_node(
+                value,
+                inner,
+                doc,
+                store,
+                &path.field(crate::marker::SOME_KEY),
+                depth + 1,
+            )?;
             tree(
                 store,
                 vec![TreeEntry {
                     mode: EntryMode::from(kind),
-                    filename: "some".into(),
+                    filename: crate::marker::SOME_KEY.into(),
                     oid,
                 }],
+                path,
             )
         }
         Node::Enum(variants) => write_enum(value, variants, doc, store, path, depth),
@@ -232,47 +226,55 @@ fn write_node<W: Write + ?Sized>(
         // the typed `RawTree` encoding, which likewise emits no object.
         Node::RawTree => {
             let s = value_str(value).ok_or_else(|| expected(path, "object-id string", value))?;
-            let oid =
-                ObjectId::from_hex(s.as_bytes()).map_err(|_| SchemaWriteError::InvalidRawTree {
+            let oid = ObjectId::from_hex(s.as_bytes()).map_err(|_error| {
+                SchemaWriteError::InvalidRawTree {
                     path: path.show(),
                     text: s.to_owned(),
-                })?;
+                }
+            })?;
             Ok((oid, EntryKind::Tree))
         }
         // A dynamic node carries no schema, so the bare heuristic write — the
         // same one `serialize` applies to a `Value` field — is exactly right.
         Node::Dynamic => Ok(serialize_node(Peek::new(value), store, depth)?),
         Node::Ref(name) => {
-            let target = doc
-                .defs
-                .get(name)
-                .ok_or_else(|| SchemaWriteError::UnknownRef {
-                    path: path.show(),
-                    name: name.clone(),
-                })?;
-            write_node(value, target, doc, store, path, depth + 1)
+            // References are transparent on disk; following a long alias
+            // chain must not consume tree-depth budget or recurse on stack.
+            let mut target_name = name;
+            let mut refs = 0;
+            loop {
+                refs += 1;
+                if refs > doc.defs.len() {
+                    return Err(invalid_schema("non-productive ref cycle"));
+                }
+                let target =
+                    doc.defs
+                        .get(target_name)
+                        .ok_or_else(|| SchemaWriteError::UnknownRef {
+                            path: path.show(),
+                            name: target_name.clone(),
+                        })?;
+                match target {
+                    Node::Ref(next) => target_name = next,
+                    _ => return write_node(value, target, doc, store, path, depth),
+                }
+            }
         }
     }
 }
 
-/// Encode an object as a name-keyed tree, shared by [`Node::Struct`] and
-/// struct enum variants.
-///
-/// A key the schema does not define is rejected, since the read path never
-/// emits one. A field the schema defines but the object omits is rejected too
-/// — the read path requires a tree entry for every field a schema names, so
-/// writing one short would produce a tree that can never read back — unless
-/// [`FieldNode::has_default`] is set for it, in which case the field's entry
-/// is simply left out.
-fn write_named_tree<W: Write + ?Sized, T: FieldNode>(
+/// Encode the required named fields of a struct or struct variant.
+fn write_named_tree<W: Write + ?Sized>(
     value: &Value,
-    fields: &BTreeMap<String, T>,
+    fields: &BTreeMap<String, Node>,
     doc: &Schema,
     store: &W,
     path: &Path,
     depth: usize,
 ) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
+    check_depth(path, depth)?;
     let obj = as_object(value, path)?;
+    check_tree_len(fields.len(), path)?;
     for k in obj.keys() {
         if !fields.contains_key(k.as_str()) {
             return Err(SchemaWriteError::UnknownField {
@@ -283,40 +285,24 @@ fn write_named_tree<W: Write + ?Sized, T: FieldNode>(
     }
     let mut entries = Vec::with_capacity(fields.len());
     for (name, field) in fields {
-        // A `Schema` is data (ingestible from hand-authored JSON), so a
-        // field name is untrusted input here — unlike a `#[derive(Facet)]`
-        // name, which is always a Rust identifier.
-        check_key(name).map_err(SerializeError::from)?;
-        match obj.get(name.as_str()) {
-            Some(fv) => {
-                let (oid, kind) =
-                    write_node(fv, field.node(), doc, store, &path.field(name), depth + 1)?;
-                entries.push(TreeEntry {
-                    mode: EntryMode::from(kind),
-                    filename: name.as_str().into(),
-                    oid,
-                });
-            }
-            None if field.has_default() => {}
-            None => {
-                return Err(SchemaWriteError::MissingField {
-                    path: path.show(),
-                    field: name.clone(),
-                });
-            }
-        }
+        let filename = escaped_name(name, path)?;
+        let field_value = obj
+            .get(name.as_str())
+            .ok_or_else(|| SchemaWriteError::MissingField {
+                path: path.show(),
+                field: name.clone(),
+            })?;
+        let (oid, kind) = write_node(field_value, field, doc, store, &path.field(name), depth + 1)?;
+        entries.push(TreeEntry {
+            mode: EntryMode::from(kind),
+            filename: filename.into(),
+            oid,
+        });
     }
-    entries.sort();
-    tree(store, entries)
+    tree(store, entries, path)
 }
 
-/// Encode an array as an ordinal-named tree, one entry per element, drawing
-/// each element's schema from `schema_for`.
-///
-/// `marker_empty` says whether an empty result takes the presence marker:
-/// true for the variable-length sequences whose emptiness is a property of
-/// the value, false for [`Node::Tuple`] (length fixed by the schema; nothing
-/// to diff, and the typed encoder writes the empty tree there too).
+/// Encode an array as a tree of contiguous three-digit hexadecimal ordinals.
 fn write_seq<'s, W: Write + ?Sized>(
     arr: &VArray,
     schema_for: impl Fn(usize) -> &'s Node,
@@ -324,87 +310,21 @@ fn write_seq<'s, W: Write + ?Sized>(
     store: &W,
     path: &Path,
     depth: usize,
-    marker_empty: bool,
 ) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
+    check_depth(path, depth)?;
+    check_tree_len(arr.len(), path)?;
     let mut entries = Vec::with_capacity(arr.len());
     for (i, item) in arr.as_slice().iter().enumerate() {
+        let filename = ordinal::encode(i)
+            .map_err(|error| SerializeError::Reflect(format!("at {}: {error}", path.show())))?;
         let (oid, kind) = write_node(item, schema_for(i), doc, store, &path.index(i), depth + 1)?;
         entries.push(TreeEntry {
             mode: EntryMode::from(kind),
-            filename: format!("{i:04}").into(),
+            filename: filename.into(),
             oid,
         });
     }
-    entries.sort();
-    if marker_empty && entries.is_empty() {
-        return marker_tree(store);
-    }
-    tree(store, entries)
-}
-
-/// Encode a composite-key map as `{ k, v }` pair sub-trees named by each
-/// pair tree's own object id.
-///
-/// The value is the pair array the read path produces: an [`Array`] of
-/// two-member objects `{ "k": …, "v": … }`. Pair entries are named by the
-/// pair sub-tree's own object id — exactly as the typed encoder does (see
-/// [`crate::ser`]'s map serialization for why content names beat ordinals) —
-/// so the map is content-addressed independent of array order.
-///
-/// [`Array`]: facet_value::Value::as_array
-fn write_composite_map<W: Write + ?Sized>(
-    value: &Value,
-    key: &Node,
-    val: &Node,
-    doc: &Schema,
-    store: &W,
-    path: &Path,
-    depth: usize,
-) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
-    let arr = as_array(value, path)?;
-    let mut entries = Vec::with_capacity(arr.len());
-    let mut key_oids = BTreeSet::new();
-    for (i, item) in arr.as_slice().iter().enumerate() {
-        let ipath = path.index(i);
-        let obj = as_object(item, &ipath)?;
-        let k = obj
-            .get("k")
-            .ok_or_else(|| expected(&ipath, "object with \"k\" and \"v\"", item))?;
-        let v = obj
-            .get("v")
-            .ok_or_else(|| expected(&ipath, "object with \"k\" and \"v\"", item))?;
-        let (k_oid, k_kind) = write_node(k, key, doc, store, &ipath.field("k"), depth + 1)?;
-        if !key_oids.insert(k_oid) {
-            return Err(SerializeError::DuplicateKey { oid: k_oid }.into());
-        }
-        let (v_oid, v_kind) = write_node(v, val, doc, store, &ipath.field("v"), depth + 1)?;
-        let mut pair = vec![
-            TreeEntry {
-                mode: EntryMode::from(k_kind),
-                filename: "k".into(),
-                oid: k_oid,
-            },
-            TreeEntry {
-                mode: EntryMode::from(v_kind),
-                filename: "v".into(),
-                oid: v_oid,
-            },
-        ];
-        pair.sort();
-        let (pair_oid, _) = tree(store, pair)?;
-        entries.push(TreeEntry {
-            mode: EntryMode::from(EntryKind::Tree),
-            // Named by the pair's own object id, exactly as the typed
-            // encoder does.
-            filename: pair_oid.to_string().into(),
-            oid: pair_oid,
-        });
-    }
-    entries.sort();
-    if entries.is_empty() {
-        return marker_tree(store);
-    }
-    tree(store, entries)
+    tree(store, entries, path)
 }
 
 /// Encode an enum: externally tagged by the live variant's name. A unit
@@ -427,7 +347,12 @@ fn write_enum<W: Write + ?Sized>(
             found: obj.len(),
         });
     }
-    let (name, payload) = obj.iter().next().expect("length checked to be 1 above");
+    let Some((name, payload)) = obj.iter().next() else {
+        return Err(SchemaWriteError::MalformedEnum {
+            path: path.show(),
+            found: 0,
+        });
+    };
     let name = name.as_str();
     let kind = variants
         .get(name)
@@ -436,25 +361,28 @@ fn write_enum<W: Write + ?Sized>(
             variant: name.to_owned(),
             expected: variants.keys().cloned().collect(),
         })?;
+    let filename = escaped_name(name, path)?;
     let vpath = path.field(name);
 
-    if let VariantKind::Unit = kind {
-        if !payload.is_null() {
-            return Err(expected(&vpath, "null", payload));
-        }
-        return blob(store, name.as_bytes());
-    }
-
+    // A single tuple field is the payload itself; struct fields are always
+    // an object, even when the struct has exactly one field.
     let (inner_oid, inner_kind) = match kind {
-        VariantKind::Unit => unreachable!("handled above"),
-        VariantKind::Newtype(inner) => write_node(payload, inner, doc, store, &vpath, depth + 1)?,
-        VariantKind::Tuple(elems) => {
-            let arr = as_array(payload, &vpath)?;
-            if arr.len() != elems.len() {
-                return Err(length_mismatch(&vpath, elems.len(), arr.len()));
+        VariantKind::Unit => {
+            if !payload.is_null() {
+                return Err(expected(&vpath, "null", payload));
             }
-            write_seq(arr, |i| &elems[i], doc, store, &vpath, depth + 1, false)?
+            return blob(store, filename.as_bytes());
         }
+        VariantKind::Tuple(elems) => match elems.as_slice() {
+            [inner] => write_node(payload, inner, doc, store, &vpath, depth + 1)?,
+            _ => {
+                let arr = as_array(payload, &vpath)?;
+                if arr.len() != elems.len() {
+                    return Err(length_mismatch(&vpath, elems.len(), arr.len()));
+                }
+                write_seq(arr, |i| &elems[i], doc, store, &vpath, depth + 1)?
+            }
+        },
         VariantKind::Struct(fields) => {
             write_named_tree(payload, fields, doc, store, &vpath, depth + 1)?
         }
@@ -463,13 +391,71 @@ fn write_enum<W: Write + ?Sized>(
         store,
         vec![TreeEntry {
             mode: EntryMode::from(inner_kind),
-            filename: name.into(),
+            filename: filename.into(),
             oid: inner_oid,
         }],
+        path,
     )
 }
 
 // --- scalar helpers ---
+
+fn float64(value: &Value, path: &Path) -> Result<f64, SchemaWriteError> {
+    if let Some(text) = value_str(value) {
+        return match text {
+            "nan" => Ok(f64::NAN),
+            "inf" => Ok(f64::INFINITY),
+            "-inf" => Ok(f64::NEG_INFINITY),
+            _ => Err(expected(path, "number or nan/inf/-inf", value)),
+        };
+    }
+    let n = as_number(value, path)?;
+    if n.is_float() {
+        return Ok(n.to_f64_lossy());
+    }
+    if !integer_is_exact_float(n, f64::MANTISSA_DIGITS) {
+        return Err(unrepresentable(path, "F64"));
+    }
+    Ok(n.to_f64_lossy())
+}
+
+fn float32(value: &Value, path: &Path) -> Result<f32, SchemaWriteError> {
+    if let Some(text) = value_str(value) {
+        return match text {
+            "nan" => Ok(f32::NAN),
+            "inf" => Ok(f32::INFINITY),
+            "-inf" => Ok(f32::NEG_INFINITY),
+            _ => Err(expected(path, "number or nan/inf/-inf", value)),
+        };
+    }
+    let n = as_number(value, path)?;
+    if !n.is_float() && !integer_is_exact_float(n, f32::MANTISSA_DIGITS) {
+        return Err(unrepresentable(path, "F32"));
+    }
+    let source = n.to_f64_lossy();
+    let result = source as f32;
+    // Reject finite inputs that round to infinity, but allow those that round to f32::MAX.
+    if source.is_finite() && result.is_infinite() {
+        return Err(unrepresentable(path, "F32"));
+    }
+    Ok(result)
+}
+
+/// A binary float represents an integer exactly iff its nonzero significant
+/// bits fit in the float's mantissa. Checking bits avoids saturating casts at
+/// the signed and unsigned integer maxima. The f32 exponent range is checked
+/// separately after converting.
+fn integer_is_exact_float(n: &VNumber, mantissa_bits: u32) -> bool {
+    let magnitude = if let Some(i) = n.to_i128() {
+        i.unsigned_abs()
+    } else if let Some(u) = n.to_u128() {
+        u
+    } else {
+        return false;
+    };
+    magnitude == 0
+        || u128::BITS - magnitude.leading_zeros() - magnitude.trailing_zeros() <= mantissa_bits
+}
 
 /// Signed integers of any width: the value must be an in-range integer (a
 /// float-backed number is refused — the read path never emits one for an
@@ -570,21 +556,80 @@ fn blob<W: Write + ?Sized>(
     Ok((oid, EntryKind::Blob))
 }
 
+fn binary_blob<W: Write + ?Sized>(
+    store: &W,
+    bytes: &[u8],
+) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
+    let oid = write_binary_blob(store, bytes)?;
+    Ok((oid, EntryKind::Blob))
+}
+
 fn tree<W: Write + ?Sized>(
     store: &W,
-    entries: Vec<TreeEntry>,
+    mut entries: Vec<TreeEntry>,
+    path: &Path,
 ) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
+    check_tree_len(entries.len(), path)?;
+    if entries.is_empty() {
+        return marker_tree(store);
+    }
+    // gix sorts using Git's implicit slash on tree entries, not plain names.
+    entries.sort();
     let oid = store
         .write(&gix_object::Tree { entries })
         .map_err(SerializeError::Backend)?;
     Ok((oid, EntryKind::Tree))
 }
 
-/// Write the presence-marker tree (`crate::marker`) in place of a literal
-/// empty tree, for `None` and an empty `List`/`Array`/`Tuple`/`Map`.
+/// Write the `none` marker instead of an empty tree.
 fn marker_tree<W: Write + ?Sized>(store: &W) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
     let oid = crate::marker::write_marker_tree(store)?;
     Ok((oid, EntryKind::Tree))
+}
+
+fn check_depth(path: &Path, depth: usize) -> Result<(), SchemaWriteError> {
+    if depth > MAX_VALUE_DEPTH {
+        return Err(SchemaWriteError::MaxDepth {
+            path: path.show(),
+            depth: MAX_VALUE_DEPTH,
+        });
+    }
+    Ok(())
+}
+
+fn check_tree_len(len: usize, path: &Path) -> Result<(), SchemaWriteError> {
+    if len > MAX_TREE_ENTRIES {
+        return Err(SerializeError::Reflect(format!(
+            "at {}: tree has {len} entries, exceeding the maximum of {MAX_TREE_ENTRIES}",
+            path.show()
+        ))
+        .into());
+    }
+    Ok(())
+}
+
+fn escaped_name(name: &str, path: &Path) -> Result<String, SchemaWriteError> {
+    crate::name::escape(name).map_err(|error| {
+        SerializeError::Reflect(format!(
+            "at {}: cannot encode name {name:?}: {error}",
+            path.show()
+        ))
+        .into()
+    })
+}
+
+fn invalid_schema(reason: &str) -> SchemaWriteError {
+    SerializeError::Reflect(format!("invalid schema: {reason}")).into()
+}
+
+fn schema_error(error: crate::error::SchemaReadError) -> SchemaWriteError {
+    match error {
+        crate::error::SchemaReadError::UnknownRef(name) => SchemaWriteError::UnknownRef {
+            path: Path::ROOT.show(),
+            name,
+        },
+        other => invalid_schema(&other.to_string()),
+    }
 }
 
 fn expected(path: &Path, expected: &'static str, found: &Value) -> SchemaWriteError {
@@ -626,5 +671,176 @@ fn number_text(n: &VNumber) -> String {
         u.to_string()
     } else {
         n.to_f64_lossy().to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ObjectStore;
+    use crate::schema::read::{deserialize_value_with_schema, validate_with_schema};
+    use facet_value::{VObject, value};
+
+    fn schema(root: Node) -> Schema {
+        Schema {
+            kind: "test".into(),
+            root,
+            defs: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn cbor_writes_reject_invalid_bytes_and_other_value_kinds() {
+        let doc = schema(Node::Cbor);
+        let store = ObjectStore::default();
+        for (payload, reason) in [
+            (vec![], "truncated"),
+            (vec![0x00, 0x00], "trailing bytes"),
+            (vec![0x00, 0x0a], "trailing bytes"),
+            (vec![0x18, 0x17], "non-minimal"),
+            (vec![0x5f, 0xff], "indefinite"),
+            (vec![0x62, b'a'], "truncated"),
+            (vec![0x61, 0xff], "UTF-8"),
+            (vec![0xa2, 0x01, 0x00, 0x01, 0x01], "duplicate"),
+            (vec![0xa2, 0x02, 0x00, 0x01, 0x01], "out-of-order"),
+            (vec![0xfa, 0x3f, 0xc0, 0x00, 0x00], "non-canonical"),
+        ] {
+            let error =
+                serialize_value_with_schema(&Value::from(payload), &doc, &store).unwrap_err();
+            assert!(matches!(
+                &error,
+                SchemaWriteError::Serialize(SerializeError::Reflect(message))
+                    if message.contains("at $") && message.contains(reason)
+            ));
+        }
+        let mut too_deep = vec![0x81; MAX_VALUE_DEPTH + 1];
+        too_deep.push(0xf6);
+        assert!(serialize_value_with_schema(&Value::from(too_deep), &doc, &store).is_err());
+
+        for input in [value!(""), value!("a"), value!(0), value!([1]), Value::NULL] {
+            let error = serialize_value_with_schema(&input, &doc, &store).unwrap_err();
+            assert!(matches!(
+                error,
+                SchemaWriteError::Expected { path, expected: "canonical CBOR bytes", .. }
+                    if path == "$"
+            ));
+        }
+    }
+
+    #[test]
+    fn cbor_nested_references_and_options_roundtrip() -> anyhow::Result<()> {
+        let mut doc = schema(Node::Ref("Root".into()));
+        doc.defs = BTreeMap::from([
+            (
+                "Root".into(),
+                Node::Struct(BTreeMap::from([
+                    ("direct".into(), Node::Ref("Alias".into())),
+                    (
+                        "items".into(),
+                        Node::List(Box::new(Node::Optional(Box::new(Node::Ref(
+                            "Payload".into(),
+                        ))))),
+                    ),
+                    (
+                        "variant".into(),
+                        Node::Enum(BTreeMap::from([(
+                            "Payload".into(),
+                            VariantKind::Tuple(vec![Node::Ref("Payload".into())]),
+                        )])),
+                    ),
+                ])),
+            ),
+            ("Alias".into(), Node::Ref("Payload".into())),
+            ("Payload".into(), Node::Cbor),
+        ]);
+        let direct: &[u8] = &[0x0a];
+        let cbor_null: &[u8] = &[0xf6];
+        let cbor_bytes: &[u8] = &[0x42, 0x00, 0xff];
+        let mut variant = VObject::new();
+        variant.insert("Payload", Value::from(cbor_bytes));
+        let mut items = VArray::new();
+        items.push(Value::from(cbor_null));
+        items.push(Value::NULL);
+        items.push(Value::from(cbor_bytes));
+        let mut fields = VObject::new();
+        fields.insert("direct", Value::from(direct));
+        fields.insert("items", items);
+        fields.insert("variant", variant);
+        let value: Value = fields.into();
+        let store = ObjectStore::default();
+        let root = serialize_value_with_schema(&value, &doc, &store)?;
+        let root_entries = store.get_tree(&root)?.expect("root tree");
+        let direct_oid = root_entries
+            .iter()
+            .find(|entry| entry.filename == "direct")
+            .expect("direct field")
+            .oid;
+        assert_eq!(store.get_blob(&direct_oid)?.as_deref(), Some(direct));
+        validate_with_schema(&root, &doc, &store)?;
+        let decoded = deserialize_value_with_schema(&root, &doc, &store)?;
+        assert_eq!(decoded, value);
+        let decoded_items = decoded
+            .as_object()
+            .unwrap()
+            .get("items")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            decoded_items.as_slice()[0].as_bytes().unwrap().as_slice(),
+            cbor_null
+        );
+        assert!(decoded_items.as_slice()[1].is_null());
+        let output = ObjectStore::default();
+        assert_eq!(serialize_value_with_schema(&decoded, &doc, &output)?, root);
+
+        let mut invalid = VObject::new();
+        invalid.insert("direct", Value::from(direct));
+        let mut invalid_items = VArray::new();
+        invalid_items.push(Value::from(vec![0x00, 0x00]));
+        invalid.insert("items", invalid_items);
+        invalid.insert("variant", value!({ "Payload": null }));
+        let error = serialize_value_with_schema(&invalid.into(), &doc, &store).unwrap_err();
+        assert!(matches!(
+            error,
+            SchemaWriteError::Serialize(SerializeError::Reflect(message))
+                if message.contains("$.items[0].some") && message.contains("trailing")
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn cbor_keeps_full_schema_validation_before_value_walk() -> anyhow::Result<()> {
+        let store = ObjectStore::default();
+        let value = Value::from(vec![0x00]);
+        let oid = store
+            .write_buf(gix_object::Kind::Blob, &[0x00])
+            .map_err(SerializeError::Backend)?;
+        let mut doc = schema(Node::Cbor);
+        doc.defs
+            .insert("unused".into(), Node::Ref("missing".into()));
+        assert!(matches!(
+            serialize_value_with_schema(&value, &doc, &store),
+            Err(SchemaWriteError::UnknownRef { name, .. }) if name == "missing"
+        ));
+        assert!(matches!(
+            deserialize_value_with_schema(&oid, &doc, &store),
+            Err(crate::error::SchemaReadError::UnknownRef(name)) if name == "missing"
+        ));
+
+        doc.defs.insert("unused".into(), Node::Ref("unused".into()));
+        assert!(serialize_value_with_schema(&value, &doc, &store).is_err());
+        assert!(deserialize_value_with_schema(&oid, &doc, &store).is_err());
+
+        doc.defs.insert(
+            "unused".into(),
+            Node::Map {
+                key: Box::new(Node::Cbor),
+                value: Box::new(Node::Cbor),
+            },
+        );
+        assert!(serialize_value_with_schema(&value, &doc, &store).is_err());
+        assert!(deserialize_value_with_schema(&oid, &doc, &store).is_err());
+        Ok(())
     }
 }

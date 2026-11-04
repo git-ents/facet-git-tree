@@ -1,9 +1,7 @@
 //! Integration tests for built-in collection type serialization.
 //!
-//! Covers spec requirement:
-//!   serialization.design.trees.collections
-//!     — Array, Vec, and Map are encoded as Git trees
-//!     — no type marker is recorded; element and key types come from the Facet type
+//! String-keyed maps and non-byte sequences are Git trees; non-string-keyed
+//! maps are canonical CBOR blobs. Empty native collections use the `none` marker.
 //!
 //! Ordinal entry naming for sequence collections is covered in `ordinals.rs`.
 
@@ -12,15 +10,15 @@ use std::sync::Arc;
 
 use facet::Facet;
 use facet_git_tree::{
-    DeserializeError, EntryKind, EntryMode, ObjectStore, SerializeError, TreeEntry, deserialize,
-    serialize,
+    DeserializeError, EntryKind, EntryMode, Node, ObjectStore, SerializeError, TreeEntry,
+    deserialize, schema_of, serialize,
 };
 use gix_object::{Kind, Tree, Write};
 use proptest::prelude::*;
 mod common;
 use common::{WithArray, WithMap, WithVec, get_tree_entry_mode, tree_entries};
 
-#[derive(Facet)]
+#[derive(Facet, PartialEq, Debug)]
 struct WithIntMap {
     table: HashMap<u32, String>,
 }
@@ -43,7 +41,7 @@ struct WithCompositeKeyMap {
 
 /// A float-backed composite key, for the duplicate-key suites: two `NaN`s
 /// compare unequal (so a `HashMap` keeps both) while both encode to the
-/// same canonical `"nan"` blob.
+/// same canonical CBOR NaN key.
 #[derive(Facet, Clone, Debug, PartialEq)]
 struct FloatKey {
     x: f64,
@@ -53,7 +51,7 @@ impl Eq for FloatKey {}
 
 impl std::hash::Hash for FloatKey {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        // Any NaN hashes alike (all encode to the same blob) while comparing
+        // Any NaN hashes alike (all encode to the same CBOR key) while comparing
         // unequal, so a HashMap keeps two of them — the broken-key-equality
         // case the duplicate-key check exists to catch.
         if self.x.is_nan() {
@@ -105,13 +103,17 @@ fn empty_vec_is_marker_tree() {
         "empty Vec must hold exactly the presence marker"
     );
     assert_eq!(
-        entries[0].filename, "_",
-        "the marker entry must be named \"_\""
+        entries[0].filename, "none",
+        "the marker entry must be named \"none\""
     );
+    assert_eq!(entries[0].mode.kind(), EntryKind::Blob);
     assert_eq!(
-        entries[0].mode.kind(),
-        EntryKind::Blob,
-        "the marker entry must be a blob"
+        store
+            .get_blob(&entries[0].oid)
+            .expect("read marker")
+            .expect("marker blob"),
+        b"",
+        "the marker must point to the empty blob"
     );
 }
 
@@ -172,54 +174,112 @@ fn empty_map_is_marker_tree() {
         "empty Map must hold exactly the presence marker"
     );
     assert_eq!(
-        entries[0].filename, "_",
-        "the marker entry must be named \"_\""
+        entries[0].filename, "none",
+        "the marker entry must be named \"none\""
+    );
+    assert_eq!(entries[0].mode.kind(), EntryKind::Blob);
+    assert_eq!(
+        store
+            .get_blob(&entries[0].oid)
+            .expect("read marker")
+            .expect("marker blob"),
+        b"",
+        "the marker must point to the empty blob"
     );
 }
 
-/// A map entry is named by the textual form of its key and resolves to its value.
+/// String keys are escaped, ordered by their encoded names, and resolve to values.
 #[test]
-fn map_entry_named_by_key() {
-    let mut table = HashMap::new();
-    table.insert("a".to_string(), "1".to_string());
-
-    let (root_id, store) = serialize(&WithMap { table }).expect("serialize should succeed");
-
-    let (_, map_id) = get_tree_entry_mode(&store, &root_id, "table");
-    let (mode, value_id) = get_tree_entry_mode(&store, &map_id, "a");
-    assert_eq!(mode, EntryKind::Blob, "map value must be a leaf blob");
+fn map_entries_are_named_by_escaped_keys() {
+    let table: HashMap<String, String> = [
+        ("a", "1"),
+        ("a/b", "slash"),
+        ("none", "reserved"),
+        ("some", "option"),
+        ("_", "underscore"),
+        ("", "empty"),
+        (".value", "dot"),
+        ("naïve", "unicode"),
+    ]
+    .into_iter()
+    .map(|(key, value)| (key.to_owned(), value.to_owned()))
+    .collect();
+    let input = WithMap { table };
+    let (root_id, store) = serialize(&input).expect("serialize should succeed");
+    let (mode, map_id) = get_tree_entry_mode(&store, &root_id, "table");
+    assert_eq!(mode, EntryKind::Tree);
+    let entries = tree_entries(&store, &map_id);
+    let expected: &[(&str, &[u8])] = &[
+        ("%", b"empty\n"),
+        ("%.value", b"dot\n"),
+        ("%a%2Fb", b"slash\n"),
+        ("%na%C3%AFve", b"unicode\n"),
+        ("%none", b"reserved\n"),
+        ("%some", b"option\n"),
+        ("_", b"underscore\n"),
+        ("a", b"1\n"),
+    ];
+    assert_eq!(entries.len(), expected.len());
+    for (entry, (name, value)) in entries.iter().zip(expected) {
+        assert_eq!(entry.filename, *name);
+        assert_eq!(entry.mode.kind(), EntryKind::Blob);
+        assert_eq!(
+            store
+                .get_blob(&entry.oid)
+                .expect("read object")
+                .expect("value blob"),
+            *value
+        );
+    }
     assert_eq!(
-        store
-            .get_blob(&value_id)
-            .expect("read object")
-            .expect("value blob in store"),
-        b"1\n",
-        "map entry named by key must resolve to the value"
+        deserialize::<WithMap>(&root_id, &store).expect("deserialize"),
+        input
     );
 }
 
-/// A map with scalar non-`String` keys is named by the textual form of each key.
-///
-/// The spec (serialization.design.trees.collections, item 2a) names a scalar-keyed
-/// map entry by "the textual form of its key", which covers scalar keys such as
-/// `u32` (key `42` → entry name `"42"`).
+/// Integer-keyed maps are opaque canonical CBOR, not name-keyed trees.
 #[test]
-fn map_with_int_keys_named_by_textual_key() {
-    let mut table = HashMap::new();
-    table.insert(42u32, "x".to_string());
-
-    let (root_id, store) = serialize(&WithIntMap { table }).expect("serialize should succeed");
-
-    let (_, map_id) = get_tree_entry_mode(&store, &root_id, "table");
-    let (mode, value_id) = get_tree_entry_mode(&store, &map_id, "42");
-    assert_eq!(mode, EntryKind::Blob, "map value must be a leaf blob");
+fn map_with_int_keys_is_cbor() {
+    let input = WithIntMap {
+        table: HashMap::from([(42, "x".to_string())]),
+    };
+    let (root_id, store) = serialize(&input).expect("serialize should succeed");
+    let (mode, map_id) = get_tree_entry_mode(&store, &root_id, "table");
+    assert_eq!(mode, EntryKind::Blob, "non-string map must be a CBOR leaf");
     assert_eq!(
         store
-            .get_blob(&value_id)
+            .get_blob(&map_id)
             .expect("read object")
-            .expect("value blob in store"),
-        b"x\n",
-        "map entry named by the textual form of its key must resolve to the value"
+            .expect("CBOR blob"),
+        [0xa1, 0x18, 0x2a, 0x61, b'x'],
+        "{{ 42: \"x\" }} in core-deterministic CBOR, with no newline"
+    );
+    assert_eq!(
+        schema_of::<HashMap<u32, String>>().expect("schema").root,
+        Node::Cbor
+    );
+    assert_eq!(
+        deserialize::<WithIntMap>(&root_id, &store).expect("deserialize"),
+        input
+    );
+}
+
+/// Empty non-string-keyed maps are still CBOR leaves, not native map markers.
+#[test]
+fn empty_int_key_map_is_empty_cbor_map() {
+    let input = WithIntMap {
+        table: HashMap::new(),
+    };
+    let (root, store) = serialize(&input).expect("serialize");
+    let (mode, oid) = get_tree_entry_mode(&store, &root, "table");
+    assert_eq!(mode, EntryKind::Blob);
+    assert_eq!(
+        store.get_blob(&oid).expect("read object").expect("blob"),
+        [0xa0]
+    );
+    assert_eq!(
+        deserialize::<WithIntMap>(&root, &store).expect("deserialize"),
+        input
     );
 }
 
@@ -265,14 +325,11 @@ fn map_with_smart_pointer_scalar_keys_is_name_keyed() {
     let (mode, map_id) = get_tree_entry_mode(&store, &root_id, "table");
     assert_eq!(mode, EntryKind::Tree, "Map field must be a tree");
 
-    // A composite-keyed layout would name this entry "0000" and point at a
-    // `{k, v}` pair sub-tree; a name-keyed layout points straight at the value.
     let (vmode, v_id) = get_tree_entry_mode(&store, &map_id, "hello");
     assert_eq!(
         vmode,
         EntryKind::Blob,
-        "an Arc<str> key must be name-keyed by its collapsed scalar's textual \
-         form, not wrapped in a {{k, v}} pair sub-tree"
+        "an Arc<str> key must use its collapsed string value as an escaped entry name"
     );
     assert_eq!(
         store
@@ -289,50 +346,33 @@ fn map_with_smart_pointer_scalar_keys_is_name_keyed() {
 
 // --- composite map keys ---
 
-/// A map with composite (struct) keys records each pair as a `{ k, v }` sub-tree.
-///
-/// Composite keys have no faithful textual form, so each pair is encoded
-/// independently as a two-entry sub-tree — and the map's entry naming that
-/// sub-tree is the pair tree's own object id, so the map is content-addressed
-/// rather than ordered.
+/// A struct-keyed map is one CBOR blob carrying both key fields and the value.
 #[test]
-fn map_with_composite_keys_uses_pair_subtrees() {
-    let mut table = HashMap::new();
-    table.insert(Coord { x: 1, y: 2 }, "a".to_string());
-
-    let (root_id, store) = serialize(&WithCompositeKeyMap { table }).expect("serialize");
-
+fn map_with_composite_keys_is_cbor() {
+    let table = HashMap::from([(Coord { x: 1, y: 2 }, "a".to_string())]);
+    let input = WithCompositeKeyMap { table };
+    let (root_id, store) = serialize(&input).expect("serialize");
     let (mode, map_id) = get_tree_entry_mode(&store, &root_id, "table");
-    assert_eq!(mode, EntryKind::Tree, "Map field must be a tree");
-
-    let pairs = tree_entries(&store, &map_id);
-    assert_eq!(pairs.len(), 1, "one pair entry expected");
     assert_eq!(
-        pairs[0].filename,
-        pairs[0].oid.to_string(),
-        "pair entries are named by their pair tree's own object id"
+        mode,
+        EntryKind::Blob,
+        "composite-keyed map must be a CBOR leaf"
     );
-
-    let (kmode, k_id) = get_tree_entry_mode(&store, &pairs[0].oid, "k");
-    let (vmode, v_id) = get_tree_entry_mode(&store, &pairs[0].oid, "v");
-    assert_eq!(kmode, EntryKind::Tree, "struct key encodes to a sub-tree");
-    assert_eq!(vmode, EntryKind::Blob, "string value is a leaf blob");
+    // { { "x": 1, "y": 2 }: "a" }, with bytewise-ordered CBOR map keys.
     assert_eq!(
         store
-            .get_blob(&v_id)
+            .get_blob(&map_id)
             .expect("read object")
-            .expect("value blob"),
-        b"a\n",
-        "value sub-entry resolves to the value"
+            .expect("CBOR blob"),
+        [0xa1, 0xa2, 0x61, b'x', 0x01, 0x61, b'y', 0x02, 0x61, b'a']
     );
-    let (_, x_id) = get_tree_entry_mode(&store, &k_id, "x");
     assert_eq!(
-        store
-            .get_blob(&x_id)
-            .expect("read object")
-            .expect("x field blob"),
-        b"1\n",
-        "key sub-tree carries the struct fields"
+        schema_of::<HashMap<Coord, String>>().expect("schema").root,
+        Node::Cbor
+    );
+    assert_eq!(
+        deserialize::<WithCompositeKeyMap>(&root_id, &store).expect("deserialize"),
+        input
     );
 }
 
@@ -358,18 +398,15 @@ fn map_with_composite_keys_roundtrips_order_independently() {
     assert_eq!(got.table, a, "composite-keyed map must round-trip");
 }
 
-/// Adding one pair leaves every existing pair's entry name untouched, so a
-/// `git diff` of the two trees shows exactly one added entry. Ordinal
-/// naming could not do this: a pair whose object id sorted before existing
-/// ones would renumber the entire suffix, presenting N modified entries for
-/// a semantically single-pair addition.
+/// Adding a native string-map entry leaves all existing entry names and oids
+/// unchanged, even when the new escaped name sorts before them.
 #[test]
-fn adding_a_pair_does_not_rename_existing_pairs() {
-    let mut small = HashMap::new();
-    small.insert(Coord { x: 5, y: 5 }, "a".to_string());
-    small.insert(Coord { x: 6, y: 6 }, "b".to_string());
-
-    let (small_root, small_store) = serialize(&WithCompositeKeyMap {
+fn adding_a_string_pair_does_not_rename_existing_pairs() {
+    let small = HashMap::from([
+        ("alpha".to_string(), "a".to_string()),
+        ("beta".to_string(), "b".to_string()),
+    ]);
+    let (small_root, small_store) = serialize(&WithMap {
         table: small.clone(),
     })
     .expect("serialize");
@@ -377,16 +414,15 @@ fn adding_a_pair_does_not_rename_existing_pairs() {
     let small_entries = tree_entries(&small_store, &small_map);
 
     let mut grown = small;
-    // A pair whose sub-tree id is likely to sort before the existing ones'
-    // — the case ordinal naming handled by renumbering everything after it.
-    grown.insert(Coord { x: -9, y: -9 }, "z".to_string());
-
-    let (grown_root, grown_store) =
-        serialize(&WithCompositeKeyMap { table: grown }).expect("serialize");
+    grown.insert("a/b".to_string(), "z".to_string());
+    let (grown_root, grown_store) = serialize(&WithMap {
+        table: grown.clone(),
+    })
+    .expect("serialize");
     let (_, grown_map) = get_tree_entry_mode(&grown_store, &grown_root, "table");
     let grown_entries = tree_entries(&grown_store, &grown_map);
-
     assert_eq!(grown_entries.len(), small_entries.len() + 1);
+    assert_eq!(grown_entries[0].filename, "%a%2Fb");
     for entry in &small_entries {
         assert!(
             grown_entries
@@ -396,6 +432,147 @@ fn adding_a_pair_does_not_rename_existing_pairs() {
             entry.filename
         );
     }
+    assert_eq!(
+        deserialize::<WithMap>(&grown_root, &grown_store)
+            .expect("deserialize")
+            .table,
+        grown
+    );
+}
+
+/// A composite-key map has a single changed leaf when a pair is added, and
+/// decoding the new leaf preserves all old pairs as well as the new one.
+#[test]
+fn adding_a_composite_pair_replaces_only_the_cbor_leaf() {
+    let small = HashMap::from([
+        (Coord { x: 5, y: 5 }, "a".to_string()),
+        (Coord { x: 6, y: 6 }, "b".to_string()),
+    ]);
+    let (small_root, small_store) = serialize(&WithCompositeKeyMap {
+        table: small.clone(),
+    })
+    .expect("serialize");
+    let small_entries = tree_entries(&small_store, &small_root);
+    let mut grown = small;
+    grown.insert(Coord { x: -9, y: -9 }, "z".to_string());
+    let (grown_root, grown_store) = serialize(&WithCompositeKeyMap {
+        table: grown.clone(),
+    })
+    .expect("serialize");
+    let grown_entries = tree_entries(&grown_store, &grown_root);
+    assert_eq!(small_entries.len(), 1);
+    assert_eq!(grown_entries.len(), 1);
+    assert_eq!(small_entries[0].filename, "table");
+    assert_eq!(grown_entries[0].filename, "table");
+    assert_eq!(small_entries[0].mode.kind(), EntryKind::Blob);
+    assert_eq!(grown_entries[0].mode.kind(), EntryKind::Blob);
+    assert_ne!(small_entries[0].oid, grown_entries[0].oid);
+    assert_eq!(
+        deserialize::<WithCompositeKeyMap>(&grown_root, &grown_store)
+            .expect("deserialize")
+            .table,
+        grown
+    );
+}
+
+/// Old empty-tree and underscore-marker encodings are not valid empty native
+/// collections. `_` remains a valid map key when its value is a text leaf.
+#[test]
+fn native_collections_reject_legacy_empty_encodings() {
+    let store = ObjectStore::default();
+    let empty_blob = store.write_buf(Kind::Blob, b"").expect("write empty blob");
+    let text_blob = store.write_buf(Kind::Blob, b"\n").expect("write text leaf");
+    let tree = |entries| store.write(&Tree { entries }).expect("write tree");
+    let entry = |name: &str, kind: EntryKind, oid| TreeEntry {
+        mode: EntryMode::from(kind),
+        filename: name.into(),
+        oid,
+    };
+    let empty = tree(vec![]);
+    let old_marker = tree(vec![entry("_", EntryKind::Blob, empty_blob)]);
+    let wrong_marker = tree(vec![entry("none", EntryKind::Blob, text_blob)]);
+    for root in [empty, old_marker, wrong_marker] {
+        assert!(
+            deserialize::<Vec<i64>>(&root, &store).is_err(),
+            "invalid vec tree {root}"
+        );
+        assert!(
+            deserialize::<HashMap<String, String>>(&root, &store).is_err(),
+            "invalid map tree {root}"
+        );
+    }
+    let underscore = tree(vec![entry("_", EntryKind::Blob, text_blob)]);
+    assert_eq!(
+        deserialize::<HashMap<String, String>>(&underscore, &store).expect("underscore key"),
+        HashMap::from([("_".to_string(), "".to_string())])
+    );
+}
+
+/// Non-string maps must be blobs; legacy integer-name and composite-pair trees
+/// cannot be read as CBOR even when their tree contents are well formed.
+#[test]
+fn non_string_maps_reject_legacy_tree_layouts() {
+    let store = ObjectStore::default();
+    let leaf = |bytes: &[u8]| store.write_buf(Kind::Blob, bytes).expect("write blob");
+    let tree = |entries| store.write(&Tree { entries }).expect("write tree");
+    let entry = |name: &str, kind: EntryKind, oid| TreeEntry {
+        mode: EntryMode::from(kind),
+        filename: name.into(),
+        oid,
+    };
+    let integer_map = tree(vec![entry("42", EntryKind::Blob, leaf(b"x\n"))]);
+    let integer_root = tree(vec![entry("table", EntryKind::Tree, integer_map)]);
+    assert!(deserialize::<WithIntMap>(&integer_root, &store).is_err());
+
+    let key = tree(vec![
+        entry("x", EntryKind::Blob, leaf(b"1\n")),
+        entry("y", EntryKind::Blob, leaf(b"2\n")),
+    ]);
+    let pair = tree(vec![
+        entry("k", EntryKind::Tree, key),
+        entry("v", EntryKind::Blob, leaf(b"a\n")),
+    ]);
+    let composite_map = tree(vec![entry(&pair.to_string(), EntryKind::Tree, pair)]);
+    let composite_root = tree(vec![entry("table", EntryKind::Tree, composite_map)]);
+    assert!(deserialize::<WithCompositeKeyMap>(&composite_root, &store).is_err());
+}
+
+/// Independent CBOR fixture generator for the small generated coordinate maps.
+fn expected_coord_map_cbor(entries: &std::collections::BTreeMap<Coord, String>) -> Vec<u8> {
+    fn small_int(value: i32) -> u8 {
+        assert!((-20..20).contains(&value));
+        if value >= 0 {
+            value as u8
+        } else {
+            0x20 + (-1 - value) as u8
+        }
+    }
+    let mut pairs: Vec<_> = entries
+        .iter()
+        .map(|(key, value)| {
+            assert!(value.len() < 24);
+            let key = vec![
+                0xa2,
+                0x61,
+                b'x',
+                small_int(key.x),
+                0x61,
+                b'y',
+                small_int(key.y),
+            ];
+            let mut value_bytes = vec![0x60 + value.len() as u8];
+            value_bytes.extend_from_slice(value.as_bytes());
+            (key, value_bytes)
+        })
+        .collect();
+    pairs.sort_by(|a, b| a.0.cmp(&b.0));
+    assert!(pairs.len() < 24);
+    let mut result = vec![0xa0 + pairs.len() as u8];
+    for (key, value) in pairs {
+        result.extend(key);
+        result.extend(value);
+    }
+    result
 }
 
 proptest! {
@@ -434,14 +611,17 @@ proptest! {
             .into_iter()
             .map(|entry| entry.filename.to_string())
             .collect();
-        let mut expected_names: Vec<_> = expected.keys().cloned().collect();
+        let mut expected_names: Vec<_> = expected.keys().map(|key| match key.as_str() {
+            "none" | "some" => format!("%{key}"),
+            _ => key.clone(),
+        }).collect();
         expected_names.sort();
         prop_assert_eq!(names.clone(), expected_names);
-        prop_assert!(names.iter().all(|name| !name.contains('/') && name != "_"));
+        prop_assert!(names.iter().all(|name| !name.contains('/') && name != "none" && name != "some"));
     }
 
     #[test]
-    fn composite_map_pair_order_is_deterministic(
+    fn composite_map_cbor_is_deterministic(
         entries in proptest::collection::btree_map(
             (-20i32..20, -20i32..20).prop_map(|(x, y)| Coord { x, y }),
             "[a-z]{1,8}",
@@ -457,38 +637,30 @@ proptest! {
     }
 
     #[test]
-    fn composite_map_entries_are_pair_subtrees(
+    fn composite_map_entries_are_canonical_cbor(
         entries in proptest::collection::btree_map(
             (-20i32..20, -20i32..20).prop_map(|(x, y)| Coord { x, y }),
             "[a-z]{1,8}",
             1..6,
         ),
     ) {
-        let expected = entries.len();
-        let table = entries.into_iter().collect();
-        let (root, store) = serialize(&WithCompositeKeyMap { table }).expect("serialize");
-        let (_, map_id) = get_tree_entry_mode(&store, &root, "table");
-        let pairs = tree_entries(&store, &map_id);
-        prop_assert_eq!(pairs.len(), expected);
-        for pair in &pairs {
-            prop_assert_eq!(
-                pair.filename.to_string(),
-                pair.oid.to_string(),
-                "each pair entry is named by its pair tree's own object id"
-            );
-            let pair_entries = tree_entries(&store, &pair.oid);
-            prop_assert_eq!(pair_entries.len(), 2);
-            prop_assert!(pair_entries.iter().any(|entry| entry.filename == "k"));
-            prop_assert!(pair_entries.iter().any(|entry| entry.filename == "v"));
-        }
+        let bytes = expected_coord_map_cbor(&entries);
+        let table: HashMap<_, _> = entries.into_iter().collect();
+        let (root, store) = serialize(&WithCompositeKeyMap { table: table.clone() }).expect("serialize");
+        let (mode, map_id) = get_tree_entry_mode(&store, &root, "table");
+        prop_assert_eq!(mode, EntryKind::Blob);
+        let actual = store.get_blob(&map_id).expect("read object").expect("CBOR blob");
+        prop_assert_eq!(actual, bytes);
+        let decoded: WithCompositeKeyMap = deserialize(&root, &store).expect("deserialize");
+        prop_assert_eq!(&decoded.table, &table);
+        prop_assert_eq!(serialize(&decoded).expect("re-encode").0, root);
     }
 }
 
 // --- duplicate composite keys ---
 
-/// Two composite keys that encode identically (here two `NaN`s, both rendered
-/// as the canonical `"nan"` blob) are refused on write rather than emitted as
-/// two pairs for one key — the read side could only silently pick one.
+/// Distinct Rust NaN keys encode to the same canonical CBOR key and must be
+/// rejected on write, rather than silently picking a value.
 #[test]
 fn duplicate_composite_keys_are_refused_on_write() {
     let mut table = HashMap::new();
@@ -498,51 +670,46 @@ fn duplicate_composite_keys_are_refused_on_write() {
 
     let err = serialize(&WithFloatKeyMap { table }).expect_err("duplicate key must be refused");
     assert!(
-        matches!(err, SerializeError::DuplicateKey { .. }),
-        "expected DuplicateKey, got {err:?}"
+        matches!(
+            &err,
+            SerializeError::Reflect(message)
+                if message.contains("cannot encode")
+                    && message.contains("duplicate CBOR map key")
+        ),
+        "expected a duplicate CBOR key error, got {err:?}"
     );
 }
 
-/// A merged or foreign tree can carry two pair entries for one key —
-/// content naming splices both sides' pairs in without a name conflict —
-/// and the read refuses it rather than silently returning one of the values.
+/// A foreign CBOR blob with two copies of the same composite key is invalid.
 #[test]
 fn duplicate_composite_keys_are_refused_on_read() {
     let store = ObjectStore::default();
-    let leaf = |text: &[u8]| store.write_buf(Kind::Blob, text).expect("write blob");
-    let write_tree = |mut entries: Vec<TreeEntry>| {
-        entries.sort();
-        store.write(&Tree { entries }).expect("write tree")
-    };
-    let entry = |name: &str, kind: EntryKind, oid| TreeEntry {
-        mode: EntryMode::from(kind),
-        filename: name.into(),
-        oid,
-    };
-
-    // The key object: the encoding of Coord { x: 1, y: 1 }.
-    let key = write_tree(vec![
-        entry("x", EntryKind::Blob, leaf(b"1\n")),
-        entry("y", EntryKind::Blob, leaf(b"1\n")),
-    ]);
-    let pair = |v| {
-        write_tree(vec![
-            entry("k", EntryKind::Tree, key),
-            entry("v", EntryKind::Blob, v),
-        ])
-    };
-    let p1 = pair(leaf(b"a\n"));
-    let p2 = pair(leaf(b"b\n"));
-    let map = write_tree(vec![
-        entry(&p1.to_string(), EntryKind::Tree, p1),
-        entry(&p2.to_string(), EntryKind::Tree, p2),
-    ]);
-    let root = write_tree(vec![entry("table", EntryKind::Tree, map)]);
-
+    // { {"x": 1, "y": 1}: "a", {"x": 1, "y": 1}: "b" }.
+    let bytes = [
+        0xa2, 0xa2, 0x61, b'x', 0x01, 0x61, b'y', 0x01, 0x61, b'a', 0xa2, 0x61, b'x', 0x01, 0x61,
+        b'y', 0x01, 0x61, b'b',
+    ];
+    let blob = store
+        .write_buf(Kind::Blob, &bytes)
+        .expect("write CBOR blob");
+    let root = store
+        .write(&Tree {
+            entries: vec![TreeEntry {
+                mode: EntryMode::from(EntryKind::Blob),
+                filename: "table".into(),
+                oid: blob,
+            }],
+        })
+        .expect("write root tree");
     let err = deserialize::<WithCompositeKeyMap>(&root, &store)
         .expect_err("duplicate keys must be refused");
     assert!(
-        matches!(err, DeserializeError::DuplicateKey { .. }),
-        "expected DuplicateKey, got {err:?}"
+        matches!(
+            &err,
+            DeserializeError::Reflect(message)
+                if message.contains("invalid CBOR blob")
+                    && message.contains("duplicate or out-of-order CBOR map key")
+        ),
+        "expected a duplicate CBOR key error, got {err:?}"
     );
 }
