@@ -1,10 +1,91 @@
 # `facet-git-tree`
 
-*[facet.rs](https://facet.rs) format crates for Git tree objects.*
+*[facet.rs](https://facet.rs) format crate for Git objects.*
 
-## Usage
+`facet-git-tree` encodes `Facet` values as content-addressed Git blobs and trees and decodes them using their Rust type or a stored schema.
+The normative wire format is [`docs/format.adoc`](docs/format.adoc); it supersedes older descriptions in the `git-store` specification.
+The format is stable within a major version, but is pre-alpha and is not compatible with the previous layout.
 
-More documentation is en route!
+## Typed values
+
+Add `facet-git-tree` and `facet` to your project, derive `Facet`, and use the bare-value codec:
+
+```rust
+use facet::Facet;
+use facet_git_tree::{deserialize, serialize};
+
+#[derive(Debug, PartialEq, Facet)]
+struct Book {
+    title: String,
+    pages: u32,
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let book = Book { title: "Git Trees".into(), pages: 120 };
+    let (oid, store) = serialize(&book)?;
+    let decoded: Book = deserialize(&oid, &store)?;
+    assert_eq!(decoded, book);
+    Ok(())
+}
+```
+
+`serialize` returns the root object ID and a fresh in-memory `ObjectStore`.
+To use an existing store, call `serialize_into(&value, &store)`; it accepts a `gix_object::Write` sink.
+`deserialize(&oid, &store)` accepts a `gix_object::Find` source, including a suitable `gix` object database.
+`ObjectStore` defaults to SHA-1; `ObjectStore::with_hash_kind` selects a hash format.
+Object IDs are comparable only within the same hash format.
+
+These APIs write and read **bare values**, not bound documents: a root can be a blob or a tree, and no `.schema` or `.value` envelope is added.
+They do not publish refs or commits.
+`RawTree::new(oid)` and `RawBlob::new(oid)` reference already-stored objects by ID without re-encoding them; the objects must exist in the same store and use its hash format.
+
+`check_key(&str)` checks whether a user name can be encoded within the entry-name limit.
+The `normal_form` module provides `hash`/`hash_into` for the restricted identity representation; `check_universe`, `identity_subtrees`, and `check_identity_subtrees` inspect its schema constraints.
+`#[facet(facet_git_tree::identity_key)]` marks a field or type as identity-bearing.
+
+## Schemas and dynamic values
+
+`schema_of::<T>()` (or `Schema::from_shape`) derives a self-hosted `Schema { kind, root, defs }`.
+`kind` is an opaque label; named definitions are referenced by `Node::Ref`.
+Derive an entity schema when authoring it, then store and reuse that exact schema rather than re-deriving it for each read or write.
+A schema is itself a `Facet` value and can be serialized as a bare value.
+
+Enable the `value` feature to use the schema-directed APIs with `facet_value::Value`:
+
+- `deserialize_value_with_schema(&oid, &schema, &store)` reads a bare value without its original Rust type.
+- `validate_with_schema(&oid, &schema, &store)` checks a value against the schema.
+- `serialize_value_with_schema(&value, &schema, &store)` writes a bare value, validating it against the schema; mismatches report a path.
+
+The schema-directed and typed encodings are intended to produce the same objects for equivalent representable values.
+An unwrapped `Value::NULL` represents `None`, so the value API cannot distinguish it from `Some(None)` or `Some(())`; the schema-directed reader rejects such ambiguous `Some` values.
+A `Node::Dynamic` value has no on-disk kind tag and its heuristic read is lossy; it is not a substitute for a schema when type fidelity matters.
+Canonical CBOR is specified by the format; implementation support is evolving, so check the crate's API documentation for current limitations.
+
+## Wire format at a glance
+
+A bound document is a tree containing its reachable schema in `.schema`.
+After resolving root `ref`s, a struct root places its fields alongside `.schema`; any other root is stored under `.value` alongside `.schema`.
+The schema subtree is a **bare** `Schema`, not another bound document.
+Binding, commits and schema publication are higher-layer operations, not the bare codec APIs above.
+The commit's `Schema-Version:` identifies the format major; a bare tree has no version metadata, so cross-major interpretation must be refused.
+`Schema-commit:` is advisory; `.schema` is authoritative and reachable.
+
+- User field, variant, map-key and definition names use canonical percent escaping.
+  For example, `_` stays `_`, `none` becomes `%none`, and `a/b` becomes `%a%2Fb`.
+  Encoded names are limited to 255 bytes.
+- Text leaves have one newline appended; typed byte sequences and canonical CBOR blobs are stored verbatim without an appended newline.
+  Floats use canonical `ryu` text, including `nan`, `inf`, and `-inf`; zero signs and NaN payloads are normalized.
+- Positional entries use three lowercase hexadecimal digits (`000`–`fff`), with at most 4096 entries per tree.
+  Maps have string keys; other keys require a CBOR representation.
+- `None`, unit and empty composites use `{ none -> <empty blob> }`; `Some(x)` uses `{ some -> x }`.
+  Structs write every field, and readers reject missing or unknown fields.
+  Enum variants are externally tagged: a unit variant is a text blob, and a one-field tuple variant stores its field directly.
+- Readers must reject non-canonical or malformed input, including bad names, ordinals, modes, scalar encodings and schemas.
+  The format limits nesting to 32 and decode visits to 2^20.
+  A `RawTree` is opaque and exempt from the ordinary tree-content rules.
+
+See the format document for the complete rules, including the lossy dynamic-value encoding and its exceptions.
+Implementation work is ongoing; the specification is not a claim that every feature is already available in every build.
 
 ## Code of Conduct
 
