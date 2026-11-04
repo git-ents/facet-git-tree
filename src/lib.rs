@@ -24,6 +24,7 @@ pub mod attr;
 mod cbor;
 mod classify;
 mod de;
+pub mod doctor;
 mod error;
 mod float;
 mod limits;
@@ -42,6 +43,9 @@ pub use gix_object::Object as GitObject;
 pub use gix_object::tree::{Entry as TreeEntry, EntryKind, EntryMode};
 
 pub use de::{check_key, deserialize};
+pub use doctor::{
+    DoctorError, DoctorReport, EncodeStage, S0_SHA1, S0_SHA256, check, check_against,
+};
 pub use error::{
     DeserializeError, KeyError, NormalFormError, SchemaError, SchemaReadError, SchemaWriteError,
     SerializeError, UniverseError,
