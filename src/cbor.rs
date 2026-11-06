@@ -64,6 +64,10 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<Value, CborError> {
 }
 
 /// Validate an opaque CBOR payload without changing it.
+///
+/// Only the `value`-gated schema read/write paths call this; it is the
+/// pass-through used to validate opaque CBOR without materializing it.
+#[cfg_attr(not(feature = "value"), allow(dead_code))]
 pub(crate) fn validate(bytes: &[u8]) -> Result<(), CborError> {
     decode(bytes).map(|_| ())
 }
