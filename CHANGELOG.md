@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.2.0-alpha.3](https://github.com/git-ents/facet-git-tree/compare/facet-git-tree-v0.1.0-alpha.3...facet-git-tree-v0.2.0-alpha.3) (2026-11-06)
+
+
+### Features
+
+* Add the schema-of-schemas fixed-point check ([9347d59](https://github.com/git-ents/facet-git-tree/commit/9347d59ea7f4bcf89df97458cf6e1e5783d6eaf5))
+* Implement the frozen git-tree wire format ([cdc1989](https://github.com/git-ents/facet-git-tree/commit/cdc19891f0e71af5ed2abc34bbdde7d6e9bc8f27))
+
+
+### Bug Fixes
+
+* Keep CBOR validation lint-clean without the value feature ([a3b4bd9](https://github.com/git-ents/facet-git-tree/commit/a3b4bd90916c2a65f8ae7dc3194c0297f2960c7c))
+
+
+### Documentation
+
+* Add the wire-format implementation dev plan ([9a39890](https://github.com/git-ents/facet-git-tree/commit/9a398909bfc4e6ca0845dd1d453dbdd281779397))
+* Correct the escaping example for a non-ASCII name ([a86b58b](https://github.com/git-ents/facet-git-tree/commit/a86b58bda80839cb71f45e30581c8ebfc602a684))
+* Document the frozen wire format ([1484a88](https://github.com/git-ents/facet-git-tree/commit/1484a88e392e83df99c305093f4efbb8060b72ea))
+* Drop pre-freeze names from the shared fixtures ([0d07456](https://github.com/git-ents/facet-git-tree/commit/0d07456dfdc3e470f2c05953ae476927cf8abe4f))
+* Freeze the git-tree wire format ([1c10368](https://github.com/git-ents/facet-git-tree/commit/1c10368d34fd248f55dda962a43ed5a8e24dcdce))
+* Require a struct document root ([7dad00e](https://github.com/git-ents/facet-git-tree/commit/7dad00e4224935f157f0f415c5e2e02ed82f3a10))
+* Store non-finite floats instead of rejecting them ([cfed1d5](https://github.com/git-ents/facet-git-tree/commit/cfed1d5ee8c0bbc8a2f21af4790b481ac74a3847))
+
+
+### Code Refactoring
+
+* Centralize schema ref resolution ([458547b](https://github.com/git-ents/facet-git-tree/commit/458547b4ffb6f408dc97b022187c76208b9ff56c))
+
 ## [0.1.0-alpha.3](https://github.com/git-ents/facet-git-tree/compare/facet-git-tree-v0.1.0-alpha.1...facet-git-tree-v0.1.0-alpha.3) (2026-10-22)
 
 Note that `v0.1.0-alpha.2` was published accidentally, and was therefore yanked.
