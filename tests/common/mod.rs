@@ -58,8 +58,8 @@ pub struct WithOptional {
     pub maybe: Option<i32>,
 }
 
-/// A field-level default (`StructField::has_default`), for the schema
-/// generation and default-omission suites.
+/// A defaulted field, for the schema suites: the frozen format emits every
+/// field, so a default never omits one.
 #[derive(Debug, Facet, PartialEq)]
 pub struct WithDefault {
     pub label: String,
@@ -82,8 +82,8 @@ pub struct TreeNode {
     pub children: Vec<TreeNode>,
 }
 
-/// An enum exercising all four variant payload kinds: unit, newtype, tuple,
-/// and struct.
+/// An enum exercising every variant payload shape: unit, one-field tuple,
+/// multi-field tuple, and struct.
 #[derive(Debug, Facet, PartialEq)]
 #[repr(u8)]
 pub enum Event {
