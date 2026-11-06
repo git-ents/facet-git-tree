@@ -128,6 +128,107 @@ pub enum Node {
     Ref(String),
 }
 
+impl Node {
+    /// Follow `ref` nodes through `defs` to the concrete node they name.
+    ///
+    /// `ref` nodes are transparent on disk: resolving one adds no tree level
+    /// and no value, so a chain of aliases is equivalent to its target.
+    /// Returns `self` when it is already concrete.
+    ///
+    /// A chain longer than the definition table must repeat a name and so can
+    /// never reach a concrete node; that is reported as [`RefError::Cycle`]
+    /// instead of being walked forever.
+    pub fn resolve<'a>(&'a self, defs: &'a BTreeMap<String, Node>) -> Result<&'a Node, RefError> {
+        let mut node = self;
+        let mut consumed = 0usize;
+        while let Node::Ref(name) = node {
+            let target = defs
+                .get(name)
+                .ok_or_else(|| RefError::Dangling { name: name.clone() })?;
+            consumed += 1;
+            if consumed > defs.len() {
+                return Err(RefError::Cycle { name: name.clone() });
+            }
+            node = target;
+        }
+        Ok(node)
+    }
+
+    /// The keyword naming this node in a schema.
+    ///
+    /// These are exactly the lowercase variant names: the leaf keywords
+    /// `unit`, `bool`, `char`, `string`, the integer and float widths,
+    /// `bytes`, `cbor`, `rawtree`, `dynamic`; and the composite keywords
+    /// `list`, `array`, `map`, `optional`, `tuple`, `struct`, `enum`, `ref`.
+    /// A leaf's keyword is its bare blob; a composite's names its single
+    /// payload entry.
+    pub const fn keyword(&self) -> &'static str {
+        match self {
+            Self::Unit => "unit",
+            Self::Bool => "bool",
+            Self::Char => "char",
+            Self::String => "string",
+            Self::I8 => "i8",
+            Self::I16 => "i16",
+            Self::I32 => "i32",
+            Self::I64 => "i64",
+            Self::I128 => "i128",
+            Self::ISize => "isize",
+            Self::U8 => "u8",
+            Self::U16 => "u16",
+            Self::U32 => "u32",
+            Self::U64 => "u64",
+            Self::U128 => "u128",
+            Self::USize => "usize",
+            Self::F32 => "f32",
+            Self::F64 => "f64",
+            Self::Bytes => "bytes",
+            Self::Cbor => "cbor",
+            Self::RawTree => "rawtree",
+            Self::Dynamic => "dynamic",
+            Self::List(_) => "list",
+            Self::Array { .. } => "array",
+            Self::Map { .. } => "map",
+            Self::Optional(_) => "optional",
+            Self::Tuple(_) => "tuple",
+            Self::Struct(_) => "struct",
+            Self::Enum(_) => "enum",
+            Self::Ref(_) => "ref",
+        }
+    }
+}
+
+/// Why a [`Node::Ref`] could not be resolved to a concrete node.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RefError {
+    /// A `ref` names a definition that is absent from `defs`.
+    #[error("dangling ref {name:?}: no such definition")]
+    Dangling {
+        /// The missing definition name.
+        name: String,
+    },
+    /// A chain of `ref` nodes revisited a name without reaching a concrete
+    /// node, so it describes no value.
+    #[error("non-productive ref cycle through {name:?}")]
+    Cycle {
+        /// The name the cycle was detected at.
+        name: String,
+    },
+}
+
+impl Schema {
+    /// The concrete node the [`root`](Self::root) resolves to, following `ref`
+    /// nodes through [`defs`](Self::defs).
+    ///
+    /// A schema's root is normally a `ref` naming a defined type, so callers
+    /// that care about the root's *shape* (for example, whether a document
+    /// root is a struct) must resolve it rather than match [`root`](Self::root)
+    /// directly.
+    pub fn resolved_root(&self) -> Result<&Node, RefError> {
+        self.root.resolve(&self.defs)
+    }
+}
+
 /// The payload shape of one enum variant.
 #[derive(Debug, Clone, PartialEq, Facet)]
 #[facet(rename_all = "lowercase")]

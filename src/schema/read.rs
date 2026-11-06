@@ -15,7 +15,7 @@ use crate::de::{
 use crate::error::{DeserializeError, SchemaReadError};
 use crate::limits::MAX_VALUE_DEPTH;
 use crate::ordinal::{self, MAX_TREE_ENTRIES};
-use crate::schema::{Node, Schema, VariantKind};
+use crate::schema::{Node, RefError, Schema, VariantKind};
 use crate::{EntryKind, ObjectId};
 
 /// Deserialize the bare object at `root` according to `doc`.
@@ -248,21 +248,16 @@ impl<F: Find + ?Sized> Reader<'_, F> {
         depth: usize,
         entry_kind: Option<EntryKind>,
     ) -> Result<Value, SchemaReadError> {
-        // References have no encoded tree level. Resolve aliases iteratively;
-        // schema validation has already rejected non-productive cycles.
-        let doc = self.doc;
-        let mut schema = schema;
-        let mut aliases = 0usize;
-        while let Node::Ref(name) = schema {
-            aliases += 1;
-            if aliases > doc.defs.len() {
-                return Err(invalid_schema("unguarded reference cycle"));
-            }
-            schema = doc
-                .defs
-                .get(name)
-                .ok_or_else(|| SchemaReadError::UnknownRef(name.clone()))?;
-        }
+        // References have no encoded tree level, so a chain of aliases is
+        // equivalent to its target.
+        let schema = schema
+            .resolve(&self.doc.defs)
+            .map_err(|error| match error {
+                RefError::Dangling { name } => SchemaReadError::UnknownRef(name),
+                RefError::Cycle { name } => {
+                    invalid_schema(format!("unguarded reference cycle through {name:?}"))
+                }
+            })?;
 
         let mut buf = Vec::new();
         let data = self.load(oid, &mut buf, depth, entry_kind)?;

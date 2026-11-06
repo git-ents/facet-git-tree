@@ -26,7 +26,7 @@ use crate::float::{format_f32, format_f64};
 use crate::limits::MAX_VALUE_DEPTH;
 use crate::ordinal::{self, MAX_TREE_ENTRIES};
 use crate::schema::path::Path;
-use crate::schema::{Node, Schema, VariantKind, value_kind};
+use crate::schema::{Node, RefError, Schema, VariantKind, value_kind};
 use crate::ser::{serialize_node, write_binary_blob, write_leaf_blob};
 use crate::{EntryKind, EntryMode, ObjectId, TreeEntry};
 
@@ -237,28 +237,20 @@ fn write_node<W: Write + ?Sized>(
         // A dynamic node carries no schema, so the bare heuristic write — the
         // same one `serialize` applies to a `Value` field — is exactly right.
         Node::Dynamic => Ok(serialize_node(Peek::new(value), store, depth)?),
-        Node::Ref(name) => {
-            // References are transparent on disk; following a long alias
-            // chain must not consume tree-depth budget or recurse on stack.
-            let mut target_name = name;
-            let mut refs = 0;
-            loop {
-                refs += 1;
-                if refs > doc.defs.len() {
-                    return Err(invalid_schema("non-productive ref cycle"));
+        Node::Ref(_) => {
+            // References are transparent on disk: a chain of aliases is
+            // equivalent to its target, and following one must not consume
+            // tree-depth budget or recurse on the stack.
+            let target = schema.resolve(&doc.defs).map_err(|error| match error {
+                RefError::Dangling { name } => SchemaWriteError::UnknownRef {
+                    path: path.show(),
+                    name,
+                },
+                RefError::Cycle { name } => {
+                    invalid_schema(&format!("non-productive ref cycle through {name:?}"))
                 }
-                let target =
-                    doc.defs
-                        .get(target_name)
-                        .ok_or_else(|| SchemaWriteError::UnknownRef {
-                            path: path.show(),
-                            name: target_name.clone(),
-                        })?;
-                match target {
-                    Node::Ref(next) => target_name = next,
-                    _ => return write_node(value, target, doc, store, path, depth),
-                }
-            }
+            })?;
+            write_node(value, target, doc, store, path, depth)
         }
     }
 }

@@ -61,6 +61,6 @@ pub use raw_tree::RawTree;
 pub use schema::read::{deserialize_value_with_schema, validate_with_schema};
 #[cfg(feature = "value")]
 pub use schema::write::serialize_value_with_schema;
-pub use schema::{Node, Schema, VariantKind, schema_of};
+pub use schema::{Node, RefError, Schema, VariantKind, schema_of};
 pub use ser::{serialize, serialize_into};
 pub use store::ObjectStore;
