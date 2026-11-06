@@ -64,7 +64,7 @@ Canonical CBOR is specified by the format; implementation support is evolving, s
 ## Wire format at a glance
 
 A bound document is a tree containing its reachable schema in `.schema`.
-After resolving root `ref`s, a struct root places its fields alongside `.schema`; any other root is stored under `.value` alongside `.schema`.
+A document's schema root must resolve to a struct, so its fields sit directly at the document root alongside `.schema`; a schema describing any other shape is a bare value, not a document.
 The schema subtree is a **bare** `Schema`, not another bound document.
 Binding, commits and schema publication are higher-layer operations, not the bare codec APIs above.
 The commit's `Schema-Version:` identifies the format major; a bare tree has no version metadata, so cross-major interpretation must be refused.

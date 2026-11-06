@@ -15,9 +15,10 @@
 //! Reads are strict: a struct emits every field, so a missing field and an
 //! unknown entry are both errors ([`DeserializeError::MissingField`],
 //! [`DeserializeError::UnexpectedEntry`]); tree entries must be correctly
-//! ordered and sized; and leaf text must be canonical. A scalar, sequence, map,
-//! option, unit, or enum root is wrapped as `{ .value -> v, .schema -> S }` by
-//! the `git-store` envelope rather than by this bare codec.
+//! ordered and sized; and leaf text must be canonical. This crate writes and
+//! reads bare values only; the `.schema` document envelope is a `git-store`
+//! concern. A document's schema root must be a struct, so its fields sit at the
+//! document root beside `.schema`.
 #![forbid(unsafe_code)]
 
 pub mod attr;

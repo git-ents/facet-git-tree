@@ -32,19 +32,30 @@ tree is undefined and MUST be refused.
 
 == Envelope
 
-A document is a Git tree. Its entries are the value's own fields, plus a
-single reserved subtree named `.schema`:
+A document is a Git tree whose entries are the entries of the value's own bare
+encoding, plus a single reserved entry named `.schema`:
 
-* Resolve the root node first (following `ref` nodes into `defs`). If the
-  resolved root is a struct, the value's fields sit directly at the root,
-  alongside `.schema`.
-* Otherwise (scalar, unit, enum, option, sequence, map root), the root tree is
-  `{ .value -> <encoded value>, .schema -> <schema tree> }`.
+```
+{ <value's own entries>..., .schema -> <unbound schema> }
+```
 
-`.schema`/`.value` are reserved **only at the root**; either appearing below the
-root is an error. No implementation may rely on entry position: `.schema` is
-looked up by name (a verbatim user key sorts before it whenever its first byte
-is below `0x2E`).
+* A document's schema root MUST resolve (following `ref` nodes into `defs`) to
+  a `struct`. A schema whose resolved root is any other node — scalar, unit,
+  enum, option, sequence, map, `cbor`, `rawtree`, `dynamic` — describes a bare
+  value, not a document, and MUST be refused. There is no wrapper variant: a
+  top-level sequence or scalar is stored inside a struct field, not as a
+  document root.
+* For a struct root the value's own entries are its fields. An *empty* struct
+  (or any field the encoding leaves empty) contributes the `none` marker entry,
+  so the document is `{ none -> <empty blob>, .schema -> <schema tree> }`.
+* There is no `.value` entry: a document always names its fields at the root,
+  so `git ls-tree` on a document shows the entity's fields directly.
+
+`.schema` is reserved **only at the root**; it appearing below the root is an
+error. No implementation may rely on entry position: `.schema` is looked up by
+name (a verbatim user key sorts before it whenever its first byte is below
+`0x2E`). A user field named `.schema` is escaped to `%.schema`, so it can never
+collide with the envelope entry.
 
 == Entry names and escaping
 
@@ -54,7 +65,7 @@ Classification is by the whole name, in this order:
 |===
 | class | names
 
-| structural | `.schema`, `.value` (root only); `none`, `some` (in containers)
+| structural | `.schema` (root only); `.value` (reserved, never written); `none`, `some` (in containers)
 | escaped | any name beginning with `%`
 | verbatim | everything else (below)
 |===
@@ -343,7 +354,10 @@ Invariant: for every accepted tree `t`, `encode(decode(t)) == t`.
 
 * Ordinals: fixed-width lowercase hex, width 3, cap 4096; larger -> `cbor`.
 * Marker / `Some`: `none` / `some` (no dot). `.schema` / `.value` keep the dot
-  (root only).
+  (root only); `.value` stays reserved but is never written.
+* Envelope: a document root is always a struct, so its fields sit directly at
+  the root beside `.schema`; non-struct schemas are bare values, never
+  documents.
 * Escape: whole-name classified; `.` structural, `%` escaped, else verbatim;
   verbatim restricted to `[A-Za-z0-9._-]`.
 * Structs: emit every field; reject unknown; no defaults in the schema.

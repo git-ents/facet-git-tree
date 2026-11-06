@@ -3,7 +3,7 @@
 //! A [`NormalForm`] describes a value in a closed universe: fixed-width
 //! scalars, bytes, sequences, named structs, and string-keyed maps. Values are
 //! written with the same **bare value** encoding as [`crate::serialize`], not
-//! the document's `.schema`/`.value` envelope. Under the same schema and Git
+//! the document's `.schema` envelope. Under the same schema and Git
 //! hash format, the identity tree is therefore byte-for-byte identical to the
 //! ordinary value tree.
 //!
