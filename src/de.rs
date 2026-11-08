@@ -318,6 +318,18 @@ pub(crate) fn tree_entries_from_data(
             kind,
         });
     }
+    // The pre-scan and this gix iteration walk the same bytes: the pre-scan
+    // bounds the count before gix's octal parser can overflow and is the only
+    // enforcement of the MAX_TREE_ENTRIES cap, while gix yields the accepted
+    // entries. `entry_count` is therefore both the cap witness and the
+    // allocation claim, so it must equal the entries actually produced. Fail
+    // closed rather than trust a count the produced entries do not confirm.
+    if result.len() != entry_count {
+        return Err(reflect(format!(
+            "tree {id} pre-scan counted {entry_count} entries but decoded {}",
+            result.len()
+        )));
+    }
     if result.is_empty() {
         return Err(reflect(format!("tree {id} is empty; use the none marker")));
     }
