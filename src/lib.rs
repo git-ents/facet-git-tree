@@ -28,6 +28,7 @@ mod de;
 pub mod doctor;
 mod error;
 mod float;
+mod hash;
 mod limits;
 mod marker;
 mod name;
@@ -51,6 +52,7 @@ pub use error::{
     DeserializeError, KeyError, NormalFormError, SchemaError, SchemaReadError, SchemaWriteError,
     SerializeError, UniverseError,
 };
+pub use hash::{Backend, HashFormat, HashFormatMismatch, Oid, Sha1, Sha256, Tagged};
 pub use normal_form::{
     IDENTITY_DEF_PREFIX, Key, NormalForm, check_identity_subtrees, check_universe,
     identity_subtrees,
@@ -61,6 +63,10 @@ pub use raw_tree::RawTree;
 pub use schema::read::{deserialize_value_with_schema, validate_with_schema};
 #[cfg(feature = "value")]
 pub use schema::write::serialize_value_with_schema;
-pub use schema::{Node, RefError, Schema, VariantKind, schema_of};
+pub use schema::{CheckedSchema, Node, RefError, Schema, VariantKind, schema_of};
 pub use ser::{serialize, serialize_into};
 pub use store::ObjectStore;
+
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;

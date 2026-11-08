@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 
-use facet_git_tree::{KeyError, ObjectId, ObjectStore, check_key, deserialize, serialize};
-use gix_object::{Kind, Write as _};
+use facet_git_tree::{KeyError, ObjectStore, Oid, Sha1, check_key, deserialize, serialize};
+use gix_object::Kind;
 use rstest::rstest;
 
 /// User names are accepted when their canonical encoded names fit the limit.
@@ -38,7 +38,9 @@ fn accepts_and_encodes_user_names(#[case] key: &str, #[case] encoded: &str) {
     assert_eq!(actual, encoded.as_bytes());
     assert_eq!(entries[0].mode.value(), 0o100644);
     assert_eq!(
-        store.get_blob(&entries[0].oid).expect("read value"),
+        store
+            .get_blob(&Oid::new(entries[0].oid).expect("fixtures use sha1"))
+            .expect("read value"),
         Some(b"value\n".to_vec())
     );
     let decoded: HashMap<String, String> = deserialize(&root, &store).expect("decode typed map");
@@ -114,7 +116,7 @@ fn distinct_user_names_do_not_collide_with_structural_markers_or_each_other() {
     assert_eq!(decoded, input);
 }
 
-fn foreign_map(name: &[u8]) -> (ObjectId, ObjectStore) {
+fn foreign_map(name: &[u8]) -> (Oid<Sha1>, ObjectStore) {
     let store = ObjectStore::default();
     let value = store
         .write_buf(Kind::Blob, b"value\n")
@@ -146,10 +148,10 @@ fn rejects_noncanonical_foreign_names_and_structural_names() {
     ] {
         let (root, store) = foreign_map(name);
         assert!(
-            deserialize::<HashMap<String, String>>(&root, &store).is_err(),
+            deserialize::<HashMap<String, String>, _, _>(&root, &store).is_err(),
             "accepted foreign entry name {name:?}"
         );
     }
     let (root, store) = foreign_map(&vec![b'x'; 256]);
-    assert!(deserialize::<HashMap<String, String>>(&root, &store).is_err());
+    assert!(deserialize::<HashMap<String, String>, _, _>(&root, &store).is_err());
 }

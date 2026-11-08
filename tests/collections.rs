@@ -10,13 +10,13 @@ use std::sync::Arc;
 
 use facet::Facet;
 use facet_git_tree::{
-    DeserializeError, EntryKind, EntryMode, Node, ObjectStore, SerializeError, TreeEntry,
-    deserialize, schema_of, serialize,
+    DeserializeError, EntryKind, EntryMode, Node, ObjectStore, Oid, SerializeError, Sha1,
+    TreeEntry, deserialize, schema_of, serialize,
 };
-use gix_object::{Kind, Tree, Write};
+use gix_object::{Kind, Tree};
 use proptest::prelude::*;
 mod common;
-use common::{WithArray, WithMap, WithVec, get_tree_entry_mode, tree_entries};
+use common::{WithArray, WithMap, WithVec, get_tree_entry_mode, tree_entries, typed};
 
 #[derive(Facet, PartialEq, Debug)]
 struct WithIntMap {
@@ -109,7 +109,7 @@ fn empty_vec_is_marker_tree() {
     assert_eq!(entries[0].mode.kind(), EntryKind::Blob);
     assert_eq!(
         store
-            .get_blob(&entries[0].oid)
+            .get_blob(&typed(&entries[0].oid))
             .expect("read marker")
             .expect("marker blob"),
         b"",
@@ -180,7 +180,7 @@ fn empty_map_is_marker_tree() {
     assert_eq!(entries[0].mode.kind(), EntryKind::Blob);
     assert_eq!(
         store
-            .get_blob(&entries[0].oid)
+            .get_blob(&typed(&entries[0].oid))
             .expect("read marker")
             .expect("marker blob"),
         b"",
@@ -225,14 +225,14 @@ fn map_entries_are_named_by_escaped_keys() {
         assert_eq!(entry.mode.kind(), EntryKind::Blob);
         assert_eq!(
             store
-                .get_blob(&entry.oid)
+                .get_blob(&typed(&entry.oid))
                 .expect("read object")
                 .expect("value blob"),
             *value
         );
     }
     assert_eq!(
-        deserialize::<WithMap>(&root_id, &store).expect("deserialize"),
+        deserialize::<WithMap, _, _>(&root_id, &store).expect("deserialize"),
         input
     );
 }
@@ -248,18 +248,18 @@ fn map_with_int_keys_is_cbor() {
     assert_eq!(mode, EntryKind::Blob, "non-string map must be a CBOR leaf");
     assert_eq!(
         store
-            .get_blob(&map_id)
+            .get_blob(&typed(&map_id))
             .expect("read object")
             .expect("CBOR blob"),
         [0xa1, 0x18, 0x2a, 0x61, b'x'],
         "{{ 42: \"x\" }} in core-deterministic CBOR, with no newline"
     );
     assert_eq!(
-        schema_of::<HashMap<u32, String>>().expect("schema").root,
-        Node::Cbor
+        schema_of::<HashMap<u32, String>>().expect("schema").root(),
+        &Node::Cbor
     );
     assert_eq!(
-        deserialize::<WithIntMap>(&root_id, &store).expect("deserialize"),
+        deserialize::<WithIntMap, _, _>(&root_id, &store).expect("deserialize"),
         input
     );
 }
@@ -274,11 +274,14 @@ fn empty_int_key_map_is_empty_cbor_map() {
     let (mode, oid) = get_tree_entry_mode(&store, &root, "table");
     assert_eq!(mode, EntryKind::Blob);
     assert_eq!(
-        store.get_blob(&oid).expect("read object").expect("blob"),
+        store
+            .get_blob(&typed(&oid))
+            .expect("read object")
+            .expect("blob"),
         [0xa0]
     );
     assert_eq!(
-        deserialize::<WithIntMap>(&root, &store).expect("deserialize"),
+        deserialize::<WithIntMap, _, _>(&root, &store).expect("deserialize"),
         input
     );
 }
@@ -333,7 +336,7 @@ fn map_with_smart_pointer_scalar_keys_is_name_keyed() {
     );
     assert_eq!(
         store
-            .get_blob(&v_id)
+            .get_blob(&typed(&v_id))
             .expect("read object")
             .expect("value blob in store"),
         b"5\n",
@@ -361,17 +364,19 @@ fn map_with_composite_keys_is_cbor() {
     // { { "x": 1, "y": 2 }: "a" }, with bytewise-ordered CBOR map keys.
     assert_eq!(
         store
-            .get_blob(&map_id)
+            .get_blob(&typed(&map_id))
             .expect("read object")
             .expect("CBOR blob"),
         [0xa1, 0xa2, 0x61, b'x', 0x01, 0x61, b'y', 0x02, 0x61, b'a']
     );
     assert_eq!(
-        schema_of::<HashMap<Coord, String>>().expect("schema").root,
-        Node::Cbor
+        schema_of::<HashMap<Coord, String>>()
+            .expect("schema")
+            .root(),
+        &Node::Cbor
     );
     assert_eq!(
-        deserialize::<WithCompositeKeyMap>(&root_id, &store).expect("deserialize"),
+        deserialize::<WithCompositeKeyMap, _, _>(&root_id, &store).expect("deserialize"),
         input
     );
 }
@@ -433,7 +438,7 @@ fn adding_a_string_pair_does_not_rename_existing_pairs() {
         );
     }
     assert_eq!(
-        deserialize::<WithMap>(&grown_root, &grown_store)
+        deserialize::<WithMap, _, _>(&grown_root, &grown_store)
             .expect("deserialize")
             .table,
         grown
@@ -468,7 +473,7 @@ fn adding_a_composite_pair_replaces_only_the_cbor_leaf() {
     assert_eq!(grown_entries[0].mode.kind(), EntryKind::Blob);
     assert_ne!(small_entries[0].oid, grown_entries[0].oid);
     assert_eq!(
-        deserialize::<WithCompositeKeyMap>(&grown_root, &grown_store)
+        deserialize::<WithCompositeKeyMap, _, _>(&grown_root, &grown_store)
             .expect("deserialize")
             .table,
         grown
@@ -483,27 +488,27 @@ fn native_collections_reject_legacy_empty_encodings() {
     let empty_blob = store.write_buf(Kind::Blob, b"").expect("write empty blob");
     let text_blob = store.write_buf(Kind::Blob, b"\n").expect("write text leaf");
     let tree = |entries| store.write(&Tree { entries }).expect("write tree");
-    let entry = |name: &str, kind: EntryKind, oid| TreeEntry {
+    let entry = |name: &str, kind: EntryKind, oid: Oid<Sha1>| TreeEntry {
         mode: EntryMode::from(kind),
         filename: name.into(),
-        oid,
+        oid: oid.into_raw(),
     };
     let empty = tree(vec![]);
     let old_marker = tree(vec![entry("_", EntryKind::Blob, empty_blob)]);
     let wrong_marker = tree(vec![entry("none", EntryKind::Blob, text_blob)]);
     for root in [empty, old_marker, wrong_marker] {
         assert!(
-            deserialize::<Vec<i64>>(&root, &store).is_err(),
+            deserialize::<Vec<i64>, _, _>(&root, &store).is_err(),
             "invalid vec tree {root}"
         );
         assert!(
-            deserialize::<HashMap<String, String>>(&root, &store).is_err(),
+            deserialize::<HashMap<String, String>, _, _>(&root, &store).is_err(),
             "invalid map tree {root}"
         );
     }
     let underscore = tree(vec![entry("_", EntryKind::Blob, text_blob)]);
     assert_eq!(
-        deserialize::<HashMap<String, String>>(&underscore, &store).expect("underscore key"),
+        deserialize::<HashMap<String, String>, _, _>(&underscore, &store).expect("underscore key"),
         HashMap::from([("_".to_string(), "".to_string())])
     );
 }
@@ -515,14 +520,14 @@ fn non_string_maps_reject_legacy_tree_layouts() {
     let store = ObjectStore::default();
     let leaf = |bytes: &[u8]| store.write_buf(Kind::Blob, bytes).expect("write blob");
     let tree = |entries| store.write(&Tree { entries }).expect("write tree");
-    let entry = |name: &str, kind: EntryKind, oid| TreeEntry {
+    let entry = |name: &str, kind: EntryKind, oid: Oid<Sha1>| TreeEntry {
         mode: EntryMode::from(kind),
         filename: name.into(),
-        oid,
+        oid: oid.into_raw(),
     };
     let integer_map = tree(vec![entry("42", EntryKind::Blob, leaf(b"x\n"))]);
     let integer_root = tree(vec![entry("table", EntryKind::Tree, integer_map)]);
-    assert!(deserialize::<WithIntMap>(&integer_root, &store).is_err());
+    assert!(deserialize::<WithIntMap, _, _>(&integer_root, &store).is_err());
 
     let key = tree(vec![
         entry("x", EntryKind::Blob, leaf(b"1\n")),
@@ -534,7 +539,7 @@ fn non_string_maps_reject_legacy_tree_layouts() {
     ]);
     let composite_map = tree(vec![entry(&pair.to_string(), EntryKind::Tree, pair)]);
     let composite_root = tree(vec![entry("table", EntryKind::Tree, composite_map)]);
-    assert!(deserialize::<WithCompositeKeyMap>(&composite_root, &store).is_err());
+    assert!(deserialize::<WithCompositeKeyMap, _, _>(&composite_root, &store).is_err());
 }
 
 /// Independent CBOR fixture generator for the small generated coordinate maps.
@@ -649,7 +654,7 @@ proptest! {
         let (root, store) = serialize(&WithCompositeKeyMap { table: table.clone() }).expect("serialize");
         let (mode, map_id) = get_tree_entry_mode(&store, &root, "table");
         prop_assert_eq!(mode, EntryKind::Blob);
-        let actual = store.get_blob(&map_id).expect("read object").expect("CBOR blob");
+        let actual = store.get_blob(&typed(&map_id)).expect("read object").expect("CBOR blob");
         prop_assert_eq!(actual, bytes);
         let decoded: WithCompositeKeyMap = deserialize(&root, &store).expect("deserialize");
         prop_assert_eq!(&decoded.table, &table);
@@ -697,11 +702,11 @@ fn duplicate_composite_keys_are_refused_on_read() {
             entries: vec![TreeEntry {
                 mode: EntryMode::from(EntryKind::Blob),
                 filename: "table".into(),
-                oid: blob,
+                oid: blob.into_raw(),
             }],
         })
         .expect("write root tree");
-    let err = deserialize::<WithCompositeKeyMap>(&root, &store)
+    let err = deserialize::<WithCompositeKeyMap, _, _>(&root, &store)
         .expect_err("duplicate keys must be refused");
     assert!(
         matches!(

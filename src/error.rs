@@ -205,6 +205,20 @@ pub enum NormalFormError {
         /// The largest count the mapping can name.
         max: usize,
     },
+    /// A struct or map holds more entries than a Git tree can name.
+    ///
+    /// The tree-entry cap is part of the frozen mapping, so a larger struct
+    /// or map is refused rather than silently truncated.
+    #[error("normal-form tree holds {len} entries, exceeding the limit of {max}")]
+    TreeTooLong {
+        /// The entry count.
+        len: usize,
+        /// The largest count the mapping can name.
+        max: usize,
+    },
+    /// The value exceeds the maximum nesting depth.
+    #[error("normal-form value exceeds the maximum depth of {0}")]
+    MaxDepth(usize),
     /// An error from the underlying `gix` object backend.
     #[error("git object backend error")]
     Backend(#[source] gix_object::write::Error),

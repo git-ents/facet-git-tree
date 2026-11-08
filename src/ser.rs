@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use crate::attr;
 use crate::classify::{ShapeClass, classify, collapse_shape};
 use crate::error::SerializeError;
+use crate::hash::{HashFormat, Oid, Sha1, Tagged};
 use crate::limits::MAX_VALUE_DEPTH;
 use crate::ordinal::{self, MAX_TREE_ENTRIES};
 use crate::store::ObjectStore;
@@ -17,6 +18,19 @@ use crate::{EntryKind, EntryMode, ObjectId, RawBlob, RawTree, TreeEntry};
 /// (reflection errors are not `'static`-friendly).
 fn reflect(e: impl std::fmt::Display) -> SerializeError {
     SerializeError::Reflect(e.to_string())
+}
+
+/// Wrap a freshly written object id as an [`Oid<F>`].
+///
+/// A backend that honors the store's claimed format always produces a
+/// matching id, so a mismatch here is a backend bug; report it rather than
+/// panicking.
+pub(crate) fn wrap_oid<F: HashFormat>(raw: ObjectId) -> Result<Oid<F>, SerializeError> {
+    Oid::new(raw).map_err(|error| {
+        reflect(format!(
+            "backend produced an object id of the wrong hash format: {error}"
+        ))
+    })
 }
 
 fn escaped_name(name: &str) -> Result<String, SerializeError> {
@@ -42,11 +56,16 @@ fn check_depth(depth: usize) -> Result<(), SerializeError> {
 
 /// Serialize a [`facet::Facet`] value into the given `gix` object `store`.
 ///
-/// Returns the bare root object's [`ObjectId`]; scalar roots can be blobs.
-pub fn serialize_into<T, W>(value: &T, store: &W) -> Result<ObjectId, SerializeError>
+/// The hash format `F` is inferred from the store: a concrete
+/// [`ObjectStore<F>`](crate::ObjectStore) or a
+/// [`Backend<F, _>`](crate::Backend) wrapper both claim their format through
+/// [`Tagged`]. Returns the bare root object's [`Oid<F>`]; scalar roots can be
+/// blobs.
+pub fn serialize_into<T, F, W>(value: &T, store: &W) -> Result<Oid<F>, SerializeError>
 where
     T: for<'a> facet::Facet<'a>,
-    W: Write + ?Sized,
+    F: HashFormat,
+    W: Write + Tagged<F> + ?Sized,
 {
     serialize_root(Peek::new(value), store)
 }
@@ -56,29 +75,34 @@ where
 /// Dynamic values have no runtime type markers, so their heuristic read is
 /// intentionally lossy; typed values round-trip through their supplied shape.
 ///
-/// Returns the bare root object's [`ObjectId`] and the store containing its
-/// reachable objects.
+/// Returns the bare root object's [`Oid`] and the store containing its
+/// reachable objects, both in SHA-1.
 pub fn serialize<T: for<'a> facet::Facet<'a>>(
     value: &T,
-) -> Result<(ObjectId, ObjectStore), SerializeError> {
+) -> Result<(Oid<Sha1>, ObjectStore<Sha1>), SerializeError> {
     let store = ObjectStore::default();
     let root = serialize_root(Peek::new(value), &store)?;
     Ok((root, store))
 }
 
-fn serialize_root<W: Write + ?Sized>(
-    peek: Peek<'_, '_>,
-    store: &W,
-) -> Result<ObjectId, SerializeError> {
+fn serialize_root<F, W>(peek: Peek<'_, '_>, store: &W) -> Result<Oid<F>, SerializeError>
+where
+    F: HashFormat,
+    W: Write + Tagged<F> + ?Sized,
+{
     let (oid, _kind) = serialize_node(peek, store, 0)?;
     Ok(oid)
 }
 
-pub(crate) fn serialize_node<W: Write + ?Sized>(
+pub(crate) fn serialize_node<F, W>(
     peek: Peek<'_, '_>,
     store: &W,
     depth: usize,
-) -> Result<(ObjectId, EntryKind), SerializeError> {
+) -> Result<(Oid<F>, EntryKind), SerializeError>
+where
+    F: HashFormat,
+    W: Write + Tagged<F> + ?Sized,
+{
     check_depth(depth)?;
     let peek = peek.innermost_peek();
     let shape = peek.shape();
@@ -89,11 +113,13 @@ pub(crate) fn serialize_node<W: Write + ?Sized>(
 
     match classify(shape) {
         ShapeClass::RawTree => {
-            let rt = peek.get::<RawTree>().map_err(reflect)?;
+            // The shape is `RawTree<F'>`; requesting `RawTree<F>` fails for a
+            // tree of the other format, so a mismatched passthrough is refused.
+            let rt = peek.get::<RawTree<F>>().map_err(reflect)?;
             Ok((rt.oid(), EntryKind::Tree))
         }
         ShapeClass::RawBlob => {
-            let rb = peek.get::<RawBlob>().map_err(reflect)?;
+            let rb = peek.get::<RawBlob<F>>().map_err(reflect)?;
             Ok((rb.oid(), EntryKind::Blob))
         }
         ShapeClass::Dynamic => serialize_dynamic(peek, store, depth),
@@ -111,18 +137,26 @@ pub(crate) fn serialize_node<W: Write + ?Sized>(
     }
 }
 
-fn serialize_leaf<W: Write + ?Sized>(
+fn serialize_leaf<F, W>(
     peek: Peek<'_, '_>,
     store: &W,
-) -> Result<(ObjectId, EntryKind), SerializeError> {
+) -> Result<(Oid<F>, EntryKind), SerializeError>
+where
+    F: HashFormat,
+    W: Write + Tagged<F> + ?Sized,
+{
     let oid = write_leaf_blob(store, &scalar_bytes(peek)?)?;
     Ok((oid, EntryKind::Blob))
 }
 
-fn serialize_byte_sequence<W: Write + ?Sized>(
+fn serialize_byte_sequence<F, W>(
     peek: Peek<'_, '_>,
     store: &W,
-) -> Result<(ObjectId, EntryKind), SerializeError> {
+) -> Result<(Oid<F>, EntryKind), SerializeError>
+where
+    F: HashFormat,
+    W: Write + Tagged<F> + ?Sized,
+{
     // Bulk path: a contiguous `u8` list-like (Vec, array, slice) hands over
     // its whole buffer in one call instead of one reflection call per byte —
     // the per-byte loop below is the fallback for non-contiguous element
@@ -140,11 +174,15 @@ fn serialize_byte_sequence<W: Write + ?Sized>(
     Ok((oid, EntryKind::Blob))
 }
 
-fn serialize_struct<W: Write + ?Sized>(
+fn serialize_struct<F, W>(
     peek: Peek<'_, '_>,
     store: &W,
     depth: usize,
-) -> Result<(ObjectId, EntryKind), SerializeError> {
+) -> Result<(Oid<F>, EntryKind), SerializeError>
+where
+    F: HashFormat,
+    W: Write + Tagged<F> + ?Sized,
+{
     let facet::Type::User(facet::UserType::Struct(st)) = peek.shape().ty else {
         return Err(SerializeError::Unsupported(peek.shape().type_identifier));
     };
@@ -165,18 +203,22 @@ fn serialize_struct<W: Write + ?Sized>(
         entries.push(TreeEntry {
             mode: EntryMode::from(kind),
             filename: filename.into(),
-            oid,
+            oid: oid.into_raw(),
         });
     }
     Ok((write_tree_or_marker(store, entries)?, EntryKind::Tree))
 }
 
 /// Serialize a sequence as an ordinal-named tree, or the marker if empty.
-fn serialize_sequence<W: Write + ?Sized>(
+fn serialize_sequence<F, W>(
     peek: Peek<'_, '_>,
     store: &W,
     depth: usize,
-) -> Result<(ObjectId, EntryKind), SerializeError> {
+) -> Result<(Oid<F>, EntryKind), SerializeError>
+where
+    F: HashFormat,
+    W: Write + Tagged<F> + ?Sized,
+{
     let seq = peek.into_list_like().map_err(reflect)?;
     check_tree_len(seq.len())?;
     let mut entries = Vec::with_capacity(seq.len());
@@ -186,18 +228,22 @@ fn serialize_sequence<W: Write + ?Sized>(
         entries.push(TreeEntry {
             mode: EntryMode::from(kind),
             filename: filename.into(),
-            oid,
+            oid: oid.into_raw(),
         });
     }
     Ok((write_tree_or_marker(store, entries)?, EntryKind::Tree))
 }
 
 /// Serialize string-keyed maps as trees and other maps as canonical CBOR blobs.
-fn serialize_map<W: Write + ?Sized>(
+fn serialize_map<F, W>(
     peek: Peek<'_, '_>,
     store: &W,
     depth: usize,
-) -> Result<(ObjectId, EntryKind), SerializeError> {
+) -> Result<(Oid<F>, EntryKind), SerializeError>
+where
+    F: HashFormat,
+    W: Write + Tagged<F> + ?Sized,
+{
     let shape = peek.shape();
     let Def::Map(md) = shape.def else {
         return Err(SerializeError::Unsupported(shape.type_identifier));
@@ -229,17 +275,21 @@ fn serialize_map<W: Write + ?Sized>(
         entries.push(TreeEntry {
             mode: EntryMode::from(kind),
             filename: filename.into(),
-            oid,
+            oid: oid.into_raw(),
         });
     }
     Ok((write_tree_or_marker(store, entries)?, EntryKind::Tree))
 }
 
-fn serialize_option<W: Write + ?Sized>(
+fn serialize_option<F, W>(
     peek: Peek<'_, '_>,
     store: &W,
     depth: usize,
-) -> Result<(ObjectId, EntryKind), SerializeError> {
+) -> Result<(Oid<F>, EntryKind), SerializeError>
+where
+    F: HashFormat,
+    W: Write + Tagged<F> + ?Sized,
+{
     let po = peek.into_option().map_err(reflect)?;
     let Some(inner) = po.value() else {
         return Ok((write_tree_or_marker(store, Vec::new())?, EntryKind::Tree));
@@ -248,16 +298,20 @@ fn serialize_option<W: Write + ?Sized>(
     let entries = vec![TreeEntry {
         mode: EntryMode::from(kind),
         filename: crate::marker::SOME_KEY.into(),
-        oid,
+        oid: oid.into_raw(),
     }];
     Ok((write_sorted_tree(store, entries)?, EntryKind::Tree))
 }
 
-fn serialize_enum<W: Write + ?Sized>(
+fn serialize_enum<F, W>(
     peek: Peek<'_, '_>,
     store: &W,
     depth: usize,
-) -> Result<(ObjectId, EntryKind), SerializeError> {
+) -> Result<(Oid<F>, EntryKind), SerializeError>
+where
+    F: HashFormat,
+    W: Write + Tagged<F> + ?Sized,
+{
     let pe = peek.into_enum().map_err(reflect)?;
     let variant = pe.active_variant().map_err(reflect)?;
     let variant_name = escaped_name(variant.effective_name())?;
@@ -298,7 +352,7 @@ fn serialize_enum<W: Write + ?Sized>(
             entries.push(TreeEntry {
                 mode: EntryMode::from(kind),
                 filename: filename.into(),
-                oid,
+                oid: oid.into_raw(),
             });
         }
         (write_tree_or_marker(store, entries)?, EntryKind::Tree)
@@ -306,15 +360,16 @@ fn serialize_enum<W: Write + ?Sized>(
     let entries = vec![TreeEntry {
         mode: EntryMode::from(inner_kind),
         filename: variant_name.into(),
-        oid: inner_oid,
+        oid: inner_oid.into_raw(),
     }];
     Ok((write_sorted_tree(store, entries)?, EntryKind::Tree))
 }
 
-fn write_sorted_tree<W: Write + ?Sized>(
-    store: &W,
-    mut entries: Vec<TreeEntry>,
-) -> Result<ObjectId, SerializeError> {
+fn write_sorted_tree<F, W>(store: &W, mut entries: Vec<TreeEntry>) -> Result<Oid<F>, SerializeError>
+where
+    F: HashFormat,
+    W: Write + ?Sized,
+{
     check_tree_len(entries.len())?;
     if entries.is_empty() {
         return Err(reflect("cannot write a literal empty tree"));
@@ -331,15 +386,18 @@ fn write_sorted_tree<W: Write + ?Sized>(
     // `Entry::Ord` is gix's Git comparator, including the implicit slash for
     // directories. A bytewise name sort is not equivalent for prefix names.
     entries.sort();
-    store
-        .write(&gix_object::Tree { entries })
-        .map_err(SerializeError::Backend)
+    wrap_oid(
+        store
+            .write(&gix_object::Tree { entries })
+            .map_err(SerializeError::Backend)?,
+    )
 }
 
-fn write_tree_or_marker<W: Write + ?Sized>(
-    store: &W,
-    entries: Vec<TreeEntry>,
-) -> Result<ObjectId, SerializeError> {
+fn write_tree_or_marker<F, W>(store: &W, entries: Vec<TreeEntry>) -> Result<Oid<F>, SerializeError>
+where
+    F: HashFormat,
+    W: Write + ?Sized,
+{
     if entries.is_empty() {
         crate::marker::write_marker_tree(store)
     } else {
@@ -352,21 +410,24 @@ fn write_tree_or_marker<W: Write + ?Sized>(
 ///
 /// Dynamic kinds carry no on-disk tag. Values whose textual representation
 /// cannot be recovered exactly from the runtime interface are rejected.
-fn serialize_dynamic<W: Write + ?Sized>(
+fn serialize_dynamic<F, W>(
     peek: Peek<'_, '_>,
     store: &W,
     depth: usize,
-) -> Result<(ObjectId, EntryKind), SerializeError> {
+) -> Result<(Oid<F>, EntryKind), SerializeError>
+where
+    F: HashFormat,
+    W: Write + Tagged<F> + ?Sized,
+{
     let dv = peek.into_dynamic_value().map_err(reflect)?;
 
-    let blob = |bytes: &[u8]| -> Result<(ObjectId, EntryKind), SerializeError> {
+    let blob = |bytes: &[u8]| -> Result<(Oid<F>, EntryKind), SerializeError> {
         let oid = write_leaf_blob(store, bytes)?;
         Ok((oid, EntryKind::Blob))
     };
-    let tree_or_marker =
-        |entries: Vec<TreeEntry>| -> Result<(ObjectId, EntryKind), SerializeError> {
-            Ok((write_tree_or_marker(store, entries)?, EntryKind::Tree))
-        };
+    let tree_or_marker = |entries: Vec<TreeEntry>| -> Result<(Oid<F>, EntryKind), SerializeError> {
+        Ok((write_tree_or_marker(store, entries)?, EntryKind::Tree))
+    };
 
     match dv.kind() {
         DynValueKind::Null => tree_or_marker(vec![]),
@@ -439,7 +500,7 @@ fn serialize_dynamic<W: Write + ?Sized>(
                 entries.push(TreeEntry {
                     mode: EntryMode::from(kind),
                     filename: filename.into(),
-                    oid,
+                    oid: oid.into_raw(),
                 });
             }
             tree_or_marker(entries)
@@ -456,7 +517,7 @@ fn serialize_dynamic<W: Write + ?Sized>(
                 entries.push(TreeEntry {
                     mode: EntryMode::from(kind),
                     filename: filename.into(),
-                    oid,
+                    oid: oid.into_raw(),
                 });
             }
             tree_or_marker(entries)
@@ -570,26 +631,32 @@ fn value_special_text(peek: Peek<'_, '_>) -> Result<Option<String>, SerializeErr
 
 /// Write `content` as a leaf blob with exactly one trailing `\n`, so
 /// content ending in `\n` stays distinguishable from content that does not.
-pub(crate) fn write_leaf_blob<W: Write + ?Sized>(
-    store: &W,
-    content: &[u8],
-) -> Result<ObjectId, SerializeError> {
+pub(crate) fn write_leaf_blob<F, W>(store: &W, content: &[u8]) -> Result<Oid<F>, SerializeError>
+where
+    F: HashFormat,
+    W: Write + ?Sized,
+{
     let mut bytes = Vec::with_capacity(content.len() + 1);
     bytes.extend_from_slice(content);
     bytes.push(b'\n');
-    store
-        .write_buf(Kind::Blob, &bytes)
-        .map_err(SerializeError::Backend)
+    wrap_oid(
+        store
+            .write_buf(Kind::Blob, &bytes)
+            .map_err(SerializeError::Backend)?,
+    )
 }
 
 /// Write a byte or CBOR leaf without a trailing newline.
-pub(crate) fn write_binary_blob<W: Write + ?Sized>(
-    store: &W,
-    content: &[u8],
-) -> Result<ObjectId, SerializeError> {
-    store
-        .write_buf(Kind::Blob, content)
-        .map_err(SerializeError::Backend)
+pub(crate) fn write_binary_blob<F, W>(store: &W, content: &[u8]) -> Result<Oid<F>, SerializeError>
+where
+    F: HashFormat,
+    W: Write + ?Sized,
+{
+    wrap_oid(
+        store
+            .write_buf(Kind::Blob, content)
+            .map_err(SerializeError::Backend)?,
+    )
 }
 
 fn scalar_bytes(peek: Peek<'_, '_>) -> Result<Vec<u8>, SerializeError> {

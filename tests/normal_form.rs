@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use facet::Facet;
 use facet_git_tree::normal_form::{self, Key, NormalForm};
 use facet_git_tree::{
-    IDENTITY_DEF_PREFIX, Node, ObjectId, UniverseError, check_identity_subtrees, check_universe,
-    identity_subtrees, schema_of, serialize,
+    IDENTITY_DEF_PREFIX, Node, ObjectId, Oid, UniverseError, check_identity_subtrees,
+    check_universe, identity_subtrees, schema_of, serialize,
 };
 
 /// An anchor identity: the three non-derivable coordinates, all in the
@@ -159,7 +159,13 @@ fn leaf_blobs_hold_exactly_the_frozen_bytes() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].filename.to_string(), "none");
     assert_eq!(entries[0].mode.kind(), facet_git_tree::EntryKind::Blob);
-    assert!(store.get_blob(&entries[0].oid).unwrap().unwrap().is_empty());
+    assert!(
+        store
+            .get_blob(&Oid::new(entries[0].oid).expect("fixtures use sha1"))
+            .unwrap()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// Lists use three-digit lowercase hexadecimal ordinals; map keys are escaped.
@@ -182,10 +188,10 @@ fn composite_entry_names_are_frozen() {
     );
 
     let (oid, store) = normal_form::hash(&NormalForm::Map(BTreeMap::from([
-        (Key::Str("7".to_owned()), NormalForm::U8(0)),
-        (Key::Str("11".to_owned()), NormalForm::U8(1)),
-        (Key::Str("some".to_owned()), NormalForm::U8(2)),
-        (Key::Str("a/b".to_owned()), NormalForm::U8(3)),
+        (Key::new("7"), NormalForm::U8(0)),
+        (Key::new("11"), NormalForm::U8(1)),
+        (Key::new("some"), NormalForm::U8(2)),
+        (Key::new("a/b"), NormalForm::U8(3)),
     ])))
     .unwrap();
     let names: Vec<String> = store
@@ -214,22 +220,16 @@ fn map_key_names_are_escaped_and_invalid_keys_are_refused() {
         ("\0", "%%00"),
         ("naïve", "%na%C3%AFve"),
     ] {
-        let value = NormalForm::Map(BTreeMap::from([(
-            Key::Str(name.to_owned()),
-            NormalForm::U8(0),
-        )]));
+        let value = NormalForm::Map(BTreeMap::from([(Key::new(name), NormalForm::U8(0))]));
         let (oid, store) = normal_form::hash(&value).unwrap();
         let entries = store.get_tree(&oid).expect("read object").unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].filename.to_string(), expected);
     }
 
-    for key in [
-        Key::U16(7),
-        Key::Bool(true),
-        Key::Str("a".repeat(256)),
-        Key::Str("é".repeat(43)),
-    ] {
+    // Only string keys are representable, so the rejections that remain are
+    // names whose escaped encoding exceeds the frozen 255-byte limit.
+    for key in [Key::new("a".repeat(256)), Key::new("é".repeat(43))] {
         let value = NormalForm::Map(BTreeMap::from([(key, NormalForm::U8(0))]));
         assert!(matches!(
             normal_form::hash(&value),
@@ -273,7 +273,7 @@ fn struct_field_names_are_escaped_and_overlong_names_are_refused() {
 #[test]
 fn an_identity_shaped_schema_is_in_the_universe() {
     let doc = schema_of::<Identity>().unwrap();
-    check_universe(&doc.root, &doc.defs).unwrap();
+    check_universe(doc.root(), doc.defs()).unwrap();
     check_identity_subtrees(&doc).unwrap();
 }
 
@@ -294,11 +294,11 @@ fn an_enum_leaves_the_universe() {
 #[test]
 fn options_and_dynamic_nodes_are_excluded() {
     let doc = schema_of::<Hints>().unwrap();
-    let excluded = |node: &Node| match check_universe(node, &doc.defs) {
+    let excluded = |node: &Node| match check_universe(node, doc.defs()) {
         Err(UniverseError::Excluded { found, .. }) => found,
         other => panic!("expected an exclusion, got {other:?}"),
     };
-    assert_eq!(excluded(&doc.root), "Optional");
+    assert_eq!(excluded(doc.root()), "Optional");
     assert_eq!(excluded(&Node::Dynamic), "Dynamic");
     assert_eq!(excluded(&Node::RawTree), "RawTree");
     assert_eq!(excluded(&Node::Unit), "Unit");
@@ -330,7 +330,7 @@ fn the_marker_lands_in_the_schema_document() {
     let marked: Vec<&str> = identity_subtrees(&doc).map(|(name, _)| name).collect();
     assert_eq!(marked, [format!("{IDENTITY_DEF_PREFIX}0").as_str()]);
 
-    let Node::Struct(fields) = &doc.defs["Binding"] else {
+    let Node::Struct(fields) = &doc.defs()["Binding"] else {
         panic!("Binding is a named-field struct");
     };
     assert_eq!(

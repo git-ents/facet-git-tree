@@ -19,8 +19,8 @@ use facet::{ConstTypeId, Def, Facet, ScalarType, Shape};
 
 use crate::attr;
 use crate::classify::{ShapeClass, classify};
-use crate::de::collapse_shape;
-use crate::error::SchemaError;
+use crate::de::{MAX_DECODE_VISITS, collapse_shape};
+use crate::error::{DeserializeError, SchemaError, SchemaReadError};
 use crate::limits::MAX_VALUE_DEPTH;
 use crate::normal_form::IDENTITY_DEF_PREFIX;
 use crate::ordinal::MAX_TREE_ENTRIES;
@@ -32,15 +32,270 @@ use facet_value::Value;
 ///
 /// `kind` is an opaque label, not a type check. `root` describes the value,
 /// and `defs` holds the named types referenced by [`Node::Ref`].
+///
+/// This is the wire/`Facet` type: it is what is decoded from and encoded to
+/// the store, and its fields are private so a structurally ill-formed
+/// document must be built through [`Schema::new`]. Being able to *hold* a
+/// `Schema` is not, however, a claim that it is well-formed — a decoded or
+/// externally-sourced document may not be. Schema-directed decoding and
+/// encoding therefore take a [`CheckedSchema`], the type that carries the
+/// proven-well-formed fact.
 #[derive(Debug, Clone, PartialEq, Facet)]
 pub struct Schema {
     /// An opaque entity-kind label; it is not used to decode the value.
-    pub kind: String,
+    kind: String,
     /// The schema of the value itself. Named user types appear as
     /// [`Node::Ref`] nodes resolved through `defs`.
-    pub root: Node,
+    root: Node,
     /// The definition table for named user types, keyed by assigned name.
-    pub defs: BTreeMap<String, Node>,
+    defs: BTreeMap<String, Node>,
+}
+
+/// A [`Schema`] proven well-formed by a full validation pass.
+///
+/// Borrows the document it validated: the value is a zero-copy view that can
+/// only be obtained through [`Schema::checked`] or [`TryFrom<&Schema>`], both
+/// of which run the well-formedness walk exactly once. Schema-directed
+/// entry points ([`deserialize_value_with_schema`], [`validate_with_schema`],
+/// [`serialize_value_with_schema`]) take a `&CheckedSchema` rather than a
+/// `&Schema`, so a document that reached them has provably passed validation
+/// and is not validated again.
+///
+/// [`deserialize_value_with_schema`]: crate::deserialize_value_with_schema
+/// [`validate_with_schema`]: crate::validate_with_schema
+/// [`serialize_value_with_schema`]: crate::serialize_value_with_schema
+#[derive(Debug, Clone, Copy)]
+pub struct CheckedSchema<'a> {
+    schema: &'a Schema,
+}
+
+impl<'a> CheckedSchema<'a> {
+    /// The validated document behind this token.
+    pub fn schema(&self) -> &'a Schema {
+        self.schema
+    }
+}
+
+impl<'a> TryFrom<&'a Schema> for CheckedSchema<'a> {
+    type Error = SchemaReadError;
+
+    fn try_from(schema: &'a Schema) -> Result<Self, SchemaReadError> {
+        validate_well_formed(schema)?;
+        Ok(CheckedSchema { schema })
+    }
+}
+
+/// Validate a schema document independently of any value.
+///
+/// Rejects a dangling [`Node::Ref`], a map key that is not literally
+/// [`Node::String`], an oversized container, an invalid entry name, nesting
+/// deeper than [`MAX_VALUE_DEPTH`], and — through [`scan_guards`] — an
+/// unguarded reference cycle. Guarded contents (`List`, `Array`, `Map`,
+/// `Optional`, `Enum`) break cycles but are still checked for the other
+/// violations. This is the one walk that produces a [`CheckedSchema`], so its
+/// accept/reject decisions are the schema-directed contract.
+fn validate_well_formed(doc: &Schema) -> Result<(), SchemaReadError> {
+    check_schema_len(doc.defs.len(), "definitions")?;
+    let mut pending = vec![(&doc.root, 0usize)];
+    for (name, node) in &doc.defs {
+        check_schema_name(name)?;
+        pending.push((node, 0));
+    }
+
+    let mut visited = 0usize;
+    while let Some((node, depth)) = pending.pop() {
+        if depth > MAX_VALUE_DEPTH {
+            return Err(DeserializeError::MaxDepth(MAX_VALUE_DEPTH).into());
+        }
+        visited += 1;
+        if visited > MAX_DECODE_VISITS {
+            return Err(invalid_schema("schema node limit exceeded"));
+        }
+        let next = depth + 1;
+        match node {
+            Node::Ref(name) => {
+                if !doc.defs.contains_key(name) {
+                    return Err(SchemaReadError::UnknownRef(name.clone()));
+                }
+            }
+            Node::List(elem) | Node::Optional(elem) => pending.push((elem, next)),
+            Node::Array { elem, len } => {
+                check_schema_len(*len, "array length")?;
+                pending.push((elem, next));
+            }
+            Node::Map { key, value } => {
+                if !matches!(key.as_ref(), Node::String) {
+                    return Err(invalid_schema("map key must be literally String"));
+                }
+                pending.push((key, next));
+                pending.push((value, next));
+            }
+            Node::Tuple(elems) => {
+                check_schema_len(elems.len(), "tuple arity")?;
+                pending.extend(elems.iter().map(|elem| (elem, next)));
+            }
+            Node::Struct(fields) => {
+                check_schema_fields(fields, &mut pending, next)?;
+            }
+            Node::Enum(variants) => {
+                check_schema_len(variants.len(), "enum variants")?;
+                for (name, kind) in variants {
+                    check_schema_name(name)?;
+                    match kind {
+                        VariantKind::Unit => {}
+                        VariantKind::Tuple(elems) => {
+                            check_schema_len(elems.len(), "tuple variant arity")?;
+                            pending.extend(elems.iter().map(|elem| (elem, next)));
+                        }
+                        VariantKind::Struct(fields) => {
+                            check_schema_fields(fields, &mut pending, next)?;
+                        }
+                    }
+                }
+            }
+            Node::Unit
+            | Node::Bool
+            | Node::Char
+            | Node::String
+            | Node::I8
+            | Node::I16
+            | Node::I32
+            | Node::I64
+            | Node::I128
+            | Node::ISize
+            | Node::U8
+            | Node::U16
+            | Node::U32
+            | Node::U64
+            | Node::U128
+            | Node::USize
+            | Node::F32
+            | Node::F64
+            | Node::Bytes
+            | Node::Cbor
+            | Node::RawTree
+            | Node::Dynamic => {}
+        }
+    }
+
+    match scan_guards(&doc.defs) {
+        GuardScan::Productive => Ok(()),
+        GuardScan::Dangling(name) => Err(SchemaReadError::UnknownRef(name.to_owned())),
+        GuardScan::Cyclic(cycle) => Err(invalid_schema(format!(
+            "unguarded reference cycle involving {:?}",
+            cycle.entered
+        ))),
+    }
+}
+
+fn check_schema_fields<'a>(
+    fields: &'a BTreeMap<String, Node>,
+    pending: &mut Vec<(&'a Node, usize)>,
+    depth: usize,
+) -> Result<(), SchemaReadError> {
+    check_schema_len(fields.len(), "struct fields")?;
+    for (name, node) in fields {
+        check_schema_name(name)?;
+        pending.push((node, depth));
+    }
+    Ok(())
+}
+
+fn check_schema_len(len: usize, what: &str) -> Result<(), SchemaReadError> {
+    if len > MAX_TREE_ENTRIES {
+        return Err(invalid_schema(format!(
+            "{what} has {len} entries, exceeding {MAX_TREE_ENTRIES}"
+        )));
+    }
+    Ok(())
+}
+
+fn check_schema_name(name: &str) -> Result<(), SchemaReadError> {
+    crate::name::escape(name)
+        .map(|_| ())
+        .map_err(|error| invalid_schema(format!("invalid name {name:?}: {error}")))
+}
+
+pub(crate) fn invalid_schema(reason: impl std::fmt::Display) -> SchemaReadError {
+    DeserializeError::Reflect(format!("invalid schema: {reason}")).into()
+}
+
+/// The definition a reference-cycle scan re-entered while it was still active.
+struct GuardCycle<'a> {
+    /// The definition whose traversal first reached the cycle.
+    root: &'a str,
+    /// The definition the traversal re-entered.
+    entered: &'a str,
+}
+
+/// The outcome of scanning a definition table for the one structural
+/// invariant shared by schema generation and schema-directed decoding: every
+/// definition must reach a concrete node without crossing an unguarded
+/// `Ref`/`Struct`/`Tuple` edge back into a definition already on the path.
+///
+/// `List`, `Array`, `Map`, `Optional`, and `Enum` are guards: their contents
+/// add a tree level, so a cycle through them is productive and permitted. The
+/// scan is stated here once and mapped to each caller's error type, so the
+/// invariant cannot drift between generation and validation.
+enum GuardScan<'a> {
+    /// Every definition is productive through guarded edges.
+    Productive,
+    /// A definition re-enters one already on the current path.
+    Cyclic(GuardCycle<'a>),
+    /// A `ref` names a definition absent from the table.
+    Dangling(&'a str),
+}
+
+/// Scan `defs` for an unguarded reference cycle or a dangling reference.
+///
+/// Iterative so a long alias chain cannot exhaust the call stack. `root` is
+/// the definition whose traversal detected the cycle; callers that label the
+/// offending definition by its originating type use it, callers that name the
+/// re-entered definition use `entered`.
+fn scan_guards(defs: &BTreeMap<String, Node>) -> GuardScan<'_> {
+    enum Visit<'a> {
+        Enter(&'a str),
+        Exit(&'a str),
+        Node(&'a Node),
+    }
+    // absent = unseen, false = active, true = complete.
+    let mut states: BTreeMap<&str, bool> = BTreeMap::new();
+    for name in defs.keys() {
+        let root = name.as_str();
+        let mut stack = vec![Visit::Enter(root)];
+        while let Some(visit) = stack.pop() {
+            match visit {
+                Visit::Enter(name) => match states.get(name) {
+                    Some(true) => {}
+                    Some(false) => {
+                        return GuardScan::Cyclic(GuardCycle {
+                            root,
+                            entered: name,
+                        });
+                    }
+                    None => {
+                        let Some(node) = defs.get(name) else {
+                            return GuardScan::Dangling(name);
+                        };
+                        states.insert(name, false);
+                        stack.push(Visit::Exit(name));
+                        stack.push(Visit::Node(node));
+                    }
+                },
+                Visit::Exit(name) => {
+                    states.insert(name, true);
+                }
+                Visit::Node(node) => match node {
+                    Node::Ref(name) => stack.push(Visit::Enter(name)),
+                    Node::Struct(fields) => stack.extend(fields.values().map(Visit::Node)),
+                    Node::Tuple(elems) => stack.extend(elems.iter().map(Visit::Node)),
+                    // Each of these is a guard, or has no outgoing edges.
+                    _ => {}
+                },
+            }
+        }
+    }
+    GuardScan::Productive
 }
 
 /// A single schema node: the shape of one value in the encoding.
@@ -217,6 +472,47 @@ pub enum RefError {
 }
 
 impl Schema {
+    /// Build a schema document, rejecting any that is not well-formed.
+    ///
+    /// Runs the full well-formedness walk — dangling references, unguarded
+    /// reference cycles, non-`String` map keys, oversized containers, invalid
+    /// entry names, and over-deep nesting — and returns the offending
+    /// [`SchemaReadError`] on the first violation. Because the fields are
+    /// private, this is the only way to build a `Schema` from parts.
+    pub fn new(
+        kind: String,
+        root: Node,
+        defs: BTreeMap<String, Node>,
+    ) -> Result<Self, SchemaReadError> {
+        let schema = Schema { kind, root, defs };
+        validate_well_formed(&schema)?;
+        Ok(schema)
+    }
+
+    /// The opaque entity-kind label.
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+
+    /// The schema of the value itself.
+    pub fn root(&self) -> &Node {
+        &self.root
+    }
+
+    /// The definition table for named user types.
+    pub fn defs(&self) -> &BTreeMap<String, Node> {
+        &self.defs
+    }
+
+    /// Validate this document and return the [`CheckedSchema`] token that the
+    /// schema-directed entry points accept.
+    ///
+    /// Runs the well-formedness walk exactly once; the returned borrow records
+    /// the fact so no entry point has to re-check.
+    pub fn checked(&self) -> Result<CheckedSchema<'_>, SchemaReadError> {
+        CheckedSchema::try_from(self)
+    }
+
     /// The concrete node the [`root`](Self::root) resolves to, following `ref`
     /// nodes through [`defs`](Self::defs).
     ///
@@ -292,9 +588,9 @@ pub(crate) fn value_kind(v: &Value) -> &'static str {
 /// }
 ///
 /// let doc = schema_of::<Point>()?;
-/// assert_eq!(doc.kind, "Point");
-/// assert_eq!(doc.root, Node::Ref("Point".into()));
-/// assert!(doc.defs.contains_key("Point"));
+/// assert_eq!(doc.kind(), "Point");
+/// assert_eq!(doc.root(), &Node::Ref("Point".into()));
+/// assert!(doc.defs().contains_key("Point"));
 /// # Ok::<(), facet_git_tree::SchemaError>(())
 /// ```
 pub fn schema_of<T: for<'a> Facet<'a>>() -> Result<Schema, SchemaError> {
@@ -337,12 +633,6 @@ impl Schema {
     }
 }
 
-enum NodeVisit<'a> {
-    EnterRef(&'a str),
-    ExitRef(&'a str),
-    Node(&'a Node),
-}
-
 /// The `Shape` → [`Node`] walker: tracks named-type definitions and the
 /// deterministic name assignment while recursing through a shape.
 struct Walker {
@@ -374,84 +664,21 @@ impl Walker {
     }
 
     /// Reject generated definition cycles that do not cross a productive
-    /// container. Definitions are checked separately so a cycle reachable
-    /// only through a guard is not missed.
+    /// container, mapping [`scan_guards`]'s finding to the identifier of the
+    /// definition whose traversal reached it.
     fn ensure_productive(&self) -> Result<(), SchemaError> {
-        // States are local to this pass: absent = unseen, false = active,
-        // true = complete. The explicit stack avoids unbounded call depth
-        // when many named shapes have been deduplicated through guards.
-        let mut states = HashMap::new();
-        for name in self.defs.keys() {
-            let mut pending = vec![(NodeVisit::EnterRef(name.as_str()), name.as_str())];
-            while let Some((visit, origin)) = pending.pop() {
-                match visit {
-                    NodeVisit::ExitRef(name) => {
-                        states.insert(name, true);
-                    }
-                    NodeVisit::EnterRef(name) => match states.get(name) {
-                        Some(true) => {}
-                        Some(false) => {
-                            let identifier = self
-                                .identifiers
-                                .get(origin)
-                                .copied()
-                                .unwrap_or("recursive schema");
-                            return Err(SchemaError::UnsupportedShape(identifier));
-                        }
-                        None => {
-                            let Some(node) = self.defs.get(name) else {
-                                return Err(SchemaError::UnsupportedShape("dangling schema ref"));
-                            };
-                            states.insert(name, false);
-                            pending.push((NodeVisit::ExitRef(name), origin));
-                            pending.push((NodeVisit::Node(node), origin));
-                        }
-                    },
-                    NodeVisit::Node(node) => match node {
-                        Node::Ref(name) => {
-                            pending.push((NodeVisit::EnterRef(name), origin));
-                        }
-                        Node::Struct(fields) => {
-                            pending.extend(
-                                fields.values().map(|node| (NodeVisit::Node(node), origin)),
-                            );
-                        }
-                        Node::Tuple(fields) => {
-                            pending
-                                .extend(fields.iter().map(|node| (NodeVisit::Node(node), origin)));
-                        }
-                        Node::List(_)
-                        | Node::Array { .. }
-                        | Node::Map { .. }
-                        | Node::Optional(_)
-                        | Node::Enum(_)
-                        | Node::Unit
-                        | Node::Bool
-                        | Node::Char
-                        | Node::String
-                        | Node::I8
-                        | Node::I16
-                        | Node::I32
-                        | Node::I64
-                        | Node::I128
-                        | Node::ISize
-                        | Node::U8
-                        | Node::U16
-                        | Node::U32
-                        | Node::U64
-                        | Node::U128
-                        | Node::USize
-                        | Node::F32
-                        | Node::F64
-                        | Node::Bytes
-                        | Node::Cbor
-                        | Node::RawTree
-                        | Node::Dynamic => {}
-                    },
-                }
+        match scan_guards(&self.defs) {
+            GuardScan::Productive => Ok(()),
+            GuardScan::Dangling(_) => Err(SchemaError::UnsupportedShape("dangling schema ref")),
+            GuardScan::Cyclic(cycle) => {
+                let identifier = self
+                    .identifiers
+                    .get(cycle.root)
+                    .copied()
+                    .unwrap_or("recursive schema");
+                Err(SchemaError::UnsupportedShape(identifier))
             }
         }
-        Ok(())
     }
 
     /// The schema of one shape, with `#[facet(facet_git_tree::identity_key)]`

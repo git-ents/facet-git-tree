@@ -4,7 +4,7 @@
 //! and every NaN payload to be written as `nan\n`.
 
 use facet::Facet;
-use facet_git_tree::{EntryKind, deserialize, serialize};
+use facet_git_tree::{EntryKind, Oid, deserialize, serialize};
 
 #[derive(Debug, Facet)]
 struct WithF32 {
@@ -33,7 +33,7 @@ fn serialize_scalar_f64(value: f64) -> Vec<u8> {
         "scalar `v` must serialize to a blob"
     );
     store
-        .get_blob(&v_entry.oid)
+        .get_blob(&Oid::new(v_entry.oid).expect("fixtures use sha1"))
         .expect("read object")
         .expect("blob must be in store")
         .to_vec()
@@ -50,7 +50,7 @@ fn serialize_scalar_f32(value: f32) -> Vec<u8> {
         .find(|e| e.filename == "v")
         .expect("struct must have field `v`");
     store
-        .get_blob(&v_entry.oid)
+        .get_blob(&Oid::new(v_entry.oid).expect("fixtures use sha1"))
         .expect("read object")
         .expect("blob must be in store")
         .to_vec()
@@ -70,7 +70,13 @@ fn f64_negative_zero_normalized_to_positive_zero() {
     );
     assert_eq!(pos_zero, b"0.0\n");
     let (id, store) = serialize(&WithF64 { v: -0.0 }).unwrap();
-    assert_eq!(deserialize::<WithF64>(&id, &store).unwrap().v.to_bits(), 0);
+    assert_eq!(
+        deserialize::<WithF64, _, _>(&id, &store)
+            .unwrap()
+            .v
+            .to_bits(),
+        0
+    );
 }
 
 /// f32 negative zero and positive zero produce identical blob content.
@@ -85,7 +91,13 @@ fn f32_negative_zero_normalized_to_positive_zero() {
     );
     assert_eq!(pos_zero, b"0.0\n");
     let (id, store) = serialize(&WithF32 { v: -0.0 }).unwrap();
-    assert_eq!(deserialize::<WithF32>(&id, &store).unwrap().v.to_bits(), 0);
+    assert_eq!(
+        deserialize::<WithF32, _, _>(&id, &store)
+            .unwrap()
+            .v
+            .to_bits(),
+        0
+    );
 }
 
 /// Two structs that differ only in the sign of zero produce the same root object ID.
@@ -116,7 +128,10 @@ fn f64_nan_normalized_to_string_nan() {
     );
     let (id, store) = serialize(&WithF64 { v: f64::NAN }).unwrap();
     assert_eq!(
-        deserialize::<WithF64>(&id, &store).unwrap().v.to_bits(),
+        deserialize::<WithF64, _, _>(&id, &store)
+            .unwrap()
+            .v
+            .to_bits(),
         0x7ff8_0000_0000_0000
     );
 }
@@ -132,7 +147,10 @@ fn f32_nan_normalized_to_string_nan() {
     );
     let (id, store) = serialize(&WithF32 { v: f32::NAN }).unwrap();
     assert_eq!(
-        deserialize::<WithF32>(&id, &store).unwrap().v.to_bits(),
+        deserialize::<WithF32, _, _>(&id, &store)
+            .unwrap()
+            .v
+            .to_bits(),
         0x7fc0_0000
     );
 }

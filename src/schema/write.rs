@@ -23,23 +23,25 @@ use gix_object::Write;
 
 use crate::error::{SchemaWriteError, SerializeError};
 use crate::float::{format_f32, format_f64};
+use crate::hash::{HashFormat, Oid, Tagged};
 use crate::limits::MAX_VALUE_DEPTH;
 use crate::ordinal::{self, MAX_TREE_ENTRIES};
 use crate::schema::path::Path;
-use crate::schema::{Node, RefError, Schema, VariantKind, value_kind};
-use crate::ser::{serialize_node, write_binary_blob, write_leaf_blob};
+use crate::schema::{CheckedSchema, Node, RefError, Schema, VariantKind, value_kind};
+use crate::ser::{serialize_node, wrap_oid, write_binary_blob, write_leaf_blob};
 use crate::{EntryKind, EntryMode, ObjectId, TreeEntry};
 
 /// Serialize the bare value described by `doc` into `store`.
 ///
 /// The returned object may be a tree or a blob; no `.schema` envelope is
-/// added. The full schema is validated before any value objects are written.
-/// A `Cbor` value must be bytes containing exactly one canonical CBOR item;
-/// those bytes are stored verbatim, without a binary or newline wrapper.
-/// An unwrapped null denotes `None`, so `Some(None)` and `Some(())` cannot be
-/// represented through this `Value` API. `store` is any `gix` [`Write`] sink,
-/// as for [`serialize_into`](crate::serialize_into). Value mismatches identify
-/// the offending path.
+/// added. The document reached here has already passed the full
+/// well-formedness walk that produced the [`CheckedSchema`]; it is not
+/// re-checked. A `Cbor` value must be bytes containing exactly one canonical
+/// CBOR item; those bytes are stored verbatim, without a binary or newline
+/// wrapper. An unwrapped null denotes `None`, so `Some(None)` and `Some(())`
+/// cannot be represented through this `Value` API. `store` is any `gix`
+/// [`Write`] sink, as for [`serialize_into`](crate::serialize_into). Value
+/// mismatches identify the offending path.
 ///
 /// ```
 /// use facet::Facet;
@@ -53,21 +55,22 @@ use crate::{EntryKind, EntryMode, ObjectId, TreeEntry};
 /// }
 ///
 /// let doc = schema_of::<Point>()?;
+/// let checked = doc.checked()?;
 /// let store = facet_git_tree::ObjectStore::default();
-/// let via_schema = serialize_value_with_schema(&value!({ "x": 1.0, "y": 2.0 }), &doc, &store)?;
+/// let via_schema = serialize_value_with_schema(&value!({ "x": 1.0, "y": 2.0 }), &checked, &store)?;
 ///
 /// // Identical to the typed encoding, down to the object id.
 /// let (typed, _) = serialize(&Point { x: 1.0, y: 2.0 })?;
 /// assert_eq!(via_schema, typed);
 /// # Ok::<(), anyhow::Error>(())
 /// ```
-pub fn serialize_value_with_schema<W: Write + ?Sized>(
+pub fn serialize_value_with_schema<F: HashFormat, W: Write + Tagged<F> + ?Sized>(
     value: &Value,
-    doc: &Schema,
+    doc: &CheckedSchema<'_>,
     store: &W,
-) -> Result<ObjectId, SchemaWriteError> {
-    crate::schema::read::validate_schema(doc).map_err(schema_error)?;
-    let (oid, _kind) = write_node(value, &doc.root, doc, store, &Path::ROOT, 0)?;
+) -> Result<Oid<F>, SchemaWriteError> {
+    let schema = doc.schema();
+    let (oid, _kind) = write_node(value, schema.root(), schema, store, &Path::ROOT, 0)?;
     Ok(oid)
 }
 
@@ -79,14 +82,14 @@ pub fn serialize_value_with_schema<W: Write + ?Sized>(
 ///
 /// `depth` counts encoded nesting levels against [`MAX_VALUE_DEPTH`];
 /// resolving a [`Node::Ref`] does not add a tree level.
-fn write_node<W: Write + ?Sized>(
+fn write_node<F: HashFormat, W: Write + Tagged<F> + ?Sized>(
     value: &Value,
     schema: &Node,
     doc: &Schema,
     store: &W,
     path: &Path,
     depth: usize,
-) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
+) -> Result<(Oid<F>, EntryKind), SchemaWriteError> {
     check_depth(path, depth)?;
     match schema {
         Node::Unit => {
@@ -115,21 +118,21 @@ fn write_node<W: Write + ?Sized>(
             Some(s) => blob(store, s.as_bytes()),
             None => Err(expected(path, "string", value)),
         },
-        Node::I8 => signed_blob::<i8, W>(value, "I8", path, store),
-        Node::I16 => signed_blob::<i16, W>(value, "I16", path, store),
-        Node::I32 => signed_blob::<i32, W>(value, "I32", path, store),
-        Node::I64 => signed_blob::<i64, W>(value, "I64", path, store),
-        Node::I128 => signed_blob::<i128, W>(value, "I128", path, store),
+        Node::I8 => signed_blob::<i8, _, _>(value, "I8", path, store),
+        Node::I16 => signed_blob::<i16, _, _>(value, "I16", path, store),
+        Node::I32 => signed_blob::<i32, _, _>(value, "I32", path, store),
+        Node::I64 => signed_blob::<i64, _, _>(value, "I64", path, store),
+        Node::I128 => signed_blob::<i128, _, _>(value, "I128", path, store),
         // `isize`/`usize` are spec'd i64/u64-shaped, so the schema-directed
         // writer renders them at the fixed width: the blob is target-
         // independent by construction, not by fixture discipline.
-        Node::ISize => signed_blob::<i64, W>(value, "ISize", path, store),
-        Node::U8 => unsigned_blob::<u8, W>(value, "U8", path, store),
-        Node::U16 => unsigned_blob::<u16, W>(value, "U16", path, store),
-        Node::U32 => unsigned_blob::<u32, W>(value, "U32", path, store),
-        Node::U64 => unsigned_blob::<u64, W>(value, "U64", path, store),
-        Node::U128 => unsigned_blob::<u128, W>(value, "U128", path, store),
-        Node::USize => unsigned_blob::<u64, W>(value, "USize", path, store),
+        Node::ISize => signed_blob::<i64, _, _>(value, "ISize", path, store),
+        Node::U8 => unsigned_blob::<u8, _, _>(value, "U8", path, store),
+        Node::U16 => unsigned_blob::<u16, _, _>(value, "U16", path, store),
+        Node::U32 => unsigned_blob::<u32, _, _>(value, "U32", path, store),
+        Node::U64 => unsigned_blob::<u64, _, _>(value, "U64", path, store),
+        Node::U128 => unsigned_blob::<u128, _, _>(value, "U128", path, store),
+        Node::USize => unsigned_blob::<u64, _, _>(value, "USize", path, store),
         Node::F64 => {
             let f = float64(value, path)?;
             blob(store, format_f64(f).as_bytes())
@@ -191,7 +194,7 @@ fn write_node<W: Write + ?Sized>(
                 entries.push(TreeEntry {
                     mode: EntryMode::from(kind),
                     filename: filename.into(),
-                    oid,
+                    oid: oid.into_raw(),
                 });
             }
             tree(store, entries, path)
@@ -215,7 +218,7 @@ fn write_node<W: Write + ?Sized>(
                 vec![TreeEntry {
                     mode: EntryMode::from(kind),
                     filename: crate::marker::SOME_KEY.into(),
-                    oid,
+                    oid: oid.into_raw(),
                 }],
                 path,
             )
@@ -223,15 +226,17 @@ fn write_node<W: Write + ?Sized>(
         Node::Enum(variants) => write_enum(value, variants, doc, store, path, depth),
         // A raw tree is opaque: the value is the referenced object id in hex,
         // handed straight back as a tree reference with no write — mirroring
-        // the typed `RawTree` encoding, which likewise emits no object.
+        // the typed `RawTree` encoding, which likewise emits no object. The
+        // parsed id must also use the store's hash format, so a wrong-format
+        // reference is refused here rather than embedded.
         Node::RawTree => {
             let s = value_str(value).ok_or_else(|| expected(path, "object-id string", value))?;
-            let oid = ObjectId::from_hex(s.as_bytes()).map_err(|_error| {
-                SchemaWriteError::InvalidRawTree {
-                    path: path.show(),
-                    text: s.to_owned(),
-                }
-            })?;
+            let invalid = || SchemaWriteError::InvalidRawTree {
+                path: path.show(),
+                text: s.to_owned(),
+            };
+            let raw = ObjectId::from_hex(s.as_bytes()).map_err(|_error| invalid())?;
+            let oid = Oid::<F>::new(raw).map_err(|_error| invalid())?;
             Ok((oid, EntryKind::Tree))
         }
         // A dynamic node carries no schema, so the bare heuristic write — the
@@ -241,7 +246,7 @@ fn write_node<W: Write + ?Sized>(
             // References are transparent on disk: a chain of aliases is
             // equivalent to its target, and following one must not consume
             // tree-depth budget or recurse on the stack.
-            let target = schema.resolve(&doc.defs).map_err(|error| match error {
+            let target = schema.resolve(doc.defs()).map_err(|error| match error {
                 RefError::Dangling { name } => SchemaWriteError::UnknownRef {
                     path: path.show(),
                     name,
@@ -256,14 +261,14 @@ fn write_node<W: Write + ?Sized>(
 }
 
 /// Encode the required named fields of a struct or struct variant.
-fn write_named_tree<W: Write + ?Sized>(
+fn write_named_tree<F: HashFormat, W: Write + Tagged<F> + ?Sized>(
     value: &Value,
     fields: &BTreeMap<String, Node>,
     doc: &Schema,
     store: &W,
     path: &Path,
     depth: usize,
-) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
+) -> Result<(Oid<F>, EntryKind), SchemaWriteError> {
     check_depth(path, depth)?;
     let obj = as_object(value, path)?;
     check_tree_len(fields.len(), path)?;
@@ -288,21 +293,21 @@ fn write_named_tree<W: Write + ?Sized>(
         entries.push(TreeEntry {
             mode: EntryMode::from(kind),
             filename: filename.into(),
-            oid,
+            oid: oid.into_raw(),
         });
     }
     tree(store, entries, path)
 }
 
 /// Encode an array as a tree of contiguous three-digit hexadecimal ordinals.
-fn write_seq<'s, W: Write + ?Sized>(
+fn write_seq<'s, F: HashFormat, W: Write + Tagged<F> + ?Sized>(
     arr: &VArray,
     schema_for: impl Fn(usize) -> &'s Node,
     doc: &Schema,
     store: &W,
     path: &Path,
     depth: usize,
-) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
+) -> Result<(Oid<F>, EntryKind), SchemaWriteError> {
     check_depth(path, depth)?;
     check_tree_len(arr.len(), path)?;
     let mut entries = Vec::with_capacity(arr.len());
@@ -313,7 +318,7 @@ fn write_seq<'s, W: Write + ?Sized>(
         entries.push(TreeEntry {
             mode: EntryMode::from(kind),
             filename: filename.into(),
-            oid,
+            oid: oid.into_raw(),
         });
     }
     tree(store, entries, path)
@@ -324,14 +329,14 @@ fn write_seq<'s, W: Write + ?Sized>(
 /// information content); every other variant is a single-member object whose
 /// value follows the variant's [`VariantKind`] layout, wrapped in a
 /// single-entry tree keyed by the name.
-fn write_enum<W: Write + ?Sized>(
+fn write_enum<F: HashFormat, W: Write + Tagged<F> + ?Sized>(
     value: &Value,
     variants: &BTreeMap<String, VariantKind>,
     doc: &Schema,
     store: &W,
     path: &Path,
     depth: usize,
-) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
+) -> Result<(Oid<F>, EntryKind), SchemaWriteError> {
     let obj = as_object(value, path)?;
     if obj.len() != 1 {
         return Err(SchemaWriteError::MalformedEnum {
@@ -384,7 +389,7 @@ fn write_enum<W: Write + ?Sized>(
         vec![TreeEntry {
             mode: EntryMode::from(inner_kind),
             filename: filename.into(),
-            oid: inner_oid,
+            oid: inner_oid.into_raw(),
         }],
         path,
     )
@@ -452,14 +457,15 @@ fn integer_is_exact_float(n: &VNumber, mantissa_bits: u32) -> bool {
 /// Signed integers of any width: the value must be an in-range integer (a
 /// float-backed number is refused — the read path never emits one for an
 /// integer node).
-fn signed_blob<T, W>(
+fn signed_blob<T, F, W>(
     value: &Value,
     schema: &'static str,
     path: &Path,
     store: &W,
-) -> Result<(ObjectId, EntryKind), SchemaWriteError>
+) -> Result<(Oid<F>, EntryKind), SchemaWriteError>
 where
     T: TryFrom<i128> + core::fmt::Display,
+    F: HashFormat,
     W: Write + ?Sized,
 {
     let n = as_integer(value, schema, path)?;
@@ -470,14 +476,15 @@ where
 
 /// Unsigned integers of any width. `to_u128` yields `None` for a negative
 /// value, which is how a negative number is rejected for an unsigned node.
-fn unsigned_blob<T, W>(
+fn unsigned_blob<T, F, W>(
     value: &Value,
     schema: &'static str,
     path: &Path,
     store: &W,
-) -> Result<(ObjectId, EntryKind), SchemaWriteError>
+) -> Result<(Oid<F>, EntryKind), SchemaWriteError>
 where
     T: TryFrom<u128> + core::fmt::Display,
+    F: HashFormat,
     W: Write + ?Sized,
 {
     let n = as_integer(value, schema, path)?;
@@ -540,41 +547,44 @@ fn as_object<'v>(
         .ok_or_else(|| expected(path, "object", value))
 }
 
-fn blob<W: Write + ?Sized>(
+fn blob<F: HashFormat, W: Write + ?Sized>(
     store: &W,
     bytes: &[u8],
-) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
+) -> Result<(Oid<F>, EntryKind), SchemaWriteError> {
     let oid = write_leaf_blob(store, bytes)?;
     Ok((oid, EntryKind::Blob))
 }
 
-fn binary_blob<W: Write + ?Sized>(
+fn binary_blob<F: HashFormat, W: Write + ?Sized>(
     store: &W,
     bytes: &[u8],
-) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
+) -> Result<(Oid<F>, EntryKind), SchemaWriteError> {
     let oid = write_binary_blob(store, bytes)?;
     Ok((oid, EntryKind::Blob))
 }
 
-fn tree<W: Write + ?Sized>(
+fn tree<F: HashFormat, W: Write + ?Sized>(
     store: &W,
     mut entries: Vec<TreeEntry>,
     path: &Path,
-) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
+) -> Result<(Oid<F>, EntryKind), SchemaWriteError> {
     check_tree_len(entries.len(), path)?;
     if entries.is_empty() {
         return marker_tree(store);
     }
     // gix sorts using Git's implicit slash on tree entries, not plain names.
     entries.sort();
-    let oid = store
+    let raw = store
         .write(&gix_object::Tree { entries })
         .map_err(SerializeError::Backend)?;
+    let oid = wrap_oid(raw)?;
     Ok((oid, EntryKind::Tree))
 }
 
 /// Write the `none` marker instead of an empty tree.
-fn marker_tree<W: Write + ?Sized>(store: &W) -> Result<(ObjectId, EntryKind), SchemaWriteError> {
+fn marker_tree<F: HashFormat, W: Write + ?Sized>(
+    store: &W,
+) -> Result<(Oid<F>, EntryKind), SchemaWriteError> {
     let oid = crate::marker::write_marker_tree(store)?;
     Ok((oid, EntryKind::Tree))
 }
@@ -612,16 +622,6 @@ fn escaped_name(name: &str, path: &Path) -> Result<String, SchemaWriteError> {
 
 fn invalid_schema(reason: &str) -> SchemaWriteError {
     SerializeError::Reflect(format!("invalid schema: {reason}")).into()
-}
-
-fn schema_error(error: crate::error::SchemaReadError) -> SchemaWriteError {
-    match error {
-        crate::error::SchemaReadError::UnknownRef(name) => SchemaWriteError::UnknownRef {
-            path: Path::ROOT.show(),
-            name,
-        },
-        other => invalid_schema(&other.to_string()),
-    }
 }
 
 fn expected(path: &Path, expected: &'static str, found: &Value) -> SchemaWriteError {
@@ -674,16 +674,13 @@ mod tests {
     use facet_value::{VObject, value};
 
     fn schema(root: Node) -> Schema {
-        Schema {
-            kind: "test".into(),
-            root,
-            defs: BTreeMap::new(),
-        }
+        Schema::new("test".into(), root, BTreeMap::new()).expect("valid schema")
     }
 
     #[test]
     fn cbor_writes_reject_invalid_bytes_and_other_value_kinds() {
         let doc = schema(Node::Cbor);
+        let doc = doc.checked().expect("valid schema");
         let store = ObjectStore::default();
         for (payload, reason) in [
             (vec![], "truncated"),
@@ -721,30 +718,35 @@ mod tests {
 
     #[test]
     fn cbor_nested_references_and_options_roundtrip() -> anyhow::Result<()> {
-        let mut doc = schema(Node::Ref("Root".into()));
-        doc.defs = BTreeMap::from([
-            (
-                "Root".into(),
-                Node::Struct(BTreeMap::from([
-                    ("direct".into(), Node::Ref("Alias".into())),
-                    (
-                        "items".into(),
-                        Node::List(Box::new(Node::Optional(Box::new(Node::Ref(
-                            "Payload".into(),
-                        ))))),
-                    ),
-                    (
-                        "variant".into(),
-                        Node::Enum(BTreeMap::from([(
-                            "Payload".into(),
-                            VariantKind::Tuple(vec![Node::Ref("Payload".into())]),
-                        )])),
-                    ),
-                ])),
-            ),
-            ("Alias".into(), Node::Ref("Payload".into())),
-            ("Payload".into(), Node::Cbor),
-        ]);
+        let doc = Schema::new(
+            "test".into(),
+            Node::Ref("Root".into()),
+            BTreeMap::from([
+                (
+                    "Root".into(),
+                    Node::Struct(BTreeMap::from([
+                        ("direct".into(), Node::Ref("Alias".into())),
+                        (
+                            "items".into(),
+                            Node::List(Box::new(Node::Optional(Box::new(Node::Ref(
+                                "Payload".into(),
+                            ))))),
+                        ),
+                        (
+                            "variant".into(),
+                            Node::Enum(BTreeMap::from([(
+                                "Payload".into(),
+                                VariantKind::Tuple(vec![Node::Ref("Payload".into())]),
+                            )])),
+                        ),
+                    ])),
+                ),
+                ("Alias".into(), Node::Ref("Payload".into())),
+                ("Payload".into(), Node::Cbor),
+            ]),
+        )
+        .expect("valid schema");
+        let doc = doc.checked()?;
         let direct: &[u8] = &[0x0a];
         let cbor_null: &[u8] = &[0xf6];
         let cbor_bytes: &[u8] = &[0x42, 0x00, 0xff];
@@ -767,6 +769,7 @@ mod tests {
             .find(|entry| entry.filename == "direct")
             .expect("direct field")
             .oid;
+        let direct_oid = Oid::<crate::hash::Sha1>::new(direct_oid).expect("direct id is sha1");
         assert_eq!(store.get_blob(&direct_oid)?.as_deref(), Some(direct));
         validate_with_schema(&root, &doc, &store)?;
         let decoded = deserialize_value_with_schema(&root, &doc, &store)?;
@@ -802,37 +805,29 @@ mod tests {
     }
 
     #[test]
-    fn cbor_keeps_full_schema_validation_before_value_walk() -> anyhow::Result<()> {
-        let store = ObjectStore::default();
-        let value = Value::from(vec![0x00]);
-        let oid = store
-            .write_buf(gix_object::Kind::Blob, &[0x00])
-            .map_err(SerializeError::Backend)?;
-        let mut doc = schema(Node::Cbor);
-        doc.defs
-            .insert("unused".into(), Node::Ref("missing".into()));
+    fn cbor_keeps_full_schema_validation_before_value_walk() {
+        let defs = |def: Node| BTreeMap::from([("unused".to_owned(), def)]);
+
+        // A dangling reference in an unused definition is rejected when the
+        // document is validated, not lazily when a value is walked.
         assert!(matches!(
-            serialize_value_with_schema(&value, &doc, &store),
-            Err(SchemaWriteError::UnknownRef { name, .. }) if name == "missing"
-        ));
-        assert!(matches!(
-            deserialize_value_with_schema(&oid, &doc, &store),
+            Schema::new("test".into(), Node::Cbor, defs(Node::Ref("missing".into()))),
             Err(crate::error::SchemaReadError::UnknownRef(name)) if name == "missing"
         ));
 
-        doc.defs.insert("unused".into(), Node::Ref("unused".into()));
-        assert!(serialize_value_with_schema(&value, &doc, &store).is_err());
-        assert!(deserialize_value_with_schema(&oid, &doc, &store).is_err());
-
-        doc.defs.insert(
-            "unused".into(),
-            Node::Map {
-                key: Box::new(Node::Cbor),
-                value: Box::new(Node::Cbor),
-            },
+        // An unguarded self-reference and a non-`String` map key are likewise
+        // rejected up front, before any value write can be attempted.
+        assert!(Schema::new("test".into(), Node::Cbor, defs(Node::Ref("unused".into()))).is_err());
+        assert!(
+            Schema::new(
+                "test".into(),
+                Node::Cbor,
+                defs(Node::Map {
+                    key: Box::new(Node::Cbor),
+                    value: Box::new(Node::Cbor),
+                }),
+            )
+            .is_err()
         );
-        assert!(serialize_value_with_schema(&value, &doc, &store).is_err());
-        assert!(deserialize_value_with_schema(&oid, &doc, &store).is_err());
-        Ok(())
     }
 }

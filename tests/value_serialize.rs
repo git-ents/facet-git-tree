@@ -10,7 +10,7 @@ use facet_git_tree::{EntryKind, serialize};
 use facet_value::{VArray, VDateTime, VObject, Value, value};
 
 mod common;
-use common::{HELLO_LEAF_BLOB_OID, WithValue, find_entry, tree_entries};
+use common::{HELLO_LEAF_BLOB_OID, WithValue, find_entry, tree_entries, typed};
 
 // --- scalar kinds ---
 
@@ -95,7 +95,7 @@ fn null_is_marker_tree() -> anyhow::Result<()> {
     assert_eq!(entries[0].mode.kind(), EntryKind::Blob);
     assert_eq!(
         store
-            .get_blob(&entries[0].oid)
+            .get_blob(&typed(&entries[0].oid))
             .expect("read object")
             .expect("marker blob"),
         b"",
@@ -120,7 +120,7 @@ fn array_is_ordinal_tree() -> anyhow::Result<()> {
     let first = find_entry(&store, &root, "000");
     assert_eq!(
         store
-            .get_blob(&first.oid)
+            .get_blob(&typed(&first.oid))
             .expect("read object")
             .expect("blob"),
         b"a\n"
@@ -142,7 +142,7 @@ fn array_ordinals_are_lowercase_hex() -> anyhow::Result<()> {
         assert_eq!(entry.filename.to_string(), format!("{i:03x}"));
         assert_eq!(entry.mode.kind(), EntryKind::Blob);
         assert_eq!(
-            store.get_blob(&entry.oid)?.as_deref(),
+            store.get_blob(&typed(&entry.oid))?.as_deref(),
             Some(format!("{i}\n").as_bytes())
         );
     }
@@ -165,7 +165,7 @@ fn object_is_sorted_name_keyed_tree() -> anyhow::Result<()> {
     let alpha = find_entry(&store, &root, "alpha");
     assert_eq!(
         store
-            .get_blob(&alpha.oid)
+            .get_blob(&typed(&alpha.oid))
             .expect("read object")
             .expect("blob"),
         b"a\n"
@@ -183,7 +183,7 @@ fn empty_object_is_marker_tree() -> anyhow::Result<()> {
     assert_eq!(entries[0].filename, "none");
     assert_eq!(entries[0].mode.kind(), EntryKind::Blob);
     assert_eq!(
-        store.get_blob(&entries[0].oid)?.as_deref(),
+        store.get_blob(&typed(&entries[0].oid))?.as_deref(),
         Some(b"".as_slice())
     );
 
@@ -231,7 +231,7 @@ fn object_keys_are_escaped() -> anyhow::Result<()> {
         let entry = find_entry(&store, &root, encoded);
         assert_eq!(entry.mode.kind(), EntryKind::Blob, "{encoded}");
         assert_eq!(
-            store.get_blob(&entry.oid)?.as_deref(),
+            store.get_blob(&typed(&entry.oid))?.as_deref(),
             Some(value.as_bytes()),
             "{encoded}"
         );
@@ -263,7 +263,10 @@ fn value_nested_in_typed_struct() -> anyhow::Result<()> {
     assert_eq!(entry.oid, standalone_root);
     let k = find_entry(&store, &entry.oid, "k");
     assert_eq!(
-        store.get_blob(&k.oid).expect("read object").expect("blob"),
+        store
+            .get_blob(&typed(&k.oid))
+            .expect("read object")
+            .expect("blob"),
         b"v\n"
     );
     Ok(())

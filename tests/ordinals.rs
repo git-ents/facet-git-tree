@@ -1,11 +1,11 @@
 //! Positional entries use fixed-width, lowercase hexadecimal ordinals.
 
-use facet_git_tree::{EntryKind, ObjectId, ObjectStore, deserialize, serialize};
-use gix_object::{Kind, Write as _};
+use facet_git_tree::{EntryKind, ObjectStore, Oid, Sha1, deserialize, serialize};
+use gix_object::Kind;
 use proptest::prelude::*;
 
 mod common;
-use common::{WithArray, WithVec, get_tree_entry_mode, tree_entries};
+use common::{WithArray, WithVec, get_tree_entry_mode, tree_entries, typed};
 
 #[test]
 fn vec_elements_use_three_digit_hexadecimal_names() {
@@ -32,7 +32,7 @@ fn vec_elements_use_three_digit_hexadecimal_names() {
             .all(|entry| entry.mode.kind() == EntryKind::Blob)
     );
     assert_eq!(
-        deserialize::<WithVec>(&root, &store).expect("deserialize"),
+        deserialize::<WithVec, _, _>(&root, &store).expect("deserialize"),
         input
     );
 }
@@ -50,7 +50,7 @@ fn non_byte_array_elements_use_three_digit_hexadecimal_names() {
         .collect();
     assert_eq!(names, ["000", "001", "002", "003"]);
     assert_eq!(
-        deserialize::<WithArray>(&root, &store).expect("deserialize"),
+        deserialize::<WithArray, _, _>(&root, &store).expect("deserialize"),
         input
     );
 }
@@ -75,7 +75,7 @@ fn entry_cap_is_4096_with_fff_as_last_ordinal() {
     );
 }
 
-fn foreign_tree(store: &ObjectStore, names: &[&[u8]]) -> ObjectId {
+fn foreign_tree(store: &ObjectStore, names: &[&[u8]]) -> Oid<Sha1> {
     let value = store.write_buf(Kind::Blob, b"1\n").expect("write value");
     let mut bytes = Vec::new();
     for name in names {
@@ -102,7 +102,7 @@ fn rejects_foreign_width_case_gaps_duplicates_and_order() {
     ] {
         let root = foreign_tree(&store, &names);
         assert!(
-            deserialize::<Vec<i64>>(&root, &store).is_err(),
+            deserialize::<Vec<i64>, _, _>(&root, &store).is_err(),
             "accepted {names:?}"
         );
     }
@@ -113,7 +113,7 @@ fn rejects_foreign_width_case_gaps_duplicates_and_order() {
     names[10] = b"00A".to_vec();
     let root = foreign_tree(&store, &names.iter().map(Vec::as_slice).collect::<Vec<_>>());
     assert!(
-        deserialize::<Vec<i64>>(&root, &store).is_err(),
+        deserialize::<Vec<i64>, _, _>(&root, &store).is_err(),
         "uppercase hex must be rejected"
     );
 }
@@ -126,7 +126,7 @@ fn array_length_must_match_ordinal_count() {
         vec![b"000".as_slice(), b"001", b"002"],
     ] {
         let root = foreign_tree(&store, &names);
-        assert!(deserialize::<[i64; 2]>(&root, &store).is_err());
+        assert!(deserialize::<[i64; 2], _, _>(&root, &store).is_err());
     }
 }
 
@@ -163,11 +163,13 @@ fn empty_sequence_uses_none_tree_and_empty_blob() {
     assert_eq!(entries[0].filename, "none");
     assert_eq!(entries[0].mode.kind(), EntryKind::Blob);
     assert_eq!(
-        store.get_blob(&entries[0].oid).expect("read marker"),
+        store
+            .get_blob(&typed(&entries[0].oid))
+            .expect("read marker"),
         Some(vec![])
     );
     assert_eq!(
-        deserialize::<WithVec>(&root, &store).expect("deserialize"),
+        deserialize::<WithVec, _, _>(&root, &store).expect("deserialize"),
         input
     );
 }

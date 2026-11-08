@@ -8,8 +8,10 @@ use std::collections::BTreeMap;
 use std::fmt::Debug;
 
 use facet::Facet;
-use facet_git_tree::{DeserializeError, Node, ObjectId, ObjectStore, deserialize, serialize};
-use gix_object::{Kind, Write as _};
+use facet_git_tree::{
+    DeserializeError, Node, ObjectId, ObjectStore, Oid, Sha1, deserialize, serialize,
+};
+use gix_object::Kind;
 use proptest::prelude::*;
 
 const BLOB: u16 = 0o100644;
@@ -108,8 +110,16 @@ struct Generated {
     task: Task,
 }
 
+/// Wrap a bare object id as a SHA-1 id, as the read helpers need.
+fn typed(oid: &ObjectId) -> Oid<Sha1> {
+    Oid::new(*oid).expect("fixtures use sha1")
+}
+
 fn blob(store: &ObjectStore, bytes: &[u8]) -> ObjectId {
-    store.write_buf(Kind::Blob, bytes).expect("write blob")
+    store
+        .write_buf(Kind::Blob, bytes)
+        .expect("write blob")
+        .into_raw()
 }
 
 // Raw entries are (ASCII mode, filename bytes, object id), already in the
@@ -125,11 +135,17 @@ fn foreign_tree(store: &ObjectStore, entries: &[ForeignEntry<'_>]) -> ObjectId {
         bytes.push(0);
         bytes.extend_from_slice(oid.as_bytes());
     }
-    store.write_buf(Kind::Tree, &bytes).expect("write raw tree")
+    store
+        .write_buf(Kind::Tree, &bytes)
+        .expect("write raw tree")
+        .into_raw()
 }
 
 fn assert_tree(store: &ObjectStore, oid: &ObjectId, expected: &[(&str, u16)]) -> Vec<ObjectId> {
-    let entries = store.get_tree(oid).expect("read object").expect("tree");
+    let entries = store
+        .get_tree(&typed(oid))
+        .expect("read object")
+        .expect("tree");
     assert_eq!(entries.len(), expected.len(), "tree {oid}: {entries:?}");
     for (entry, (name, mode)) in entries.iter().zip(expected) {
         let actual: &[u8] = entry.filename.as_ref();
@@ -141,7 +157,10 @@ fn assert_tree(store: &ObjectStore, oid: &ObjectId, expected: &[(&str, u16)]) ->
 
 fn assert_blob(store: &ObjectStore, oid: &ObjectId, expected: &[u8]) {
     assert_eq!(
-        store.get_blob(oid).expect("read object").expect("blob"),
+        store
+            .get_blob(&typed(oid))
+            .expect("read object")
+            .expect("blob"),
         expected,
         "blob {oid}"
     );
@@ -151,7 +170,7 @@ fn assert_fixed_point<T>(store: &ObjectStore, oid: &ObjectId, expected: &T)
 where
     T: for<'a> Facet<'a> + Debug + PartialEq,
 {
-    let decoded: T = deserialize(oid, store).expect("decode canonical value");
+    let decoded: T = deserialize(&typed(oid), store).expect("decode canonical value");
     assert_eq!(&decoded, expected);
     let (encoded, _) = serialize(&decoded).expect("re-encode canonical value");
     assert_eq!(&encoded, oid, "encode(decode(tree)) must preserve its oid");
@@ -166,7 +185,7 @@ fn assert_rejected<T>(store: &ObjectStore, oid: &ObjectId, case: &str) -> Deseri
 where
     T: for<'a> Facet<'a>,
 {
-    let error: DeserializeError = deserialize::<T>(oid, store)
+    let error: DeserializeError = deserialize::<T, _, _>(&typed(oid), store)
         .err()
         .unwrap_or_else(|| panic!("accepted malformed {case}"));
     assert!(
@@ -942,24 +961,28 @@ fn float_golden_spellings_and_canonical_nan_and_zero() {
     let (zero, store) = serialize(&-0.0f64).expect("negative zero");
     assert_blob(&store, &zero, b"0.0\n");
     assert_eq!(
-        deserialize::<f64>(&zero, &store).expect("zero").to_bits(),
+        deserialize::<f64, _, _>(&zero, &store)
+            .expect("zero")
+            .to_bits(),
         0
     );
     let (zero, store) = serialize(&-0.0f32).expect("negative zero");
     assert_blob(&store, &zero, b"0.0\n");
     assert_eq!(
-        deserialize::<f32>(&zero, &store).expect("zero").to_bits(),
+        deserialize::<f32, _, _>(&zero, &store)
+            .expect("zero")
+            .to_bits(),
         0
     );
 
     let (nan, store) = serialize(&f64::from_bits(0xfff8_0000_0000_1234)).expect("nan");
     assert_blob(&store, &nan, b"nan\n");
-    let decoded = deserialize::<f64>(&nan, &store).expect("decode nan");
+    let decoded = deserialize::<f64, _, _>(&nan, &store).expect("decode nan");
     assert_eq!(decoded.to_bits(), 0x7ff8_0000_0000_0000);
     assert_eq!(serialize(&decoded).expect("re-encode nan").0, nan);
     let (nan, store) = serialize(&f32::from_bits(0xffc0_1234)).expect("nan");
     assert_blob(&store, &nan, b"nan\n");
-    let decoded = deserialize::<f32>(&nan, &store).expect("decode nan");
+    let decoded = deserialize::<f32, _, _>(&nan, &store).expect("decode nan");
     assert_eq!(decoded.to_bits(), 0x7fc0_0000);
     assert_eq!(serialize(&decoded).expect("re-encode nan").0, nan);
 }

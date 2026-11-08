@@ -19,9 +19,8 @@
 //! Empty composites use the `none` marker tree. Every tree has at most 4096
 //! entries and every encoded user name has at most 255 bytes.
 //!
-//! [`Key`] retains its other scalar variants for source compatibility, but a
-//! map containing any such key is refused: the wire format supports only string
-//! map keys. [`Node::Cbor`] is also refused by the universe check because the
+//! The wire format supports only string map keys, so [`Key`] is a newtype over
+//! the key string. [`Node::Cbor`] is refused by the universe check because the
 //! codec does not yet implement canonical CBOR. The mapping is schema-directed
 //! and untagged, so an object id identifies a value under a known shape.
 //!
@@ -39,6 +38,7 @@ use std::collections::BTreeMap;
 use gix_object::Write;
 
 use crate::error::{NormalFormError, SerializeError, UniverseError};
+use crate::hash::{HashFormat, Oid, Sha1, Tagged};
 use crate::limits::{MAX_UNIVERSE_DEPTH, MAX_VALUE_DEPTH};
 use crate::ordinal::{self, MAX_TREE_ENTRIES};
 use crate::schema::{Node, Schema};
@@ -56,8 +56,8 @@ pub const IDENTITY_DEF_PREFIX: &str = "identity:";
 ///
 /// This is a schema-free value, not a complete schema validation: callers must
 /// supply every struct field and use a consistent shape for all list elements
-/// and map values. Maps accept only [`Key::Str`]. Size, depth, and entry-name
-/// limits are enforced when the value is written.
+/// and map values. Maps accept only string keys ([`Key`]). Size, depth, and
+/// entry-name limits are enforced when the value is written.
 #[derive(Debug, Clone, PartialEq)]
 pub enum NormalForm {
     /// A boolean.
@@ -98,65 +98,34 @@ pub enum NormalForm {
     List(Vec<NormalForm>),
     /// A composite containing every field, keyed by its unescaped user name.
     Struct(BTreeMap<String, NormalForm>),
-    /// A map keyed by strings, represented with [`Key::Str`].
+    /// A map keyed by strings, represented with [`Key`].
     Map(BTreeMap<Key, NormalForm>),
 }
 
-/// A map key. Only [`Key::Str`] is supported by the frozen wire format.
+/// A string map key.
 ///
-/// The remaining variants are retained for compatibility and rejected at the
-/// write boundary rather than silently encoding an unsupported map schema. An
-/// empty [`NormalForm::Map`] carries no key-type information; schema-aware
-/// callers must check its [`Node::Map`] key before writing.
+/// The wire format supports only string map keys, so this newtype wraps the key
+/// string directly and [`name`](Self::name) yields the canonical escaped
+/// tree-entry name. An empty [`NormalForm::Map`] carries no key-type
+/// information; schema-aware callers must check its [`Node::Map`] key before
+/// writing.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Key {
-    /// An unsupported boolean key.
-    Bool(bool),
-    /// An unsupported 8-bit signed integer key.
-    I8(i8),
-    /// An unsupported 16-bit signed integer key.
-    I16(i16),
-    /// An unsupported 32-bit signed integer key.
-    I32(i32),
-    /// An unsupported 64-bit signed integer key.
-    I64(i64),
-    /// An unsupported 128-bit signed integer key.
-    I128(i128),
-    /// An unsupported 8-bit unsigned integer key.
-    U8(u8),
-    /// An unsupported 16-bit unsigned integer key.
-    U16(u16),
-    /// An unsupported 32-bit unsigned integer key.
-    U32(u32),
-    /// An unsupported 64-bit unsigned integer key.
-    U64(u64),
-    /// An unsupported 128-bit unsigned integer key.
-    U128(u128),
-    /// An unsupported character key.
-    Char(char),
-    /// A supported string key, escaped when written.
-    Str(String),
-    /// An unsupported byte-string key.
-    Bytes(Vec<u8>),
-    /// An unsupported Git object-id key.
-    Hash(ObjectId),
-}
+pub struct Key(String);
 
 impl Key {
-    /// Return a string key's canonical escaped tree-entry name.
+    /// Wrap a user key string.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    /// Return the key's canonical escaped tree-entry name.
     ///
-    /// Non-string keys and names exceeding the encoded 255-byte limit return
+    /// A name exceeding the encoded 255-byte limit returns
     /// [`NormalFormError::InvalidKey`].
     pub fn name(&self) -> Result<String, NormalFormError> {
-        match self {
-            Key::Str(name) => crate::name::escape(name)
-                .map_err(|_error| NormalFormError::InvalidKey { key: name.clone() }),
-            // `InvalidKey` carries a string, not a typed key; debug text
-            // preserves the unsupported variant in the diagnostic.
-            other => Err(NormalFormError::InvalidKey {
-                key: format!("{other:?}"),
-            }),
-        }
+        crate::name::escape(&self.0).map_err(|_error| NormalFormError::InvalidKey {
+            key: self.0.clone(),
+        })
     }
 }
 
@@ -166,14 +135,10 @@ impl Key {
 /// schema-free value cannot prove that a struct has every schema field or that
 /// a map is string-keyed when it is empty; use [`check_universe`] alongside
 /// this function when a schema is available. `store` can be a `&dyn Write`.
-///
-/// The existing [`NormalFormError`] API has no variants for excessive depth
-/// or oversized structs/maps. These errors are temporarily carried as a
-/// [`NormalFormLimitError`] source of [`NormalFormError::Backend`].
-pub fn hash_into<W: Write + ?Sized>(
+pub fn hash_into<F: HashFormat, W: Write + Tagged<F> + ?Sized>(
     value: &NormalForm,
     store: &W,
-) -> Result<ObjectId, NormalFormError> {
+) -> Result<Oid<F>, NormalFormError> {
     validate_value(value, 0)?;
     write_node(value, store).map(|(oid, _kind)| oid)
 }
@@ -183,7 +148,7 @@ pub fn hash_into<W: Write + ?Sized>(
 ///
 /// Use [`hash_into`] with a store configured for another Git hash format when
 /// necessary. Object ids are only comparable within the same hash format.
-pub fn hash(value: &NormalForm) -> Result<(ObjectId, ObjectStore), NormalFormError> {
+pub fn hash(value: &NormalForm) -> Result<(Oid<Sha1>, ObjectStore<Sha1>), NormalFormError> {
     let store = ObjectStore::default();
     let root = hash_into(value, &store)?;
     Ok((root, store))
@@ -200,33 +165,12 @@ fn write_error(error: SerializeError) -> NormalFormError {
     }
 }
 
-/// A depth or non-list tree-size violation carried by the existing
-/// [`NormalFormError::Backend`] variant until that error API has dedicated
-/// limit variants. Its source can be downcast to distinguish validation
-/// failure from an actual backend error.
-#[derive(Debug, thiserror::Error)]
-pub enum NormalFormLimitError {
-    /// A struct or map has too many entries.
-    #[error("normal-form tree holds {len} entries, exceeding the limit of {max}")]
-    TreeTooLong {
-        /// The number of entries supplied.
-        len: usize,
-        /// The maximum permitted number of entries.
-        max: usize,
-    },
-    /// A value exceeds the maximum number of nested objects.
-    #[error("normal-form value exceeds the maximum depth of {0}")]
-    MaxDepth(usize),
-}
-
 fn check_tree_len(len: usize) -> Result<(), NormalFormError> {
     if len > MAX_TREE_ENTRIES {
-        return Err(NormalFormError::Backend(Box::new(
-            NormalFormLimitError::TreeTooLong {
-                len,
-                max: MAX_TREE_ENTRIES,
-            },
-        )));
+        return Err(NormalFormError::TreeTooLong {
+            len,
+            max: MAX_TREE_ENTRIES,
+        });
     }
     Ok(())
 }
@@ -235,9 +179,7 @@ fn check_tree_len(len: usize) -> Result<(), NormalFormError> {
 /// and depth cannot leave partial value objects in the store.
 fn validate_value(value: &NormalForm, depth: usize) -> Result<(), NormalFormError> {
     if depth > MAX_VALUE_DEPTH {
-        return Err(NormalFormError::Backend(Box::new(
-            NormalFormLimitError::MaxDepth(MAX_VALUE_DEPTH),
-        )));
+        return Err(NormalFormError::MaxDepth(MAX_VALUE_DEPTH));
     }
     match value {
         NormalForm::List(items) => {
@@ -288,10 +230,10 @@ fn validate_value(value: &NormalForm, depth: usize) -> Result<(), NormalFormErro
     Ok(())
 }
 
-fn write_node<W: Write + ?Sized>(
+fn write_node<F: HashFormat, W: Write + ?Sized>(
     value: &NormalForm,
     store: &W,
-) -> Result<(ObjectId, EntryKind), NormalFormError> {
+) -> Result<(Oid<F>, EntryKind), NormalFormError> {
     match value {
         NormalForm::List(items) => {
             let entries = items
@@ -303,7 +245,7 @@ fn write_node<W: Write + ?Sized>(
                             len: items.len(),
                             max: MAX_TREE_ENTRIES,
                         })?;
-                    entry(name, item, store)
+                    entry::<F, W>(name, item, store)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             write_tree(entries, store)
@@ -317,7 +259,7 @@ fn write_node<W: Write + ?Sized>(
                             field: name.clone(),
                         }
                     })?;
-                    entry(escaped, field, store)
+                    entry::<F, W>(escaped, field, store)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             write_tree(entries, store)
@@ -325,7 +267,7 @@ fn write_node<W: Write + ?Sized>(
         NormalForm::Map(pairs) => {
             let entries = pairs
                 .iter()
-                .map(|(key, item)| entry(key.name()?, item, store))
+                .map(|(key, item)| entry::<F, W>(key.name()?, item, store))
                 .collect::<Result<Vec<_>, _>>()?;
             write_tree(entries, store)
         }
@@ -349,39 +291,39 @@ fn write_node<W: Write + ?Sized>(
     }
 }
 
-fn text_blob<W: Write + ?Sized>(
+fn text_blob<F: HashFormat, W: Write + ?Sized>(
     text: &str,
     store: &W,
-) -> Result<(ObjectId, EntryKind), NormalFormError> {
+) -> Result<(Oid<F>, EntryKind), NormalFormError> {
     let oid = crate::ser::write_leaf_blob(store, text.as_bytes()).map_err(write_error)?;
     Ok((oid, EntryKind::Blob))
 }
 
-fn binary_blob<W: Write + ?Sized>(
+fn binary_blob<F: HashFormat, W: Write + ?Sized>(
     bytes: &[u8],
     store: &W,
-) -> Result<(ObjectId, EntryKind), NormalFormError> {
+) -> Result<(Oid<F>, EntryKind), NormalFormError> {
     let oid = crate::ser::write_binary_blob(store, bytes).map_err(write_error)?;
     Ok((oid, EntryKind::Blob))
 }
 
-fn entry<W: Write + ?Sized>(
+fn entry<F: HashFormat, W: Write + ?Sized>(
     name: String,
     value: &NormalForm,
     store: &W,
 ) -> Result<TreeEntry, NormalFormError> {
-    let (oid, kind) = write_node(value, store)?;
+    let (oid, kind) = write_node::<F, W>(value, store)?;
     Ok(TreeEntry {
         mode: EntryMode::from(kind),
         filename: name.into(),
-        oid,
+        oid: oid.into_raw(),
     })
 }
 
-fn write_tree<W: Write + ?Sized>(
+fn write_tree<F: HashFormat, W: Write + ?Sized>(
     mut entries: Vec<TreeEntry>,
     store: &W,
-) -> Result<(ObjectId, EntryKind), NormalFormError> {
+) -> Result<(Oid<F>, EntryKind), NormalFormError> {
     if entries.is_empty() {
         let oid = crate::marker::write_marker_tree(store).map_err(write_error)?;
         return Ok((oid, EntryKind::Tree));
@@ -389,9 +331,10 @@ fn write_tree<W: Write + ?Sized>(
     // `TreeEntry::Ord` is Git's comparator; unlike string sorting it treats
     // a tree name as ending with `/` when another name shares its prefix.
     entries.sort();
-    let oid = store
+    let raw = store
         .write(&gix_object::Tree { entries })
         .map_err(NormalFormError::Backend)?;
+    let oid = crate::ser::wrap_oid(raw).map_err(write_error)?;
     Ok((oid, EntryKind::Tree))
 }
 
@@ -399,7 +342,7 @@ fn write_tree<W: Write + ?Sized>(
 /// and the marked node.
 pub fn identity_subtrees(schema: &Schema) -> impl Iterator<Item = (&str, &Node)> {
     schema
-        .defs
+        .defs()
         .iter()
         .filter(|(name, _)| name.starts_with(IDENTITY_DEF_PREFIX))
         .map(|(name, node)| (name.as_str(), node))
@@ -409,7 +352,7 @@ pub fn identity_subtrees(schema: &Schema) -> impl Iterator<Item = (&str, &Node)>
 /// mini-codec's universe.
 pub fn check_identity_subtrees(schema: &Schema) -> Result<(), UniverseError> {
     for (name, node) in identity_subtrees(schema) {
-        check_universe_at(node, &schema.defs, name)?;
+        check_universe_at(node, schema.defs(), name)?;
     }
     Ok(())
 }
@@ -567,7 +510,6 @@ fn node_name(node: &Node) -> &'static str {
 mod tests {
     use super::*;
     use facet::Facet;
-    use gix_hash::Kind as HashKind;
 
     fn blob(value: NormalForm) -> Vec<u8> {
         let (oid, store) = hash(&value).expect("write normal form");
@@ -589,12 +531,14 @@ mod tests {
     }
 
     fn assert_typed_matches<T: for<'a> Facet<'a>>(value: &T, normal: &NormalForm) {
-        for kind in [HashKind::Sha1, HashKind::Sha256] {
-            let store = ObjectStore::with_hash_kind(kind);
+        fn check<T: for<'a> Facet<'a>, F: HashFormat>(value: &T, normal: &NormalForm) {
+            let store = ObjectStore::<F>::new();
             let typed = crate::serialize_into(value, &store).expect("write typed value");
             let identity = hash_into(normal, &store).expect("write identity value");
-            assert_eq!(typed, identity, "{kind:?}: {normal:?}");
+            assert_eq!(typed.to_raw(), identity.to_raw(), "{normal:?}");
         }
+        check::<T, Sha1>(value, normal);
+        check::<T, crate::hash::Sha256>(value, normal);
     }
 
     #[test]
@@ -688,20 +632,20 @@ mod tests {
                 "a"
             ]
         );
-        assert_eq!(Key::Str("".into()).name().expect("valid key"), "%");
-        assert_eq!(Key::Str("some".into()).name().expect("valid key"), "%some");
-        assert_eq!(Key::Str("a/b".into()).name().expect("valid key"), "%a%2Fb");
+        assert_eq!(Key::new("").name().expect("valid key"), "%");
+        assert_eq!(Key::new("some").name().expect("valid key"), "%some");
+        assert_eq!(Key::new("a/b").name().expect("valid key"), "%a%2Fb");
         assert!(matches!(
-            Key::U8(7).name(),
+            Key::new("é".repeat(43)).name(),
             Err(NormalFormError::InvalidKey { .. })
         ));
 
         let maximal = format!("{}ab", "é".repeat(42));
-        let encoded = Key::Str(maximal).name().expect("255 encoded bytes fit");
+        let encoded = Key::new(maximal).name().expect("255 encoded bytes fit");
         assert_eq!(encoded.len(), 255);
         assert_eq!(
             tree_names(NormalForm::Map(BTreeMap::from([(
-                Key::Str("é".repeat(42) + "ab"),
+                Key::new("é".repeat(42) + "ab"),
                 NormalForm::Bool(true)
             )]))),
             [encoded]
@@ -722,7 +666,9 @@ mod tests {
         assert_eq!(&entries[0].filename[..], b"none");
         assert_eq!(entries[0].mode, EntryMode::from(EntryKind::Blob));
         assert_eq!(
-            store.get_blob(&entries[0].oid).expect("read marker blob"),
+            store
+                .get_blob(&Oid::<Sha1>::new(entries[0].oid).expect("sha1 id"))
+                .expect("read marker blob"),
             Some(Vec::new())
         );
         assert_eq!(hash(&empty_struct).expect("struct marker").0, marker);
@@ -768,7 +714,7 @@ mod tests {
                 matches!(hash_into(&structure, &store), Err(NormalFormError::InvalidFieldName { field }) if field == name)
             );
             let map = NormalForm::Map(BTreeMap::from([(
-                Key::Str(name.clone()),
+                Key::new(name.clone()),
                 NormalForm::Bool(true),
             )]));
             assert!(
@@ -780,20 +726,16 @@ mod tests {
             .collect();
         assert!(matches!(
             hash_into(&NormalForm::Struct(fields), &store),
-            Err(NormalFormError::Backend(source))
-                if matches!(source.downcast_ref::<NormalFormLimitError>(),
-                    Some(NormalFormLimitError::TreeTooLong { len, max })
-                        if *len == MAX_TREE_ENTRIES + 1 && *max == MAX_TREE_ENTRIES)
+            Err(NormalFormError::TreeTooLong { len, max })
+                if len == MAX_TREE_ENTRIES + 1 && max == MAX_TREE_ENTRIES
         ));
         let pairs = (0..=MAX_TREE_ENTRIES)
-            .map(|index| (Key::Str(format!("k{index}")), NormalForm::Bool(true)))
+            .map(|index| (Key::new(format!("k{index}")), NormalForm::Bool(true)))
             .collect();
         assert!(matches!(
             hash_into(&NormalForm::Map(pairs), &store),
-            Err(NormalFormError::Backend(source))
-                if matches!(source.downcast_ref::<NormalFormLimitError>(),
-                    Some(NormalFormLimitError::TreeTooLong { len, max })
-                        if *len == MAX_TREE_ENTRIES + 1 && *max == MAX_TREE_ENTRIES)
+            Err(NormalFormError::TreeTooLong { len, max })
+                if len == MAX_TREE_ENTRIES + 1 && max == MAX_TREE_ENTRIES
         ));
         let leaf = crate::serialize(&true).expect("typed leaf").0;
         assert_eq!(store.get(&leaf).expect("store lookup"), None);
@@ -807,7 +749,7 @@ mod tests {
         let normal_map = NormalForm::Map(
             fields
                 .iter()
-                .map(|(name, value)| (Key::Str(name.clone()), NormalForm::U16(*value)))
+                .map(|(name, value)| (Key::new(name.clone()), NormalForm::U16(*value)))
                 .collect(),
         );
         let normal_struct = NormalForm::Struct(
@@ -826,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_depth_limit_and_unsupported_map_keys_are_checked() {
+    fn exact_depth_limit_and_overlong_map_keys_are_checked() {
         let mut nested = NormalForm::Bool(true);
         for _ in 0..MAX_VALUE_DEPTH {
             nested = NormalForm::List(vec![nested]);
@@ -835,16 +777,14 @@ mod tests {
         let too_deep = NormalForm::List(vec![nested]);
         assert!(matches!(
             hash(&too_deep),
-            Err(NormalFormError::Backend(source))
-                if matches!(source.downcast_ref::<NormalFormLimitError>(),
-                    Some(NormalFormLimitError::MaxDepth(MAX_VALUE_DEPTH)))
+            Err(NormalFormError::MaxDepth(MAX_VALUE_DEPTH))
         ));
-        let unsupported = NormalForm::Map(BTreeMap::from([
-            (Key::Bool(true), NormalForm::U8(0)),
-            (Key::Str("true".into()), NormalForm::U8(1)),
-        ]));
+        let overlong = NormalForm::Map(BTreeMap::from([(
+            Key::new("é".repeat(43)),
+            NormalForm::U8(0),
+        )]));
         assert!(matches!(
-            hash(&unsupported),
+            hash(&overlong),
             Err(NormalFormError::InvalidKey { .. })
         ));
     }
@@ -884,7 +824,7 @@ mod tests {
                     value
                         .a
                         .iter()
-                        .map(|(key, val)| (Key::Str(key.clone()), NormalForm::U64(*val)))
+                        .map(|(key, val)| (Key::new(key.clone()), NormalForm::U64(*val)))
                         .collect(),
                 ),
             ),
@@ -896,7 +836,7 @@ mod tests {
         ]));
         assert_typed_matches(&value, &normal);
         let doc = crate::schema_of::<Identity>().expect("identity schema");
-        check_universe(&doc.root, &doc.defs).expect("identity schema is supported");
+        check_universe(doc.root(), doc.defs()).expect("identity schema is supported");
     }
 
     #[test]

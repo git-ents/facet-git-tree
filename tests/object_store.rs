@@ -2,7 +2,7 @@
 //! and its owned accessors.
 
 use facet_git_tree::{EntryKind, EntryMode, ObjectStore, TreeEntry};
-use gix_object::{Find, Kind, Tree, Write};
+use gix_object::{Find, Kind, Tree};
 use proptest::prelude::*;
 
 mod common;
@@ -49,12 +49,12 @@ fn tree_oid_matches_git() {
             TreeEntry {
                 mode: blob,
                 filename: "a".into(),
-                oid: hello,
+                oid: hello.into_raw(),
             },
             TreeEntry {
                 mode: blob,
                 filename: "b".into(),
-                oid: hello,
+                oid: hello.into_raw(),
             },
         ],
     };
@@ -95,7 +95,7 @@ fn typed_accessors_reject_wrong_kind() {
         entries: vec![TreeEntry {
             mode: EntryMode::from(EntryKind::Blob),
             filename: "x".into(),
-            oid: blob_id,
+            oid: blob_id.into_raw(),
         }],
     };
     let tree_id = store.write(&tree).expect("write tree");

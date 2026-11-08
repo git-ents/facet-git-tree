@@ -14,11 +14,11 @@ use facet_git_tree::{
     DeserializeError, EntryKind, EntryMode, ObjectId, ObjectStore, TreeEntry, deserialize,
     serialize,
 };
-use gix_object::{Kind, Write};
+use gix_object::Kind;
 use proptest::prelude::*;
 
 mod common;
-use common::{WithVec, find_entry};
+use common::{WithVec, find_entry, typed};
 
 // --- single-field scalar wrappers ---
 
@@ -52,7 +52,7 @@ fn v_blob<T: for<'a> Facet<'a>>(value: &T) -> Vec<u8> {
     let (root_id, store) = serialize(value).expect("serialize should succeed");
     let entry = find_entry(&store, &root_id, "v");
     store
-        .get_blob(&entry.oid)
+        .get_blob(&typed(&entry.oid))
         .expect("read object")
         .expect("`v` must be a blob in store")
 }
@@ -241,7 +241,7 @@ fn leaf_blob_without_trailing_newline_is_rejected() {
             entries: vec![TreeEntry {
                 mode: EntryMode::from(EntryKind::Blob),
                 filename: "v".into(),
-                oid: blob_id,
+                oid: blob_id.into_raw(),
             }],
         })
         .expect("write tree");

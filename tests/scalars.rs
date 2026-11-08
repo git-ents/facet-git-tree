@@ -4,7 +4,7 @@ use proptest::prelude::*;
 use rstest::rstest;
 
 mod common;
-use common::{find_entry, roundtrip};
+use common::{find_entry, roundtrip, typed};
 
 /// `isize`/`usize` are spec'd i64/u64-shaped: their blob is byte-identical
 /// to the fixed-width encoding of the same value, so an object id never
@@ -28,7 +28,7 @@ fn platform_width_integers_encode_i64_u64_shaped() -> anyhow::Result<()> {
 
     let entry = find_entry(&store, &usize_root, "value");
     let blob = store
-        .get_blob(&entry.oid)
+        .get_blob(&typed(&entry.oid))
         .expect("read object")
         .expect("leaf blob");
     // Text leaves carry exactly one appended newline.
@@ -195,7 +195,7 @@ fn scalar_leaves_have_one_trailing_newline() {
     {
         assert_eq!(entry.mode.kind(), EntryKind::Blob);
         let blob = store
-            .get_blob(&entry.oid)
+            .get_blob(&typed(&entry.oid))
             .expect("read object")
             .expect("leaf blob");
         assert_eq!(blob.last(), Some(&b'\n'), "{}", entry.filename);
@@ -218,7 +218,7 @@ fn trailing_newlines_remain_lossless(#[case] text: &str) {
     let (root, store) = serialize(&value).expect("serialize");
     let entry = find_entry(&store, &root, "value");
     let blob = store
-        .get_blob(&entry.oid)
+        .get_blob(&typed(&entry.oid))
         .expect("read object")
         .expect("string blob");
     assert_eq!(blob, [text.as_bytes(), b"\n"].concat());
@@ -244,12 +244,14 @@ fn empty_byte_sequence_is_distinct_from_presence_marker() {
     let marker_entry = find_entry(&marker_store, &marker_root, "value");
     assert_eq!(bytes_entry.mode.kind(), EntryKind::Blob);
     assert_eq!(
-        bytes_store.get_blob(&bytes_entry.oid).expect("read bytes"),
+        bytes_store
+            .get_blob(&typed(&bytes_entry.oid))
+            .expect("read bytes"),
         Some(vec![])
     );
     assert_eq!(marker_entry.mode.kind(), EntryKind::Tree);
     let marker = marker_store
-        .get_tree(&marker_entry.oid)
+        .get_tree(&typed(&marker_entry.oid))
         .expect("read marker")
         .expect("marker tree");
     assert_eq!(marker.len(), 1);
@@ -423,7 +425,7 @@ fn float_special_values_use_canonical_semantics() {
     let (_, store) = serialize(&WithF64 { value: -0.0 }).expect("serialize");
     let entry = find_entry(&store, &neg_zero, "value");
     assert_eq!(
-        store.get_blob(&entry.oid).expect("read zero"),
+        store.get_blob(&typed(&entry.oid)).expect("read zero"),
         Some(b"0.0\n".to_vec())
     );
     let back: WithF64 = roundtrip(WithF64 { value: -0.0 });
@@ -436,7 +438,7 @@ fn float_special_values_use_canonical_semantics() {
         let (root, store) = serialize(&WithF32 { value }).expect("serialize");
         let entry = find_entry(&store, &root, "value");
         assert_eq!(
-            store.get_blob(&entry.oid).expect("read infinity"),
+            store.get_blob(&typed(&entry.oid)).expect("read infinity"),
             Some(expected.to_vec())
         );
         let back: WithF32 = roundtrip(WithF32 { value });
@@ -449,7 +451,7 @@ fn float_special_values_use_canonical_semantics() {
         let (root, store) = serialize(&WithF64 { value }).expect("serialize");
         let entry = find_entry(&store, &root, "value");
         assert_eq!(
-            store.get_blob(&entry.oid).expect("read infinity"),
+            store.get_blob(&typed(&entry.oid)).expect("read infinity"),
             Some(expected.to_vec())
         );
         let back: WithF64 = roundtrip(WithF64 { value });
@@ -459,13 +461,13 @@ fn float_special_values_use_canonical_semantics() {
     let (root32, store32) = serialize(&WithF32 { value: f32::NAN }).expect("serialize");
     let entry32 = find_entry(&store32, &root32, "value");
     assert_eq!(
-        store32.get_blob(&entry32.oid).expect("read NaN"),
+        store32.get_blob(&typed(&entry32.oid)).expect("read NaN"),
         Some(b"nan\n".to_vec())
     );
     let (root64, store64) = serialize(&WithF64 { value: f64::NAN }).expect("serialize");
     let entry64 = find_entry(&store64, &root64, "value");
     assert_eq!(
-        store64.get_blob(&entry64.oid).expect("read NaN"),
+        store64.get_blob(&typed(&entry64.oid)).expect("read NaN"),
         Some(b"nan\n".to_vec())
     );
     let nan32: WithF32 = roundtrip(WithF32 { value: f32::NAN });
@@ -491,13 +493,13 @@ fn vec_u8_is_one_leaf_blob() {
         assert_eq!(entry.mode.kind(), EntryKind::Blob);
         assert_eq!(
             store
-                .get_blob(&entry.oid)
+                .get_blob(&typed(&entry.oid))
                 .expect("read object")
                 .expect("blob"),
             bytes
         );
         assert_eq!(
-            deserialize::<WithBytes>(&root, &store).expect("decode"),
+            deserialize::<WithBytes, _, _>(&root, &store).expect("decode"),
             value
         );
     }

@@ -9,7 +9,9 @@ use gix_object::{Data, Find, Kind};
 pub(crate) use crate::classify::collapse_shape;
 use crate::classify::{ShapeClass, classify, is_byte_seq};
 use crate::error::{DeserializeError, KeyError};
+use crate::hash::{HashFormat, Oid, Tagged};
 use crate::limits::MAX_VALUE_DEPTH;
+use crate::name::{self, NameError};
 use crate::ordinal::{self, MAX_TREE_ENTRIES, OrdinalError};
 use crate::{EntryKind, ObjectId, RawBlob, RawTree};
 
@@ -70,23 +72,30 @@ pub fn check_key(key: &str) -> Result<(), KeyError> {
 ///
 /// This does not read or expect the git-store `.schema` envelope. Dynamic
 /// values are decoded using an intentionally lossy, untagged heuristic.
-pub fn deserialize<T: for<'a> facet::Facet<'a>>(
-    root: &ObjectId,
-    store: &(impl Find + ?Sized),
-) -> Result<T, DeserializeError> {
+pub fn deserialize<T, F, S>(root: &Oid<F>, store: &S) -> Result<T, DeserializeError>
+where
+    T: for<'a> facet::Facet<'a>,
+    F: HashFormat,
+    S: Find + Tagged<F> + ?Sized,
+{
     let mut budget = DecodeBudget::new();
     deserialize_with_budget(root, store, 0, &mut budget, None)
 }
 
 /// Continue a schema-directed walk without resetting its object-visit budget.
 /// `expected` is the enclosing tree entry's mode, or `None` at a bare root.
-pub(crate) fn deserialize_with_budget<T: for<'a> facet::Facet<'a>>(
-    root: &ObjectId,
-    store: &(impl Find + ?Sized),
+pub(crate) fn deserialize_with_budget<T, F, S>(
+    root: &Oid<F>,
+    store: &S,
     depth: usize,
     budget: &mut DecodeBudget,
-    expected: Option<EntryKind>,
-) -> Result<T, DeserializeError> {
+    expected: Option<LeafKind>,
+) -> Result<T, DeserializeError>
+where
+    T: for<'a> facet::Facet<'a>,
+    F: HashFormat,
+    S: Find + Tagged<F> + ?Sized,
+{
     let partial =
         Partial::alloc::<T>().map_err(|error| reflect(format!("alloc failed: {error}")))?;
     let partial = deser_into(partial, root, store, depth, budget, expected, 0)?;
@@ -105,10 +114,10 @@ pub(crate) fn deserialize_with_budget<T: for<'a> facet::Facet<'a>>(
         .map_err(|error| reflect(format!("materialize failed: {error}")))
 }
 
-pub(crate) fn find_object<'a, F: Find + ?Sized>(
+pub(crate) fn find_object<'a, S: Find + ?Sized>(
     id: &ObjectId,
     buf: &'a mut Vec<u8>,
-    store: &F,
+    store: &S,
 ) -> Result<Data<'a>, DeserializeError> {
     store
         .try_find(id, buf)
@@ -117,47 +126,123 @@ pub(crate) fn find_object<'a, F: Find + ?Sized>(
 }
 
 /// Fetch and count one encoded object; verify its parent's declared mode.
-pub(crate) fn find_object_with_budget<'a, F: Find + ?Sized>(
-    id: &ObjectId,
+pub(crate) fn find_object_with_budget<'a, F: HashFormat, S: Find + ?Sized>(
+    id: &Oid<F>,
     buf: &'a mut Vec<u8>,
-    store: &F,
+    store: &S,
     depth: usize,
     budget: &mut DecodeBudget,
-    expected: Option<EntryKind>,
+    expected: Option<LeafKind>,
 ) -> Result<Data<'a>, DeserializeError> {
     budget.visit(depth)?;
-    let data = find_object(id, buf, store)?;
-    if data.object_hash != id.kind() {
+    let data = find_object(&id.to_raw(), buf, store)?;
+    if data.object_hash != F::KIND {
         return Err(reflect(format!("object {id} has the wrong hash format")));
     }
     match expected {
-        Some(EntryKind::Blob) if data.kind != Kind::Blob => {
-            return Err(DeserializeError::NotABlob(*id));
+        Some(LeafKind::Blob) if data.kind != Kind::Blob => {
+            return Err(DeserializeError::NotABlob(id.to_raw()));
         }
-        Some(EntryKind::Tree) if data.kind != Kind::Tree => {
-            return Err(DeserializeError::NotATree(*id));
+        Some(LeafKind::Tree) if data.kind != Kind::Tree => {
+            return Err(DeserializeError::NotATree(id.to_raw()));
         }
-        Some(EntryKind::Blob | EntryKind::Tree) | None => {}
-        Some(kind) => return Err(reflect(format!("invalid expected entry mode {kind:?}"))),
+        Some(LeafKind::Blob | LeafKind::Tree) | None => {}
     }
     Ok(data)
 }
 
-/// Entries retain their *encoded* names and their validated mode kinds.
-pub(crate) type Entries = Vec<(String, ObjectId, EntryKind)>;
+/// A single validated tree entry: its name, target object, and object kind.
+///
+/// The parser builds one per tree entry and is the only place an entry name is
+/// unescaped or a mode is classified, so downstream code handles only these
+/// already-validated forms.
+#[derive(Debug, Clone)]
+pub(crate) struct Entry<F: HashFormat> {
+    pub(crate) name: EncodedName,
+    pub(crate) oid: Oid<F>,
+    pub(crate) kind: LeafKind,
+}
+
+/// A validated tree-entry name.
+///
+/// A name is either a structural marker name (`none`/`some`) or a canonical
+/// encoded user name paired with its once-unescaped form. `parse` performs the
+/// only unescaping; consumers read [`EncodedName::user`] and can neither
+/// re-decode the encoded bytes nor re-derive the user name.
+#[derive(Debug, Clone)]
+pub(crate) struct EncodedName(NameKind);
+
+/// The private shape behind [`EncodedName`].
+#[derive(Debug, Clone)]
+enum NameKind {
+    /// A structural marker name, which is never a user name.
+    Structural(&'static str),
+    /// A canonical encoded user name and its once-unescaped form.
+    User { encoded: String, decoded: String },
+}
+
+impl EncodedName {
+    /// Validate an untrusted wire name, unescaping a user name exactly once.
+    ///
+    /// `none` and `some` are structural marker names rather than user names and
+    /// are stored verbatim; every other reserved name is refused.
+    fn parse(encoded: &str) -> Result<Self, NameError> {
+        match name::unescape(encoded) {
+            Ok(decoded) => Ok(Self(NameKind::User {
+                encoded: encoded.to_owned(),
+                decoded,
+            })),
+            Err(NameError::Structural) if encoded == crate::marker::MARKER_KEY => {
+                Ok(Self(NameKind::Structural(crate::marker::MARKER_KEY)))
+            }
+            Err(NameError::Structural) if encoded == crate::marker::SOME_KEY => {
+                Ok(Self(NameKind::Structural(crate::marker::SOME_KEY)))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// The encoded wire name, exactly as stored in the tree.
+    pub(crate) fn encoded(&self) -> &str {
+        match self {
+            Self(NameKind::Structural(name)) => name,
+            Self(NameKind::User { encoded, .. }) => encoded,
+        }
+    }
+
+    /// The once-unescaped user name, or `None` for a structural marker name.
+    pub(crate) fn user(&self) -> Option<&str> {
+        match self {
+            Self(NameKind::Structural(_)) => None,
+            Self(NameKind::User { decoded, .. }) => Some(decoded),
+        }
+    }
+}
+
+/// The only two object kinds a validated tree entry may name.
+///
+/// Every other Git mode — executable blobs, links, and commits — is rejected
+/// by the parser, so downstream code never re-matches those unreachable cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LeafKind {
+    /// A regular file, mode `100644`.
+    Blob,
+    /// A sub-tree, mode `40000`.
+    Tree,
+}
 
 /// Parse and validate one already-fetched tree, without consuming another visit.
 ///
 /// Tree mode 040000 uses Git's canonical `40000` wire spelling; a regular
 /// blob uses `100644`. Other permissions, kinds and mode spellings are rejected.
-pub(crate) fn tree_entries_from_data(
+pub(crate) fn tree_entries_from_data<F: HashFormat>(
     data: &Data<'_>,
-    id: &ObjectId,
-) -> Result<Entries, DeserializeError> {
+    id: &Oid<F>,
+) -> Result<Vec<Entry<F>>, DeserializeError> {
     if data.kind != Kind::Tree {
-        return Err(DeserializeError::NotATree(*id));
+        return Err(DeserializeError::NotATree(id.to_raw()));
     }
-    if data.object_hash != id.kind() {
+    if data.object_hash != F::KIND {
         return Err(reflect(format!("object {id} has the wrong hash format")));
     }
     // gix's octal parser can overflow on malicious mode bytes. Validate the
@@ -177,7 +262,7 @@ pub(crate) fn tree_entries_from_data(
             .position(|&byte| byte == b' ')
             .ok_or_else(|| reflect(format!("tree {id} has a missing or overlong entry mode")))?;
         let mode_bytes = remaining.get(..mode_len).ok_or(DeserializeError::Decode {
-            oid: *id,
+            oid: id.to_raw(),
             source: gix_object::decode::Error,
         })?;
         if !matches!(mode_bytes, b"100644" | b"40000") {
@@ -188,7 +273,7 @@ pub(crate) fn tree_entries_from_data(
         let after_mode = remaining
             .get(mode_len + 1..)
             .ok_or(DeserializeError::Decode {
-                oid: *id,
+                oid: id.to_raw(),
                 source: gix_object::decode::Error,
             })?;
         let name_len = after_mode
@@ -199,7 +284,7 @@ pub(crate) fn tree_entries_from_data(
         remaining = after_mode
             .get(name_len + 1 + data.object_hash.len_in_bytes()..)
             .ok_or(DeserializeError::Decode {
-                oid: *id,
+                oid: id.to_raw(),
                 source: gix_object::decode::Error,
             })?;
     }
@@ -208,24 +293,58 @@ pub(crate) fn tree_entries_from_data(
     let mut names = BTreeSet::new();
     let mut previous: Option<gix_object::tree::EntryRef<'_>> = None;
     for entry in gix_object::TreeRefIter::from_bytes(data.data, data.object_hash) {
-        let entry = entry.map_err(|source| DeserializeError::Decode { oid: *id, source })?;
-        let kind = entry.mode.kind();
-        let name = std::str::from_utf8(entry.filename).map_err(|_error| {
+        let entry = entry.map_err(|source| DeserializeError::Decode {
+            oid: id.to_raw(),
+            source,
+        })?;
+        // The raw mode scan above admitted only `100644` and `40000`, so this
+        // classification cannot see any other kind; the arm is a defensive
+        // boundary check rather than a downstream re-match.
+        let kind = match entry.mode.kind() {
+            EntryKind::Blob => LeafKind::Blob,
+            EntryKind::Tree => LeafKind::Tree,
+            other => {
+                return Err(reflect(format!(
+                    "tree {id} has invalid entry kind {other:?}"
+                )));
+            }
+        };
+        let raw = std::str::from_utf8(entry.filename).map_err(|_error| {
             DeserializeError::NonUtf8Name(String::from_utf8_lossy(entry.filename).into_owned())
         })?;
-        if !matches!(name, "none" | "some") {
-            decode_name(name)?;
-        }
-        if !names.insert(name) {
+        let name = EncodedName::parse(raw)
+            .map_err(|error| reflect(format!("invalid encoded name {raw:?}: {error}")))?;
+        if !names.insert(raw) {
             return Err(reflect(format!(
-                "tree {id} contains duplicate name {name:?}"
+                "tree {id} contains duplicate name {raw:?}"
             )));
         }
         if previous.is_some_and(|last| last.cmp(&entry) != std::cmp::Ordering::Less) {
             return Err(reflect(format!("tree {id} is not in Git entry order")));
         }
         previous = Some(entry);
-        result.push((name.to_owned(), entry.oid.to_owned(), kind));
+        result.push(Entry {
+            name,
+            oid: Oid::new(entry.oid.to_owned()).map_err(|error| {
+                reflect(format!(
+                    "tree entry {} has the wrong hash format: {error}",
+                    entry.oid
+                ))
+            })?,
+            kind,
+        });
+    }
+    // The pre-scan and this gix iteration walk the same bytes: the pre-scan
+    // bounds the count before gix's octal parser can overflow and is the only
+    // enforcement of the MAX_TREE_ENTRIES cap, while gix yields the accepted
+    // entries. `entry_count` is therefore both the cap witness and the
+    // allocation claim, so it must equal the entries actually produced. Fail
+    // closed rather than trust a count the produced entries do not confirm.
+    if result.len() != entry_count {
+        return Err(reflect(format!(
+            "tree {id} pre-scan counted {entry_count} entries but decoded {}",
+            result.len()
+        )));
     }
     if result.is_empty() {
         return Err(reflect(format!("tree {id} is empty; use the none marker")));
@@ -234,67 +353,81 @@ pub(crate) fn tree_entries_from_data(
 }
 
 /// Fetch a strict tree and spend one visit for that object.
-pub(crate) fn find_tree_entries<F: Find + ?Sized>(
-    id: &ObjectId,
-    store: &F,
+pub(crate) fn find_tree_entries<F: HashFormat, S: Find + ?Sized>(
+    id: &Oid<F>,
+    store: &S,
     depth: usize,
     budget: &mut DecodeBudget,
-    expected: Option<EntryKind>,
-) -> Result<Entries, DeserializeError> {
+    expected: Option<LeafKind>,
+) -> Result<Vec<Entry<F>>, DeserializeError> {
     let mut buf = Vec::new();
     let data = find_object_with_budget(id, &mut buf, store, depth, budget, expected)?;
     tree_entries_from_data(&data, id)
 }
 
 /// Fetch a binary blob verbatim, counting one object visit.
-pub(crate) fn find_blob_raw<F: Find + ?Sized>(
-    id: &ObjectId,
-    store: &F,
+pub(crate) fn find_blob_raw<F: HashFormat, S: Find + ?Sized>(
+    id: &Oid<F>,
+    store: &S,
     depth: usize,
     budget: &mut DecodeBudget,
-    expected: Option<EntryKind>,
+    expected: Option<LeafKind>,
 ) -> Result<Vec<u8>, DeserializeError> {
     let mut buf = Vec::new();
     let data = find_object_with_budget(id, &mut buf, store, depth, budget, expected)?;
     if data.kind != Kind::Blob {
-        return Err(DeserializeError::NotABlob(*id));
+        return Err(DeserializeError::NotABlob(id.to_raw()));
     }
     Ok(data.data.to_owned())
 }
 
 /// Fetch a text blob and remove exactly its final newline.
-pub(crate) fn find_blob_bytes<F: Find + ?Sized>(
-    id: &ObjectId,
-    store: &F,
+pub(crate) fn find_blob_bytes<F: HashFormat, S: Find + ?Sized>(
+    id: &Oid<F>,
+    store: &S,
     depth: usize,
     budget: &mut DecodeBudget,
-    expected: Option<EntryKind>,
+    expected: Option<LeafKind>,
 ) -> Result<Vec<u8>, DeserializeError> {
     strip_leaf_newline(id, find_blob_raw(id, store, depth, budget, expected)?)
 }
 
-pub(crate) fn strip_leaf_newline(
-    id: &ObjectId,
+pub(crate) fn strip_leaf_newline<F: HashFormat>(
+    id: &Oid<F>,
     mut bytes: Vec<u8>,
 ) -> Result<Vec<u8>, DeserializeError> {
     if bytes.pop() == Some(b'\n') {
         Ok(bytes)
     } else {
-        Err(DeserializeError::MissingLeafNewline(*id))
+        Err(DeserializeError::MissingLeafNewline(id.to_raw()))
     }
 }
 
-/// Decode a canonical user name. Structural names are rejected here.
-pub(crate) fn decode_name(name: &str) -> Result<String, DeserializeError> {
-    crate::name::unescape(name)
-        .map_err(|error| reflect(format!("invalid encoded name {name:?}: {error}")))
+/// The entry's once-unescaped user name.
+///
+/// A structural marker name (`none` or `some`) is not a user name; reading one
+/// where a user name is required is refused, exactly as the parser refuses
+/// every other reserved name. The name is never re-decoded here.
+fn user_name(name: &EncodedName) -> Result<&str, DeserializeError> {
+    name.user().ok_or_else(|| {
+        reflect(format!(
+            "invalid encoded name {:?}: a structural name is not a user name",
+            name.encoded()
+        ))
+    })
+}
+
+/// Validate and unescape a user name that is not a tree-entry name, such as the
+/// contents of an enum tag blob.
+fn user_name_from_encoded(encoded: &str) -> Result<String, DeserializeError> {
+    let name = EncodedName::parse(encoded)
+        .map_err(|error| reflect(format!("invalid encoded name {encoded:?}: {error}")))?;
+    Ok(user_name(&name)?.to_owned())
 }
 
 /// Validate, rather than sort, the already Git-ordered ordinal entries.
-pub(crate) fn sort_by_ordinal(
-    entries: &[(String, ObjectId, EntryKind)],
-) -> Result<(), DeserializeError> {
-    ordinal::validate_sequence(entries.iter().map(|(name, _, _)| name.as_bytes()))
+pub(crate) fn sort_by_ordinal<F: HashFormat>(entries: &[Entry<F>]) -> Result<(), DeserializeError> {
+    ordinal::validate_sequence(entries.iter().map(|entry| entry.name.encoded().as_bytes()))
         .map(|_| ())
         .map_err(|error| match error {
             OrdinalError::Duplicate { index } => DeserializeError::DuplicateOrdinal(index),
@@ -302,9 +435,11 @@ pub(crate) fn sort_by_ordinal(
                 "ordinal gap: expected {expected:03x}, found {found:03x}"
             )),
             _ => {
-                let name = entries
-                    .iter()
-                    .find_map(|(name, _, _)| ordinal::decode(name).err().map(|_| name.clone()));
+                let name = entries.iter().find_map(|entry| {
+                    ordinal::decode(entry.name.encoded())
+                        .err()
+                        .map(|_| entry.name.encoded().to_owned())
+                });
                 match name {
                     Some(name) => DeserializeError::InvalidOrdinal(name),
                     None => reflect(error),
@@ -314,34 +449,35 @@ pub(crate) fn sort_by_ordinal(
 }
 
 /// Detect and verify a marker, including its actual empty blob target.
-pub(crate) fn validate_marker<F: Find + ?Sized>(
-    entries: &[(String, ObjectId, EntryKind)],
-    store: &F,
+pub(crate) fn validate_marker<F: HashFormat, S: Find + ?Sized>(
+    entries: &[Entry<F>],
+    store: &S,
     depth: usize,
     budget: &mut DecodeBudget,
 ) -> Result<bool, DeserializeError> {
-    let [(name, oid, kind)] = entries else {
+    let [entry] = entries else {
         return Ok(false);
     };
-    if name != crate::marker::MARKER_KEY {
+    if entry.name.encoded() != crate::marker::MARKER_KEY {
         return Ok(false);
     }
-    if *kind != EntryKind::Blob {
+    if entry.kind != LeafKind::Blob {
         return Err(reflect("none marker must have blob mode"));
     }
-    let bytes = find_blob_raw(oid, store, depth + 1, budget, Some(*kind))?;
+    let bytes = find_blob_raw(&entry.oid, store, depth + 1, budget, Some(entry.kind))?;
     if !bytes.is_empty() {
         return Err(reflect(format!(
-            "none marker target {oid} is not an empty blob"
+            "none marker target {} is not an empty blob",
+            entry.oid
         )));
     }
     Ok(true)
 }
 
 /// Require the exact marker and visit its empty blob target.
-pub(crate) fn expect_marker<F: Find + ?Sized>(
-    entries: &[(String, ObjectId, EntryKind)],
-    store: &F,
+pub(crate) fn expect_marker<F: HashFormat, S: Find + ?Sized>(
+    entries: &[Entry<F>],
+    store: &S,
     depth: usize,
     budget: &mut DecodeBudget,
 ) -> Result<(), DeserializeError> {
@@ -354,50 +490,59 @@ pub(crate) fn expect_marker<F: Find + ?Sized>(
 
 /// Return None for a validated marker, or the present entry's id and mode.
 /// The caller must pass that mode when visiting the inner object.
-pub(crate) fn validate_option_entries<F: Find + ?Sized>(
-    entries: &[(String, ObjectId, EntryKind)],
-    store: &F,
+pub(crate) fn validate_option_entries<F: HashFormat, S: Find + ?Sized>(
+    entries: &[Entry<F>],
+    store: &S,
     depth: usize,
     budget: &mut DecodeBudget,
-) -> Result<Option<(ObjectId, EntryKind)>, DeserializeError> {
+) -> Result<Option<(Oid<F>, LeafKind)>, DeserializeError> {
     if validate_marker(entries, store, depth, budget)? {
         return Ok(None);
     }
-    let [(name, inner_oid, kind)] = entries else {
+    let [entry] = entries else {
         return Err(DeserializeError::MalformedOption {
             found: entries.len(),
         });
     };
-    if name != crate::marker::SOME_KEY {
-        return Err(DeserializeError::MislabeledOption { name: name.clone() });
+    if entry.name.encoded() != crate::marker::SOME_KEY {
+        return Err(DeserializeError::MislabeledOption {
+            name: entry.name.encoded().to_owned(),
+        });
     }
-    Ok(Some((*inner_oid, *kind)))
+    Ok(Some((entry.oid, entry.kind)))
 }
+
+/// An enum tag's decoded name, and — for a payload variant — the payload
+/// subtree's object id and the entry mode it must be read with.
+type EnumEntry<F> = (String, Option<(Oid<F>, LeafKind)>);
 
 /// Read an enum tag, validating its name, tree and incoming mode.
 /// The returned payload mode must be passed on when visiting that payload.
-pub(crate) fn extract_enum_entry<F: Find + ?Sized>(
-    oid: &ObjectId,
-    store: &F,
+pub(crate) fn extract_enum_entry<F: HashFormat, S: Find + ?Sized>(
+    oid: &Oid<F>,
+    store: &S,
     depth: usize,
     budget: &mut DecodeBudget,
-    expected: Option<EntryKind>,
-) -> Result<(String, Option<(ObjectId, EntryKind)>), DeserializeError> {
+    expected: Option<LeafKind>,
+) -> Result<EnumEntry<F>, DeserializeError> {
     let mut buf = Vec::new();
     let data = find_object_with_budget(oid, &mut buf, store, depth, budget, expected)?;
     if data.kind == Kind::Blob {
         let bytes = strip_leaf_newline(oid, data.data.to_owned())?;
-        let encoded =
-            std::str::from_utf8(&bytes).map_err(|_error| DeserializeError::NonUtf8Blob(*oid))?;
-        return Ok((decode_name(encoded)?, None));
+        let encoded = std::str::from_utf8(&bytes)
+            .map_err(|_error| DeserializeError::NonUtf8Blob(oid.to_raw()))?;
+        return Ok((user_name_from_encoded(encoded)?, None));
     }
     let entries = tree_entries_from_data(&data, oid)?;
-    let [(name, payload, kind)] = entries.as_slice() else {
+    let [entry] = entries.as_slice() else {
         return Err(DeserializeError::MalformedEnum {
             found: entries.len(),
         });
     };
-    Ok((decode_name(name)?, Some((*payload, *kind))))
+    Ok((
+        user_name(&entry.name)?.to_owned(),
+        Some((entry.oid, entry.kind)),
+    ))
 }
 
 /// Syntax common to all signed and unsigned canonical decimal integers.
@@ -415,13 +560,14 @@ pub(crate) fn is_canonical_integer(text: &str, signed: bool) -> bool {
         && (digits == "0" || !digits.starts_with('0'))
 }
 
-fn parse_scalar<'facet>(
+fn parse_scalar<'facet, F: HashFormat>(
     partial: Partial<'facet, true>,
-    oid: &ObjectId,
+    oid: &Oid<F>,
     bytes: &[u8],
 ) -> Result<Partial<'facet, true>, DeserializeError> {
     let shape = partial.shape();
-    let text = std::str::from_utf8(bytes).map_err(|_error| DeserializeError::NonUtf8Blob(*oid))?;
+    let text =
+        std::str::from_utf8(bytes).map_err(|_error| DeserializeError::NonUtf8Blob(oid.to_raw()))?;
     let invalid = |reason: &str| DeserializeError::Parse {
         shape: shape.type_identifier,
         text: text.to_owned(),
@@ -724,12 +870,12 @@ fn parse_key_from_str<'facet>(
 }
 
 /// Match every field exactly once before beginning any reflected field.
-fn match_fields(
-    entries: &[(String, ObjectId, EntryKind)],
+fn match_fields<F: HashFormat>(
+    entries: &[Entry<F>],
     fields: &'static [facet::Field],
     positional: bool,
     owner: &'static str,
-) -> Result<Vec<(ObjectId, EntryKind)>, DeserializeError> {
+) -> Result<Vec<(Oid<F>, LeafKind)>, DeserializeError> {
     if fields.len() > MAX_TREE_ENTRIES {
         return Err(DeserializeError::Unsupported(owner));
     }
@@ -745,16 +891,16 @@ fn match_fields(
         }
     }
     let mut matched = vec![None; fields.len()];
-    for (name, oid, kind) in entries {
+    for entry in entries {
         if !positional {
-            decode_name(name)?;
+            user_name(&entry.name)?;
         }
-        let Some(index) = expected.get(name) else {
+        let Some(index) = expected.get(entry.name.encoded()) else {
             return Err(DeserializeError::UnexpectedEntry {
-                entry: name.clone(),
+                entry: entry.name.encoded().to_owned(),
             });
         };
-        matched[*index] = Some((*oid, *kind));
+        matched[*index] = Some((entry.oid, entry.kind));
     }
     for (name, index) in expected {
         if matched[index].is_none() {
@@ -767,12 +913,12 @@ fn match_fields(
         .ok_or_else(|| reflect("field matching did not initialize every field"))
 }
 
-fn deser_fields<'facet, F: Find + ?Sized>(
+fn deser_fields<'facet, F: HashFormat, S: Find + Tagged<F> + ?Sized>(
     mut partial: Partial<'facet, true>,
-    mut entries: Entries,
+    mut entries: Vec<Entry<F>>,
     fields: &'static [facet::Field],
     positional: bool,
-    store: &F,
+    store: &S,
     depth: usize,
     budget: &mut DecodeBudget,
 ) -> Result<Partial<'facet, true>, DeserializeError> {
@@ -801,13 +947,13 @@ fn check_length(expected: usize, found: usize) -> Result<(), DeserializeError> {
     Ok(())
 }
 
-fn deser_into<'facet, F: Find + ?Sized>(
+fn deser_into<'facet, F: HashFormat, S: Find + Tagged<F> + ?Sized>(
     partial: Partial<'facet, true>,
-    oid: &ObjectId,
-    store: &F,
+    oid: &Oid<F>,
+    store: &S,
     depth: usize,
     budget: &mut DecodeBudget,
-    expected: Option<EntryKind>,
+    expected: Option<LeafKind>,
     wrapper_depth: usize,
 ) -> Result<Partial<'facet, true>, DeserializeError> {
     check_depth(depth)?;
@@ -817,8 +963,8 @@ fn deser_into<'facet, F: Find + ?Sized>(
     let shape = partial.shape();
     if shape.scalar_type() == Some(ScalarType::CowStr) {
         let bytes = find_blob_bytes(oid, store, depth, budget, expected)?;
-        let text =
-            String::from_utf8(bytes).map_err(|_error| DeserializeError::NonUtf8Blob(*oid))?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_error| DeserializeError::NonUtf8Blob(oid.to_raw()))?;
         return partial
             .set(std::borrow::Cow::<'facet, str>::Owned(text))
             .map_err(reflect);
@@ -842,10 +988,17 @@ fn deser_into<'facet, F: Find + ?Sized>(
                     entries.clear();
                 }
                 sort_by_ordinal(&entries)?;
-                for (_, child_oid, kind) in entries {
+                for entry in entries {
                     partial = partial.begin_list_item().map_err(reflect)?;
-                    partial =
-                        deser_into(partial, &child_oid, store, depth + 1, budget, Some(kind), 0)?;
+                    partial = deser_into(
+                        partial,
+                        &entry.oid,
+                        store,
+                        depth + 1,
+                        budget,
+                        Some(entry.kind),
+                        0,
+                    )?;
                     partial = partial.end().map_err(reflect)?;
                 }
             }
@@ -887,7 +1040,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
             let mut buf = Vec::new();
             let data = find_object_with_budget(oid, &mut buf, store, depth, budget, expected)?;
             if data.kind != Kind::Tree {
-                return Err(DeserializeError::NotATree(*oid));
+                return Err(DeserializeError::NotATree(oid.to_raw()));
             }
             partial.set(RawTree::new(*oid)).map_err(reflect)
         }
@@ -895,7 +1048,7 @@ fn deser_into<'facet, F: Find + ?Sized>(
             let mut buf = Vec::new();
             let data = find_object_with_budget(oid, &mut buf, store, depth, budget, expected)?;
             if data.kind != Kind::Blob {
-                return Err(DeserializeError::NotABlob(*oid));
+                return Err(DeserializeError::NotABlob(oid.to_raw()));
             }
             partial.set(RawBlob::new(*oid)).map_err(reflect)
         }
@@ -949,15 +1102,15 @@ fn deser_into<'facet, F: Find + ?Sized>(
             match shape.def {
                 Def::List(_) => {
                     let mut partial = partial.init_list().map_err(reflect)?;
-                    for (_, child_oid, kind) in entries {
+                    for entry in entries {
                         partial = partial.begin_list_item().map_err(reflect)?;
                         partial = deser_into(
                             partial,
-                            &child_oid,
+                            &entry.oid,
                             store,
                             depth + 1,
                             budget,
-                            Some(kind),
+                            Some(entry.kind),
                             0,
                         )?;
                         partial = partial.end().map_err(reflect)?;
@@ -970,15 +1123,15 @@ fn deser_into<'facet, F: Find + ?Sized>(
                     }
                     check_length(array.n, entries.len())?;
                     let mut partial = partial.init_array().map_err(reflect)?;
-                    for (index, (_, child_oid, kind)) in entries.into_iter().enumerate() {
+                    for (index, entry) in entries.into_iter().enumerate() {
                         partial = partial.begin_nth_field(index).map_err(reflect)?;
                         partial = deser_into(
                             partial,
-                            &child_oid,
+                            &entry.oid,
                             store,
                             depth + 1,
                             budget,
-                            Some(kind),
+                            Some(entry.kind),
                             0,
                         )?;
                         partial = partial.end().map_err(reflect)?;
@@ -1000,14 +1153,14 @@ fn deser_into<'facet, F: Find + ?Sized>(
                         shape.type_identifier
                     ))
                 })?;
-                if !budget.cbor_blobs.contains_key(oid) {
+                if !budget.cbor_blobs.contains_key(&oid.to_raw()) {
                     let actual = gix_object::compute_hash(oid.kind(), Kind::Blob, &bytes)
                         .map_err(reflect)?;
-                    if actual != *oid {
+                    if actual != oid.to_raw() {
                         return Err(reflect(format!("CBOR blob {oid} has incorrect content")));
                     }
                 }
-                *budget.cbor_blobs.entry(*oid).or_default() += 1;
+                *budget.cbor_blobs.entry(oid.to_raw()).or_default() += 1;
                 budget.cbor_hash_kinds.insert(oid.kind());
                 return Ok(partial);
             }
@@ -1016,13 +1169,21 @@ fn deser_into<'facet, F: Find + ?Sized>(
                 entries.clear();
             }
             let mut partial = partial.init_map().map_err(reflect)?;
-            for (name, child_oid, kind) in entries {
-                let key = decode_name(&name)?;
+            for entry in entries {
+                let key = user_name(&entry.name)?;
                 partial = partial.begin_key().map_err(reflect)?;
-                partial = parse_key_from_str(partial, &key, 0)?;
+                partial = parse_key_from_str(partial, key, 0)?;
                 partial = partial.end().map_err(reflect)?;
                 partial = partial.begin_value().map_err(reflect)?;
-                partial = deser_into(partial, &child_oid, store, depth + 1, budget, Some(kind), 0)?;
+                partial = deser_into(
+                    partial,
+                    &entry.oid,
+                    store,
+                    depth + 1,
+                    budget,
+                    Some(entry.kind),
+                    0,
+                )?;
                 partial = partial.end().map_err(reflect)?;
             }
             Ok(partial)
@@ -1102,13 +1263,13 @@ fn deser_into<'facet, F: Find + ?Sized>(
 }
 
 /// Decode an untagged dynamic value by a deterministic, lossy heuristic.
-fn deser_dynamic<'facet, F: Find + ?Sized>(
+fn deser_dynamic<'facet, F: HashFormat, S: Find + Tagged<F> + ?Sized>(
     partial: Partial<'facet, true>,
-    oid: &ObjectId,
-    store: &F,
+    oid: &Oid<F>,
+    store: &S,
     depth: usize,
     budget: &mut DecodeBudget,
-    expected: Option<EntryKind>,
+    expected: Option<LeafKind>,
 ) -> Result<Partial<'facet, true>, DeserializeError> {
     let mut buf = Vec::new();
     let data = find_object_with_budget(oid, &mut buf, store, depth, budget, expected)?;
@@ -1117,7 +1278,7 @@ fn deser_dynamic<'facet, F: Find + ?Sized>(
         let contents = data
             .data
             .strip_suffix(b"\n")
-            .ok_or(DeserializeError::MissingLeafNewline(*oid))?;
+            .ok_or(DeserializeError::MissingLeafNewline(oid.to_raw()))?;
         return match std::str::from_utf8(contents) {
             Ok(text) => partial.set(text.to_owned()).map_err(reflect),
             Err(_error) => partial.set(contents.to_owned()).map_err(reflect),
@@ -1132,20 +1293,38 @@ fn deser_dynamic<'facet, F: Find + ?Sized>(
             partial.shape().type_identifier,
         ));
     }
-    if ordinal::validate_sequence(entries.iter().map(|(name, _, _)| name.as_bytes())).is_ok() {
+    if ordinal::validate_sequence(entries.iter().map(|entry| entry.name.encoded().as_bytes()))
+        .is_ok()
+    {
         let mut partial = partial.init_list().map_err(reflect)?;
-        for (_, child_oid, kind) in entries {
+        for entry in entries {
             partial = partial.begin_list_item().map_err(reflect)?;
-            partial = deser_into(partial, &child_oid, store, depth + 1, budget, Some(kind), 0)?;
+            partial = deser_into(
+                partial,
+                &entry.oid,
+                store,
+                depth + 1,
+                budget,
+                Some(entry.kind),
+                0,
+            )?;
             partial = partial.end().map_err(reflect)?;
         }
         return Ok(partial);
     }
     let mut partial = partial.init_map().map_err(reflect)?;
-    for (name, child_oid, kind) in entries {
-        let name = decode_name(&name)?;
-        partial = partial.begin_object_entry(&name).map_err(reflect)?;
-        partial = deser_into(partial, &child_oid, store, depth + 1, budget, Some(kind), 0)?;
+    for entry in entries {
+        let name = user_name(&entry.name)?;
+        partial = partial.begin_object_entry(name).map_err(reflect)?;
+        partial = deser_into(
+            partial,
+            &entry.oid,
+            store,
+            depth + 1,
+            budget,
+            Some(entry.kind),
+            0,
+        )?;
         partial = partial.end().map_err(reflect)?;
     }
     Ok(partial)
@@ -1158,12 +1337,13 @@ mod cbor_integration_tests {
     use std::sync::Arc;
 
     use facet::Facet;
-    use gix_object::{Kind, Write};
+    use gix_object::Kind;
     use proptest::prelude::*;
 
+    use crate::hash::{HashFormat, Oid, Sha1, Sha256};
     use crate::{
-        DeserializeError, EntryKind, EntryMode, ObjectId, ObjectStore, TreeEntry, deserialize,
-        serialize, serialize_into,
+        DeserializeError, EntryKind, EntryMode, ObjectStore, TreeEntry, deserialize, serialize,
+        serialize_into,
     };
 
     #[derive(Debug, Facet, PartialEq, Eq)]
@@ -1226,17 +1406,17 @@ mod cbor_integration_tests {
         }
     }
 
-    fn write_blob(store: &ObjectStore, bytes: &[u8]) -> ObjectId {
+    fn write_blob(store: &ObjectStore, bytes: &[u8]) -> Oid<Sha1> {
         store.write_buf(Kind::Blob, bytes).expect("write blob")
     }
 
-    fn write_tree(store: &ObjectStore, entries: Vec<(&str, EntryKind, ObjectId)>) -> ObjectId {
+    fn write_tree(store: &ObjectStore, entries: Vec<(&str, EntryKind, Oid<Sha1>)>) -> Oid<Sha1> {
         let mut entries: Vec<TreeEntry> = entries
             .into_iter()
             .map(|(name, kind, oid)| TreeEntry {
                 mode: EntryMode::from(kind),
                 filename: name.into(),
-                oid,
+                oid: oid.into_raw(),
             })
             .collect();
         entries.sort();
@@ -1249,13 +1429,21 @@ mod cbor_integration_tests {
     where
         T: for<'a> Facet<'a> + PartialEq + std::fmt::Debug,
     {
-        for hash in [gix_hash::Kind::Sha1, gix_hash::Kind::Sha256] {
-            let store = ObjectStore::with_hash_kind(hash);
+        fn check<T, F: HashFormat>(value: &T)
+        where
+            T: for<'a> Facet<'a> + PartialEq + std::fmt::Debug,
+        {
+            let store = ObjectStore::<F>::new();
             let root = serialize_into(value, &store).expect("serialize");
             let result: T = deserialize(&root, &store).expect("deserialize");
             assert_eq!(&result, value);
-            assert_eq!(serialize_into(&result, &store).expect("re-encode"), root);
+            assert_eq!(
+                serialize_into(&result, &store).expect("re-encode").to_raw(),
+                root.to_raw()
+            );
         }
+        check::<T, Sha1>(value);
+        check::<T, Sha256>(value);
     }
 
     #[test]
@@ -1292,7 +1480,9 @@ mod cbor_integration_tests {
         assert_eq!(AsRef::<[u8]>::as_ref(&entries[0].filename), b"%some");
         assert_eq!(entries[0].mode.kind(), EntryKind::Blob);
         assert_eq!(
-            store.get_blob(&entries[0].oid).expect("read blob"),
+            store
+                .get_blob(&Oid::new(entries[0].oid).expect("sha1"))
+                .expect("read blob"),
             Some(b"42\n".to_vec())
         );
         check_fixed_point(&value);
@@ -1318,12 +1508,12 @@ mod cbor_integration_tests {
             .find(|field| AsRef::<[u8]>::as_ref(&field.filename) == b"maps")
             .unwrap();
         let options = store
-            .get_tree(&map_field.oid)
+            .get_tree(&Oid::new(map_field.oid).expect("sha1"))
             .expect("read list")
             .expect("present");
         for option in [0, 2, 3] {
             let entries = store
-                .get_tree(&options[option].oid)
+                .get_tree(&Oid::new(options[option].oid).expect("sha1"))
                 .expect("read option")
                 .expect("present");
             assert_eq!(AsRef::<[u8]>::as_ref(&entries[0].filename), b"some");
@@ -1372,18 +1562,19 @@ mod cbor_integration_tests {
             }],
             data: BTreeMap::from([(2, "two".to_owned())]),
         });
-        for hash in [gix_hash::Kind::Sha1, gix_hash::Kind::Sha256] {
-            let store = ObjectStore::with_hash_kind(hash);
-            let raw = write_tree(&store, vec![]);
-            let value = MapAndRawTree {
-                data: BTreeMap::from([(1, "one".to_owned())]),
-                raw: crate::RawTree::new(raw),
-            };
-            let root = serialize_into(&value, &store).expect("serialize with raw tree");
-            let decoded: MapAndRawTree = deserialize(&root, &store).expect("decode with raw tree");
-            assert_eq!(decoded, value);
-            assert_eq!(serialize_into(&decoded, &store).unwrap(), root);
-        }
+        // `RawTree` defaults to SHA-1, so this embeds a SHA-1 reference into a
+        // SHA-1 store; the SHA-256 raw-tree round-trip is covered separately in
+        // `raw_tree.rs`.
+        let store = ObjectStore::default();
+        let raw = write_tree(&store, vec![]);
+        let value = MapAndRawTree {
+            data: BTreeMap::from([(1, "one".to_owned())]),
+            raw: crate::RawTree::new(raw),
+        };
+        let root = serialize_into(&value, &store).expect("serialize with raw tree");
+        let decoded: MapAndRawTree = deserialize(&root, &store).expect("decode with raw tree");
+        assert_eq!(decoded, value);
+        assert_eq!(serialize_into(&decoded, &store).unwrap(), root);
     }
 
     #[test]
@@ -1405,24 +1596,24 @@ mod cbor_integration_tests {
         ] {
             let root = write_blob(&store, bytes);
             assert!(
-                deserialize::<BTreeMap<i32, String>>(&root, &store).is_err(),
+                deserialize::<BTreeMap<i32, String>, _, _>(&root, &store).is_err(),
                 "accepted malformed map {bytes:?}"
             );
         }
         let empty = write_blob(&store, b"");
         let tree = write_tree(&store, vec![("none", EntryKind::Blob, empty)]);
         assert!(matches!(
-            deserialize::<BTreeMap<i32, String>>(&tree, &store),
+            deserialize::<BTreeMap<i32, String>, _, _>(&tree, &store),
             Err(DeserializeError::NotABlob(_))
         ));
         let blob = write_blob(&store, &[0xa0]);
         assert!(matches!(
-            deserialize::<BTreeMap<String, String>>(&blob, &store),
+            deserialize::<BTreeMap<String, String>, _, _>(&blob, &store),
             Err(DeserializeError::NotATree(_))
         ));
         let wrong_mode = write_tree(&store, vec![("data", EntryKind::Tree, blob)]);
         assert!(matches!(
-            deserialize::<NonString>(&wrong_mode, &store),
+            deserialize::<NonString, _, _>(&wrong_mode, &store),
             Err(DeserializeError::NotATree(_))
         ));
     }
@@ -1435,13 +1626,13 @@ mod cbor_integration_tests {
         ];
         let store = ObjectStore::default();
         let blob = write_blob(&store, &bytes);
-        assert!(deserialize::<HashMap<EqualFloat, u8>>(&blob, &store).is_err());
+        assert!(deserialize::<HashMap<EqualFloat, u8>, _, _>(&blob, &store).is_err());
         let root = write_tree(&store, vec![("data", EntryKind::Blob, blob)]);
         #[derive(Facet)]
         struct Nested {
             data: HashMap<EqualFloat, u8>,
         }
-        assert!(deserialize::<Nested>(&root, &store).is_err());
+        assert!(deserialize::<Nested, _, _>(&root, &store).is_err());
     }
 
     #[test]
@@ -1471,7 +1662,7 @@ mod cbor_integration_tests {
         ) {
             let store = ObjectStore::default();
             let root = write_blob(&store, &bytes);
-            if let Ok(value) = deserialize::<BTreeMap<i16, String>>(&root, &store) {
+            if let Ok(value) = deserialize::<BTreeMap<i16, String>, _, _>(&root, &store) {
                 prop_assert_eq!(serialize(&value).expect("re-encode").0, root);
             }
         }

@@ -2,11 +2,11 @@
 
 use facet::Facet;
 use facet_git_tree::{EntryKind, ObjectStore, deserialize, serialize};
-use gix_object::{Kind, Write as _};
+use gix_object::Kind;
 use rstest::rstest;
 
 mod common;
-use common::{get_tree_entry_mode, roundtrip};
+use common::{get_tree_entry_mode, roundtrip, typed};
 
 #[derive(Debug, Facet, PartialEq)]
 struct WithBytes {
@@ -64,9 +64,12 @@ fn vec_u8_is_one_blob_with_verbatim_contents(#[case] bytes: Vec<u8>) {
     let (root, store) = serialize(&input).expect("serialize");
     let (kind, oid) = get_tree_entry_mode(&store, &root, "data");
     assert_eq!(kind, EntryKind::Blob);
-    assert_eq!(store.get_blob(&oid).expect("read blob"), Some(bytes));
     assert_eq!(
-        deserialize::<WithBytes>(&root, &store).expect("decode"),
+        store.get_blob(&typed(&oid)).expect("read blob"),
+        Some(bytes)
+    );
+    assert_eq!(
+        deserialize::<WithBytes, _, _>(&root, &store).expect("decode"),
         input
     );
 }
@@ -80,11 +83,11 @@ fn fixed_array_is_one_binary_blob() {
     let (kind, oid) = get_tree_entry_mode(&store, &root, "hash");
     assert_eq!(kind, EntryKind::Blob);
     assert_eq!(
-        store.get_blob(&oid).expect("read blob"),
+        store.get_blob(&typed(&oid)).expect("read blob"),
         Some(input.hash.to_vec())
     );
     assert_eq!(
-        deserialize::<WithByteArray>(&root, &store).expect("decode"),
+        deserialize::<WithByteArray, _, _>(&root, &store).expect("decode"),
         input
     );
 }
@@ -94,7 +97,7 @@ fn byte_array_rejects_wrong_blob_lengths() {
     let store = ObjectStore::default();
     for bytes in [b"abc".as_slice(), b"abcde".as_slice()] {
         let oid = store.write_buf(Kind::Blob, bytes).expect("write blob");
-        assert!(deserialize::<[u8; 4]>(&oid, &store).is_err());
+        assert!(deserialize::<[u8; 4], _, _>(&oid, &store).is_err());
     }
 }
 
@@ -128,7 +131,7 @@ fn empty_bytes_share_marker_blob_but_not_marker_tree() {
     assert_eq!(marker[0].oid, empty_bytes);
     assert_ne!(empty_list, empty_bytes);
     assert_eq!(
-        deserialize::<Vec<u8>>(&empty_bytes, &store).expect("decode"),
+        deserialize::<Vec<u8>, _, _>(&empty_bytes, &store).expect("decode"),
         Vec::<u8>::new()
     );
 }
@@ -142,7 +145,7 @@ fn byte_sequences_are_not_subject_to_the_tree_entry_cap() {
         Some(bytes.clone())
     );
     assert_eq!(
-        deserialize::<Vec<u8>>(&root, &store).expect("decode"),
+        deserialize::<Vec<u8>, _, _>(&root, &store).expect("decode"),
         bytes
     );
 }

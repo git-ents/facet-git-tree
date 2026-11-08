@@ -12,7 +12,7 @@ use facet::Facet;
 use facet_git_tree::{EntryKind, serialize};
 
 mod common;
-use common::{Point, roundtrip};
+use common::{Point, roundtrip, typed};
 
 #[derive(Debug, Facet, PartialEq)]
 struct WithArcBytes {
@@ -84,7 +84,7 @@ fn boxed_tuple_struct_uses_hex_ordinals() {
         assert_eq!(entry.filename.to_string(), format!("{index:03x}"));
         assert_eq!(entry.mode.kind(), EntryKind::Blob);
         assert_eq!(
-            store.get_blob(&entry.oid).expect("read object"),
+            store.get_blob(&typed(&entry.oid)).expect("read object"),
             Some(format!("{index}\n").into_bytes())
         );
     }
@@ -123,7 +123,10 @@ fn arc_byte_slice_is_a_single_blob() {
         let (kind, oid) = common::get_tree_entry_mode(&store, &root, "blob");
         assert_eq!(kind, EntryKind::Blob);
         assert_eq!(
-            store.get_blob(&oid).expect("read object").expect("blob"),
+            store
+                .get_blob(&typed(&oid))
+                .expect("read object")
+                .expect("blob"),
             bytes
         );
         assert_eq!(
@@ -154,7 +157,7 @@ fn arc_u32_slice_roundtrip() {
         assert_eq!(entry.filename, name);
         assert_eq!(entry.mode.kind(), EntryKind::Blob);
         assert_eq!(
-            store.get_blob(&entry.oid).expect("read object"),
+            store.get_blob(&typed(&entry.oid)).expect("read object"),
             Some(blob.to_vec())
         );
     }
