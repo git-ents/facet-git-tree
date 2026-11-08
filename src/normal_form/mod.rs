@@ -399,7 +399,7 @@ fn write_tree<W: Write + ?Sized>(
 /// and the marked node.
 pub fn identity_subtrees(schema: &Schema) -> impl Iterator<Item = (&str, &Node)> {
     schema
-        .defs
+        .defs()
         .iter()
         .filter(|(name, _)| name.starts_with(IDENTITY_DEF_PREFIX))
         .map(|(name, node)| (name.as_str(), node))
@@ -409,7 +409,7 @@ pub fn identity_subtrees(schema: &Schema) -> impl Iterator<Item = (&str, &Node)>
 /// mini-codec's universe.
 pub fn check_identity_subtrees(schema: &Schema) -> Result<(), UniverseError> {
     for (name, node) in identity_subtrees(schema) {
-        check_universe_at(node, &schema.defs, name)?;
+        check_universe_at(node, schema.defs(), name)?;
     }
     Ok(())
 }
@@ -896,7 +896,7 @@ mod tests {
         ]));
         assert_typed_matches(&value, &normal);
         let doc = crate::schema_of::<Identity>().expect("identity schema");
-        check_universe(&doc.root, &doc.defs).expect("identity schema is supported");
+        check_universe(doc.root(), doc.defs()).expect("identity schema is supported");
     }
 
     #[test]

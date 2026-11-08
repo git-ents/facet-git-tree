@@ -574,41 +574,37 @@ fn unsorted_and_duplicate_trees_are_rejected() {
 
 #[cfg(feature = "value")]
 fn schema(root: Node, defs: BTreeMap<String, Node>) -> Schema {
-    Schema {
-        kind: "test".into(),
-        root,
-        defs,
-    }
+    Schema::new("test".into(), root, defs).expect("valid schema")
 }
 
 #[cfg(feature = "value")]
 #[test]
 fn invalid_refs_cycles_and_non_string_map_keys_are_rejected() {
-    let store = ObjectStore::default();
-    let root = blob(&store, b"ok\n");
-    let dangling = schema(Node::Ref("missing".into()), BTreeMap::new());
-    let error = deserialize_value_with_schema(&root, &dangling, &store).unwrap_err();
+    let error =
+        Schema::new("test".into(), Node::Ref("missing".into()), BTreeMap::new()).unwrap_err();
     assert!(
         matches!(&error, SchemaReadError::UnknownRef(name) if name == "missing"),
         "{error:?}"
     );
-    let cycle = schema(
+    let error = Schema::new(
+        "test".into(),
         Node::Ref("A".into()),
         BTreeMap::from([("A".into(), Node::Ref("A".into()))]),
-    );
-    let error = deserialize_value_with_schema(&root, &cycle, &store).unwrap_err();
+    )
+    .unwrap_err();
     assert!(
         matches!(&error, SchemaReadError::Deserialize(DeserializeError::Reflect(message)) if message.contains("unguarded reference cycle")),
         "{error:?}"
     );
-    let bad_key = schema(
+    let error = Schema::new(
+        "test".into(),
         Node::Map {
             key: Box::new(Node::I32),
             value: Box::new(Node::String),
         },
         BTreeMap::new(),
-    );
-    let error = deserialize_value_with_schema(&root, &bad_key, &store).unwrap_err();
+    )
+    .unwrap_err();
     assert!(
         matches!(&error, SchemaReadError::Deserialize(DeserializeError::Reflect(message)) if message.contains("map key must be literally String")),
         "{error:?}"
@@ -620,6 +616,7 @@ fn invalid_refs_cycles_and_non_string_map_keys_are_rejected() {
 fn cbor_must_be_canonical_and_contain_exactly_one_item() {
     let store = ObjectStore::default();
     let doc = schema(Node::Cbor, BTreeMap::new());
+    let doc = doc.checked().expect("valid schema");
     let canonical = blob(&store, &[0]);
     assert!(deserialize_value_with_schema(&canonical, &doc, &store).is_ok());
     for bytes in [&[0x18, 0x00][..], &[0x00, 0x00][..]] {
@@ -679,6 +676,7 @@ fn nested_maps(store: &ObjectStore, levels: usize) -> ObjectId {
 fn encoded_depth_32_is_allowed_and_depth_33_is_rejected() {
     let store = ObjectStore::default();
     let doc = schema(Node::Dynamic, BTreeMap::new());
+    let doc = doc.checked().expect("valid schema");
     let at_limit = nested_maps(&store, 32);
     assert!(
         deserialize_value_with_schema(&at_limit, &doc, &store).is_ok(),
@@ -759,6 +757,7 @@ fn visit_budget_counts_each_occurrence_of_shared_oids() {
         Node::List(Box::new(Node::List(Box::new(Node::I32)))),
         BTreeMap::new(),
     );
+    let doc = doc.checked().expect("valid schema");
     let counted = CountingStore {
         store: &store,
         finds: Cell::new(0),

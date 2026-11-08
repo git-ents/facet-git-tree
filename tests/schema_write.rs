@@ -14,7 +14,7 @@ use std::fmt::Debug;
 
 use facet::Facet;
 use facet_git_tree::{
-    EntryKind, Node, ObjectStore, RawTree, Schema, SchemaWriteError, VariantKind,
+    EntryKind, Node, ObjectStore, RawTree, Schema, SchemaReadError, SchemaWriteError, VariantKind,
     deserialize_value_with_schema, schema_of, serialize, serialize_into,
     serialize_value_with_schema,
 };
@@ -24,7 +24,7 @@ use gix_object::{Kind, Write as _};
 mod common;
 use common::{
     Event, Person, Point, TreeNode, WithArray, WithDefault, WithMap, WithOptional, WithVec,
-    find_entry,
+    checked, find_entry,
 };
 
 /// The typed encoding's root oid: the ground truth every schema-directed write
@@ -34,11 +34,7 @@ fn typed_root<T: for<'a> Facet<'a>>(value: &T) -> facet_git_tree::ObjectId {
 }
 
 fn schema(root: Node) -> Schema {
-    Schema {
-        kind: "test".into(),
-        root,
-        defs: BTreeMap::new(),
-    }
+    Schema::new("test".into(), root, BTreeMap::new()).expect("valid schema")
 }
 
 fn one_field(name: &str, node: Node) -> BTreeMap<String, Node> {
@@ -69,9 +65,9 @@ where
 {
     let (root, store) = serialize(&value).expect("typed serialize");
     let doc = schema_of::<T>().expect("schema_of");
-    let read = deserialize_value_with_schema(&root, &doc, &store).expect("read");
+    let read = deserialize_value_with_schema(&root, &checked(&doc), &store).expect("read");
     let out = ObjectStore::default();
-    let written = serialize_value_with_schema(&read, &doc, &out).expect("schema write");
+    let written = serialize_value_with_schema(&read, &checked(&doc), &out).expect("schema write");
     assert_eq!(
         written, root,
         "re-encoding the read image of {value:?} must reproduce the typed oid"
@@ -130,15 +126,16 @@ fn composite_key_maps_use_canonical_cbor_and_preserve_their_read_image() {
         ((3, 4), "cell".to_owned()),
     ]);
     let doc = schema_of::<BTreeMap<(u8, u8), String>>().unwrap();
-    assert!(matches!(doc.root, Node::Cbor));
+    assert!(matches!(doc.root(), Node::Cbor));
 
     // { [1, 2]: "other", [3, 4]: "cell" } in RFC 8949 core-deterministic form.
     let canonical = b"\xa2\x82\x01\x02\x65other\x82\x03\x04\x64cell";
     let (root, store) = serialize(&table).expect("non-string maps require canonical CBOR");
     assert_eq!(store.get_blob(&root).unwrap().unwrap(), canonical);
-    let read = deserialize_value_with_schema(&root, &doc, &store).expect("read CBOR map");
+    let read = deserialize_value_with_schema(&root, &checked(&doc), &store).expect("read CBOR map");
     let out = ObjectStore::default();
-    let written = serialize_value_with_schema(&read, &doc, &out).expect("re-encode CBOR map");
+    let written =
+        serialize_value_with_schema(&read, &checked(&doc), &out).expect("re-encode CBOR map");
     assert_eq!(written, root);
     assert_eq!(out.get_blob(&written).unwrap().unwrap(), canonical);
 }
@@ -149,21 +146,24 @@ fn cbor_read_image_round_trips_and_rejects_noncanonical_bytes() {
     let store = ObjectStore::default();
     for canonical in [b"\x01".as_slice(), b"\xa1\x61x\x01".as_slice()] {
         let root = store.write_buf(Kind::Blob, canonical).unwrap();
-        let read = deserialize_value_with_schema(&root, &doc, &store).expect("read canonical CBOR");
+        let read = deserialize_value_with_schema(&root, &checked(&doc), &store)
+            .expect("read canonical CBOR");
         assert_eq!(read.as_bytes().unwrap().as_slice(), canonical);
         let out = ObjectStore::default();
-        let written = serialize_value_with_schema(&read, &doc, &out).expect("re-encode CBOR");
+        let written =
+            serialize_value_with_schema(&read, &checked(&doc), &out).expect("re-encode CBOR");
         assert_eq!(written, root);
         assert_eq!(out.get_blob(&written).unwrap().unwrap(), canonical);
     }
     for invalid in [b"\x18\x01".as_slice(), b"\x01\x00".as_slice()] {
         let root = store.write_buf(Kind::Blob, invalid).unwrap();
         assert!(
-            deserialize_value_with_schema(&root, &doc, &store).is_err(),
+            deserialize_value_with_schema(&root, &checked(&doc), &store).is_err(),
             "non-canonical or trailing CBOR must be rejected: {invalid:?}"
         );
         assert!(
-            serialize_value_with_schema(&Value::from(invalid.to_vec()), &doc, &store).is_err(),
+            serialize_value_with_schema(&Value::from(invalid.to_vec()), &checked(&doc), &store)
+                .is_err(),
             "non-canonical or trailing CBOR must not be written: {invalid:?}"
         );
     }
@@ -201,7 +201,8 @@ fn reencodes_byte_sequence() {
 fn integer_into_float_field_matches_typed() {
     let doc = schema_of::<Point>().unwrap();
     let store = ObjectStore::default();
-    let written = serialize_value_with_schema(&value!({ "x": 1, "y": 2 }), &doc, &store).unwrap();
+    let written =
+        serialize_value_with_schema(&value!({ "x": 1, "y": 2 }), &checked(&doc), &store).unwrap();
     assert_eq!(written, typed_root(&Point { x: 1.0, y: 2.0 }));
 }
 
@@ -215,7 +216,8 @@ fn string_into_bytes_field_matches_typed() {
     }
     let doc = schema_of::<WithBytes>().unwrap();
     let store = ObjectStore::default();
-    let written = serialize_value_with_schema(&value!({ "raw": "hello" }), &doc, &store).unwrap();
+    let written =
+        serialize_value_with_schema(&value!({ "raw": "hello" }), &checked(&doc), &store).unwrap();
     assert_eq!(
         written,
         typed_root(&WithBytes {
@@ -232,10 +234,12 @@ fn bare_option_payload_is_wrapped_like_typed() {
     let doc = schema_of::<WithOptional>().unwrap();
     let store = ObjectStore::default();
 
-    let some = serialize_value_with_schema(&value!({ "maybe": 5 }), &doc, &store).unwrap();
+    let some =
+        serialize_value_with_schema(&value!({ "maybe": 5 }), &checked(&doc), &store).unwrap();
     assert_eq!(some, typed_root(&WithOptional { maybe: Some(5) }));
 
-    let none = serialize_value_with_schema(&value!({ "maybe": null }), &doc, &store).unwrap();
+    let none =
+        serialize_value_with_schema(&value!({ "maybe": null }), &checked(&doc), &store).unwrap();
     assert_eq!(none, typed_root(&WithOptional { maybe: None }));
 }
 
@@ -258,8 +262,12 @@ fn raw_tree_reference_matches_typed() {
     .unwrap();
 
     let doc = schema_of::<WithRaw>().unwrap();
-    let written =
-        serialize_value_with_schema(&value!({ "raw": (inner.to_string()) }), &doc, &store).unwrap();
+    let written = serialize_value_with_schema(
+        &value!({ "raw": (inner.to_string()) }),
+        &checked(&doc),
+        &store,
+    )
+    .unwrap();
     assert_eq!(written, typed);
 }
 
@@ -270,7 +278,7 @@ fn dynamic_node_matches_plain_serialize() {
     let doc = schema(Node::Dynamic);
     let v = value!({ "a": [1, 2], "b": "x" });
     let store = ObjectStore::default();
-    let written = serialize_value_with_schema(&v, &doc, &store).unwrap();
+    let written = serialize_value_with_schema(&v, &checked(&doc), &store).unwrap();
     assert_eq!(written, typed_root(&v));
 }
 
@@ -284,7 +292,7 @@ fn dynamic_node_matches_plain_serialize() {
 fn omitting_a_field_is_rejected_at_write() {
     let doc = schema_of::<WithOptional>().unwrap();
     let store = ObjectStore::default();
-    let err = serialize_value_with_schema(&value!({}), &doc, &store).unwrap_err();
+    let err = serialize_value_with_schema(&value!({}), &checked(&doc), &store).unwrap_err();
     assert!(
         matches!(&err, SchemaWriteError::MissingField { field, .. } if field == "maybe"),
         "expected MissingField, got {err:?}"
@@ -297,9 +305,10 @@ fn omitting_a_field_is_rejected_at_write() {
 fn explicit_null_for_optional_field_round_trips() {
     let doc = schema_of::<WithOptional>().unwrap();
     let store = ObjectStore::default();
-    let root = serialize_value_with_schema(&value!({ "maybe": null }), &doc, &store)
+    let root = serialize_value_with_schema(&value!({ "maybe": null }), &checked(&doc), &store)
         .expect("an explicit null must write");
-    let back = deserialize_value_with_schema(&root, &doc, &store).expect("must read back");
+    let back =
+        deserialize_value_with_schema(&root, &checked(&doc), &store).expect("must read back");
     assert_eq!(back, value!({ "maybe": null }));
 }
 
@@ -309,7 +318,7 @@ fn unknown_field_is_rejected_with_path() {
     let store = ObjectStore::default();
     let err = serialize_value_with_schema(
         &value!({ "name": "a", "age": 1, "active": true, "extra": 1 }),
-        &doc,
+        &checked(&doc),
         &store,
     )
     .unwrap_err();
@@ -326,7 +335,7 @@ fn out_of_range_integer_is_rejected() {
     let store = ObjectStore::default();
     let err = serialize_value_with_schema(
         &value!({ "name": "a", "age": 5000000000i64, "active": true }),
-        &doc,
+        &checked(&doc),
         &store,
     )
     .unwrap_err();
@@ -342,7 +351,7 @@ fn float_into_integer_field_is_rejected() {
     let store = ObjectStore::default();
     let err = serialize_value_with_schema(
         &value!({ "name": "a", "age": 1.5, "active": true }),
-        &doc,
+        &checked(&doc),
         &store,
     )
     .unwrap_err();
@@ -357,7 +366,8 @@ fn integer_too_large_for_f64_is_refused() {
     // 2^53 + 1 has no exact f64 representation.
     let doc = schema(Node::F64);
     let store = ObjectStore::default();
-    let err = serialize_value_with_schema(&value!(9007199254740993i64), &doc, &store).unwrap_err();
+    let err = serialize_value_with_schema(&value!(9007199254740993i64), &checked(&doc), &store)
+        .unwrap_err();
     assert!(
         matches!(
             err,
@@ -373,7 +383,7 @@ fn type_mismatch_names_the_path() {
     let store = ObjectStore::default();
     let err = serialize_value_with_schema(
         &value!({ "name": "a", "age": 1, "active": "yes" }),
-        &doc,
+        &checked(&doc),
         &store,
     )
     .unwrap_err();
@@ -388,8 +398,8 @@ fn tuple_length_mismatch_is_rejected() {
     // `Event::Move(i32, i32)` — a two-tuple; give it three.
     let doc = schema_of::<Event>().unwrap();
     let store = ObjectStore::default();
-    let err =
-        serialize_value_with_schema(&value!({ "Move": [1, 2, 3] }), &doc, &store).unwrap_err();
+    let err = serialize_value_with_schema(&value!({ "Move": [1, 2, 3] }), &checked(&doc), &store)
+        .unwrap_err();
     assert!(
         matches!(
             &err,
@@ -407,7 +417,8 @@ fn tuple_length_mismatch_is_rejected() {
 fn unknown_variant_is_rejected() {
     let doc = schema_of::<Event>().unwrap();
     let store = ObjectStore::default();
-    let err = serialize_value_with_schema(&value!({ "Nope": null }), &doc, &store).unwrap_err();
+    let err =
+        serialize_value_with_schema(&value!({ "Nope": null }), &checked(&doc), &store).unwrap_err();
     assert!(
         matches!(&err, SchemaWriteError::UnknownVariant { variant, .. } if variant == "Nope"),
         "expected UnknownVariant, got {err:?}"
@@ -421,7 +432,7 @@ fn multi_member_enum_object_is_rejected() {
     let mut obj = VObject::new();
     obj.insert("Ping", Value::NULL);
     obj.insert("Message", "hi");
-    let err = serialize_value_with_schema(&Value::from(obj), &doc, &store).unwrap_err();
+    let err = serialize_value_with_schema(&Value::from(obj), &checked(&doc), &store).unwrap_err();
     assert!(
         matches!(err, SchemaWriteError::MalformedEnum { found: 2, .. }),
         "expected MalformedEnum, got {err:?}"
@@ -430,11 +441,11 @@ fn multi_member_enum_object_is_rejected() {
 
 #[test]
 fn unknown_ref_is_rejected() {
-    let doc = schema(Node::Ref("missing".into()));
-    let store = ObjectStore::default();
-    let err = serialize_value_with_schema(&value!(1), &doc, &store).unwrap_err();
+    // A dangling reference is now rejected when the document is validated,
+    // before the write path is entered at all.
+    let err = Schema::new("test".into(), Node::Ref("missing".into()), BTreeMap::new()).unwrap_err();
     assert!(
-        matches!(&err, SchemaWriteError::UnknownRef { name, .. } if name == "missing"),
+        matches!(&err, SchemaReadError::UnknownRef(name) if name == "missing"),
         "expected UnknownRef, got {err:?}"
     );
 }
@@ -459,13 +470,19 @@ fn priority_field_change_is_a_visible_blob_diff() {
     )));
 
     let low_store = ObjectStore::default();
-    let low_root =
-        serialize_value_with_schema(&value!({ "priority": { "Low": null } }), &doc, &low_store)
-            .expect("serialize Low");
+    let low_root = serialize_value_with_schema(
+        &value!({ "priority": { "Low": null } }),
+        &checked(&doc),
+        &low_store,
+    )
+    .expect("serialize Low");
     let high_store = ObjectStore::default();
-    let high_root =
-        serialize_value_with_schema(&value!({ "priority": { "High": null } }), &doc, &high_store)
-            .expect("serialize High");
+    let high_root = serialize_value_with_schema(
+        &value!({ "priority": { "High": null } }),
+        &checked(&doc),
+        &high_store,
+    )
+    .expect("serialize High");
 
     assert_ne!(
         low_root, high_root,
@@ -511,29 +528,31 @@ fn empty_tags_list_is_visible_as_a_marker_entry() {
         Node::List(Box::new(Node::String)),
     )));
     let store = ObjectStore::default();
-    let root = serialize_value_with_schema(&value!({ "tags": [] }), &doc, &store)
+    let root = serialize_value_with_schema(&value!({ "tags": [] }), &checked(&doc), &store)
         .expect("serialize empty tags");
     let tags_entry = find_entry(&store, &root, "tags");
     assert_eq!(tags_entry.mode.kind(), EntryKind::Tree);
     assert_marker(&store, &tags_entry.oid);
 
     // And it still reads back as an empty list.
-    let v = deserialize_value_with_schema(&root, &doc, &store).expect("read");
+    let v = deserialize_value_with_schema(&root, &checked(&doc), &store).expect("read");
     assert_eq!(v, value!({ "tags": [] }));
 }
 
 #[test]
 fn unguarded_ref_cycle_is_rejected_before_value_write() {
-    let mut doc = schema(Node::Ref("loop".into()));
-    doc.defs.insert("loop".into(), Node::Ref("loop".into()));
-    let store = ObjectStore::default();
-    let leaf = typed_root(&1i32);
-    let err = serialize_value_with_schema(&value!(1), &doc, &store).unwrap_err();
+    // The cycle is rejected when the document is validated, so no value write
+    // is ever attempted through it.
+    let err = Schema::new(
+        "test".into(),
+        Node::Ref("loop".into()),
+        BTreeMap::from([("loop".into(), Node::Ref("loop".into()))]),
+    )
+    .unwrap_err();
     assert!(
-        matches!(&err, SchemaWriteError::Serialize(_)) && err.to_string().contains("cycle"),
+        err.to_string().contains("cycle"),
         "expected an invalid reference cycle, got {err:?}"
     );
-    assert!(store.get_blob(&leaf).unwrap().is_none());
 }
 
 // --- the marker is distinct from user names and covers every empty shape ---
@@ -544,12 +563,13 @@ fn an_empty_tuple_uses_the_marker_and_reads_back() {
     let store = ObjectStore::default();
     let v = value!({ "nothing": [] });
 
-    let root = serialize_value_with_schema(&v, &doc, &store).expect("write an empty tuple");
+    let root =
+        serialize_value_with_schema(&v, &checked(&doc), &store).expect("write an empty tuple");
     let entry = find_entry(&store, &root, "nothing");
     assert_eq!(entry.mode.kind(), EntryKind::Tree);
     assert_marker(&store, &entry.oid);
     assert_eq!(entry.oid, typed_root(&()));
-    let back = deserialize_value_with_schema(&root, &doc, &store)
+    let back = deserialize_value_with_schema(&root, &checked(&doc), &store)
         .expect("an empty tuple written by the schema writer must read back");
     assert_eq!(back, v);
 }
@@ -574,13 +594,14 @@ fn underscore_field_is_distinct_from_the_presence_marker() {
     let doc = schema(Node::Struct(one_field("_", Node::String)));
     let store = ObjectStore::default();
     let input = value!({ "_": "" });
-    let root = serialize_value_with_schema(&input, &doc, &store).expect("write underscore field");
+    let root = serialize_value_with_schema(&input, &checked(&doc), &store)
+        .expect("write underscore field");
     let entry = find_entry(&store, &root, "_");
     assert_eq!(entry.mode.kind(), EntryKind::Blob);
     assert_eq!(store.get_blob(&entry.oid).unwrap().unwrap(), b"\n");
     assert_ne!(root, typed_root(&()));
     assert_eq!(
-        deserialize_value_with_schema(&root, &doc, &store).unwrap(),
+        deserialize_value_with_schema(&root, &checked(&doc), &store).unwrap(),
         input
     );
 }
@@ -590,18 +611,23 @@ fn underscore_field_is_distinct_from_the_presence_marker() {
 #[test]
 fn a_defaulted_field_is_still_required() {
     let doc = schema_of::<WithDefault>().unwrap();
-    let Some(Node::Struct(fields)) = doc.defs.get("WithDefault") else {
+    let Some(Node::Struct(fields)) = doc.defs().get("WithDefault") else {
         panic!("WithDefault must be a named struct definition");
     };
     assert_eq!(fields.get("count"), Some(&Node::U32));
     let store = ObjectStore::default();
-    let err = serialize_value_with_schema(&value!({ "label": "x" }), &doc, &store).unwrap_err();
+    let err =
+        serialize_value_with_schema(&value!({ "label": "x" }), &checked(&doc), &store).unwrap_err();
     assert!(
         matches!(&err, SchemaWriteError::MissingField { path, field } if path == "$" && field == "count"),
         "expected MissingField for defaulted count, got {err:?}"
     );
-    let root =
-        serialize_value_with_schema(&value!({ "label": "x", "count": 0 }), &doc, &store).unwrap();
+    let root = serialize_value_with_schema(
+        &value!({ "label": "x", "count": 0 }),
+        &checked(&doc),
+        &store,
+    )
+    .unwrap();
     assert_eq!(
         root,
         typed_root(&WithDefault {
@@ -638,11 +664,12 @@ fn empty_shapes_share_one_materialized_marker() {
     for (node, input) in cases {
         let doc = schema(node);
         let store = ObjectStore::default();
-        let root = serialize_value_with_schema(&input, &doc, &store).expect("write empty shape");
+        let root =
+            serialize_value_with_schema(&input, &checked(&doc), &store).expect("write empty shape");
         assert_eq!(root, expected, "{doc:?}");
         assert_marker(&store, &root);
         assert_eq!(
-            deserialize_value_with_schema(&root, &doc, &store).unwrap(),
+            deserialize_value_with_schema(&root, &checked(&doc), &store).unwrap(),
             input
         );
     }
@@ -673,7 +700,7 @@ fn schema_writer_escapes_fields_and_map_keys_and_uses_git_order() {
         "a": { "some": "1", "a/b": "2" }
     });
     let store = ObjectStore::default();
-    let root = serialize_value_with_schema(&input, &doc, &store).unwrap();
+    let root = serialize_value_with_schema(&input, &checked(&doc), &store).unwrap();
     let entries = store.get_tree(&root).unwrap().unwrap();
     let names: Vec<&[u8]> = entries
         .iter()
@@ -703,7 +730,7 @@ fn schema_writer_escapes_fields_and_map_keys_and_uses_git_order() {
         .collect();
     assert_eq!(names, [b"%a%2Fb".as_slice(), b"%some".as_slice()]);
     assert_eq!(
-        deserialize_value_with_schema(&root, &doc, &store).unwrap(),
+        deserialize_value_with_schema(&root, &checked(&doc), &store).unwrap(),
         input
     );
 }
@@ -726,23 +753,23 @@ fn enum_variants_use_escaped_tags_and_frozen_payload_shapes() {
     let store = ObjectStore::default();
 
     let unit = value!({ "none": null });
-    let root = serialize_value_with_schema(&unit, &doc, &store).unwrap();
+    let root = serialize_value_with_schema(&unit, &checked(&doc), &store).unwrap();
     assert_eq!(store.get_blob(&root).unwrap().unwrap(), b"%none\n");
-    let err =
-        serialize_value_with_schema(&value!({ "none": "payload" }), &doc, &store).unwrap_err();
+    let err = serialize_value_with_schema(&value!({ "none": "payload" }), &checked(&doc), &store)
+        .unwrap_err();
     assert!(
         matches!(&err, SchemaWriteError::Expected { path, expected: "null", .. } if path == "$.none"),
         "unit variant must reject a payload at $.none, got {err:?}"
     );
     assert_eq!(
-        deserialize_value_with_schema(&root, &doc, &store).unwrap(),
+        deserialize_value_with_schema(&root, &checked(&doc), &store).unwrap(),
         unit
     );
 
     let direct = value!({ "a/b": "payload" });
-    let root = serialize_value_with_schema(&direct, &doc, &store).unwrap();
-    let err =
-        serialize_value_with_schema(&value!({ "a/b": ["payload"] }), &doc, &store).unwrap_err();
+    let root = serialize_value_with_schema(&direct, &checked(&doc), &store).unwrap();
+    let err = serialize_value_with_schema(&value!({ "a/b": ["payload"] }), &checked(&doc), &store)
+        .unwrap_err();
     assert!(
         matches!(&err, SchemaWriteError::Expected { path, expected: "string", .. } if path == "$.a/b"),
         "one-field tuple payload must be direct, got {err:?}"
@@ -751,12 +778,12 @@ fn enum_variants_use_escaped_tags_and_frozen_payload_shapes() {
     assert_eq!(entry.mode.kind(), EntryKind::Blob);
     assert_eq!(store.get_blob(&entry.oid).unwrap().unwrap(), b"payload\n");
     assert_eq!(
-        deserialize_value_with_schema(&root, &doc, &store).unwrap(),
+        deserialize_value_with_schema(&root, &checked(&doc), &store).unwrap(),
         direct
     );
 
     let tuple = value!({ "some": [7, true] });
-    let root = serialize_value_with_schema(&tuple, &doc, &store).unwrap();
+    let root = serialize_value_with_schema(&tuple, &checked(&doc), &store).unwrap();
     let entry = find_entry(&store, &root, "%some");
     assert_eq!(entry.mode.kind(), EntryKind::Tree);
     let children = store.get_tree(&entry.oid).unwrap().unwrap();
@@ -769,18 +796,18 @@ fn enum_variants_use_escaped_tags_and_frozen_payload_shapes() {
         b"true\n"
     );
     assert_eq!(
-        deserialize_value_with_schema(&root, &doc, &store).unwrap(),
+        deserialize_value_with_schema(&root, &checked(&doc), &store).unwrap(),
         tuple
     );
 
     let named = value!({ ".schema": { "some": "x" } });
-    let root = serialize_value_with_schema(&named, &doc, &store).unwrap();
+    let root = serialize_value_with_schema(&named, &checked(&doc), &store).unwrap();
     let entry = find_entry(&store, &root, "%.schema");
     assert_eq!(entry.mode.kind(), EntryKind::Tree);
     let child = find_entry(&store, &entry.oid, "%some");
     assert_eq!(store.get_blob(&child.oid).unwrap().unwrap(), b"x\n");
     assert_eq!(
-        deserialize_value_with_schema(&root, &doc, &store).unwrap(),
+        deserialize_value_with_schema(&root, &checked(&doc), &store).unwrap(),
         named
     );
 }
@@ -794,7 +821,8 @@ fn ordinals_are_lowercase_hex_and_enforce_the_tree_cap() {
     }
     let input = Value::from(items.clone());
     let store = ObjectStore::default();
-    let root = serialize_value_with_schema(&input, &doc, &store).expect("4096 elements fit");
+    let root =
+        serialize_value_with_schema(&input, &checked(&doc), &store).expect("4096 elements fit");
     let entries = store.get_tree(&root).unwrap().unwrap();
     assert_eq!(entries.len(), 4096);
     for (index, entry) in entries.iter().enumerate() {
@@ -805,13 +833,13 @@ fn ordinals_are_lowercase_hex_and_enforce_the_tree_cap() {
         assert_eq!(entry.mode.kind(), EntryKind::Blob);
     }
     assert_eq!(
-        deserialize_value_with_schema(&root, &doc, &store).unwrap(),
+        deserialize_value_with_schema(&root, &checked(&doc), &store).unwrap(),
         input
     );
     assert_eq!(root, typed_root(&vec![7i32; 4096]));
 
     items.push(7i32);
-    let err = serialize_value_with_schema(&Value::from(items), &doc, &store).unwrap_err();
+    let err = serialize_value_with_schema(&Value::from(items), &checked(&doc), &store).unwrap_err();
     assert!(matches!(&err, SchemaWriteError::Serialize(_)));
     assert!(err.to_string().contains("4096"), "{err:?}");
 }
@@ -824,7 +852,9 @@ fn float_bridges_use_frozen_text_and_reject_inexact_or_overflowing_numbers() {
         (Node::F64, "-inf", b"-inf\n".as_slice()),
     ] {
         let store = ObjectStore::default();
-        let root = serialize_value_with_schema(&Value::from(label), &schema(node), &store).unwrap();
+        let root =
+            serialize_value_with_schema(&Value::from(label), &checked(&schema(node)), &store)
+                .unwrap();
         assert_eq!(store.get_blob(&root).unwrap().unwrap(), expected);
     }
     for (node, typed) in [
@@ -833,22 +863,23 @@ fn float_bridges_use_frozen_text_and_reject_inexact_or_overflowing_numbers() {
     ] {
         let store = ObjectStore::default();
         let root =
-            serialize_value_with_schema(&Value::from(-0.0f64), &schema(node), &store).unwrap();
+            serialize_value_with_schema(&Value::from(-0.0f64), &checked(&schema(node)), &store)
+                .unwrap();
         assert_eq!(root, typed);
         assert_eq!(store.get_blob(&root).unwrap().unwrap(), b"0.0\n");
     }
     let store = ObjectStore::default();
     let doc = schema(Node::F32);
-    let exact = serialize_value_with_schema(&value!(16777216i64), &doc, &store).unwrap();
+    let exact = serialize_value_with_schema(&value!(16777216i64), &checked(&doc), &store).unwrap();
     assert_eq!(exact, typed_root(&16777216f32));
     for value in [value!(16777217i64), Value::from(1e40f64)] {
-        let err = serialize_value_with_schema(&value, &doc, &store).unwrap_err();
+        let err = serialize_value_with_schema(&value, &checked(&doc), &store).unwrap_err();
         assert!(
             matches!(&err, SchemaWriteError::UnrepresentableNumber { path, schema: "F32" } if path == "$"),
             "expected unrepresentable F32, got {err:?}"
         );
     }
-    assert!(serialize_value_with_schema(&Value::from("NaN"), &doc, &store).is_err());
+    assert!(serialize_value_with_schema(&Value::from("NaN"), &checked(&doc), &store).is_err());
 }
 
 #[test]
@@ -858,8 +889,9 @@ fn f32_json_max_round_trips_like_typed_f32() {
     let json_max = 3.4028235e38f64;
     assert_eq!(json_max as f32, f32::MAX);
     let store = ObjectStore::default();
-    let root = serialize_value_with_schema(&Value::from(json_max), &schema(Node::F32), &store)
-        .expect("canonical f32::MAX JSON must be importable");
+    let root =
+        serialize_value_with_schema(&Value::from(json_max), &checked(&schema(Node::F32)), &store)
+            .expect("canonical f32::MAX JSON must be importable");
     assert_eq!(root, typed_root(&f32::MAX));
 }
 
@@ -868,8 +900,10 @@ fn byte_and_text_bridges_preserve_their_distinct_leaf_framing() {
     let store = ObjectStore::default();
     for text in ["", "hello\n", "naïve"] {
         let input = Value::from(text);
-        let bytes = serialize_value_with_schema(&input, &schema(Node::Bytes), &store).unwrap();
-        let string = serialize_value_with_schema(&input, &schema(Node::String), &store).unwrap();
+        let bytes =
+            serialize_value_with_schema(&input, &checked(&schema(Node::Bytes)), &store).unwrap();
+        let string =
+            serialize_value_with_schema(&input, &checked(&schema(Node::String)), &store).unwrap();
         assert_eq!(store.get_blob(&bytes).unwrap().unwrap(), text.as_bytes());
         assert_eq!(
             store.get_blob(&string).unwrap().unwrap(),
@@ -886,32 +920,38 @@ fn schema_validation_checks_unused_definitions_and_variants_before_writing() {
         key: Box::new(Node::U8),
         value: Box::new(Node::String),
     };
-    let mut doc = schema(Node::String);
-    doc.defs.insert("Unused".into(), invalid_map.clone());
-    let input = Value::from("valid");
-    let leaf = typed_root(&String::from("valid"));
-    let store = ObjectStore::default();
-    let err = serialize_value_with_schema(&input, &doc, &store).unwrap_err();
-    assert!(matches!(&err, SchemaWriteError::Serialize(_)));
-    assert!(err.to_string().contains("map key"), "{err:?}");
-    assert!(store.get_blob(&leaf).unwrap().is_none());
 
-    let doc = schema(Node::Enum(BTreeMap::from([
-        ("Ok".into(), VariantKind::Unit),
-        ("Bad".into(), VariantKind::Tuple(vec![invalid_map])),
-    ])));
-    let store = ObjectStore::default();
-    let err = serialize_value_with_schema(&value!({ "Ok": null }), &doc, &store).unwrap_err();
-    assert!(matches!(&err, SchemaWriteError::Serialize(_)));
+    // A non-`String` map key in an unused definition is rejected when the
+    // document is validated, before any value can be written through it.
+    let err = Schema::new(
+        "test".into(),
+        Node::String,
+        BTreeMap::from([("Unused".into(), invalid_map.clone())]),
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("map key"), "{err:?}");
 
-    let mut dangling = schema(Node::String);
-    dangling
-        .defs
-        .insert("Unused".into(), Node::Ref("missing".into()));
-    let err = serialize_value_with_schema(&input, &dangling, &store).unwrap_err();
+    // Likewise for a non-`String` map key in an inactive enum variant.
+    let err = Schema::new(
+        "test".into(),
+        Node::Enum(BTreeMap::from([
+            ("Ok".into(), VariantKind::Unit),
+            ("Bad".into(), VariantKind::Tuple(vec![invalid_map])),
+        ])),
+        BTreeMap::new(),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("map key"), "{err:?}");
+
+    // A dangling reference in an unused definition is reported as such.
+    let err = Schema::new(
+        "test".into(),
+        Node::String,
+        BTreeMap::from([("Unused".into(), Node::Ref("missing".into()))]),
+    )
+    .unwrap_err();
     assert!(
-        matches!(&err, SchemaWriteError::UnknownRef { name, .. } if name == "missing"),
+        matches!(&err, SchemaReadError::UnknownRef(name) if name == "missing"),
         "expected dangling ref, got {err:?}"
     );
 }
@@ -930,47 +970,56 @@ fn schema_validation_rejects_oversized_shapes_and_encoded_names() {
             VariantKind::Tuple(vec![Node::Unit; 4097]),
         )])),
     ];
-    let input = Value::from("valid");
-    let leaf = typed_root(&String::from("valid"));
     for node in invalid {
-        let mut doc = schema(Node::String);
-        doc.defs.insert("Unused".into(), node);
-        let store = ObjectStore::default();
-        let err = serialize_value_with_schema(&input, &doc, &store).unwrap_err();
-        assert!(matches!(&err, SchemaWriteError::Serialize(_)), "{err:?}");
-        assert!(store.get_blob(&leaf).unwrap().is_none());
+        let err = Schema::new(
+            "test".into(),
+            Node::String,
+            BTreeMap::from([("Unused".into(), node)]),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid schema"), "{err:?}");
     }
 }
 
 #[test]
 fn reference_aliases_are_transparent_and_guarded_cycles_are_productive() {
-    let mut aliases = schema(Node::Ref("A".into()));
-    aliases.defs.insert("A".into(), Node::Ref("B".into()));
-    aliases.defs.insert("B".into(), Node::String);
+    let aliases = Schema::new(
+        "test".into(),
+        Node::Ref("A".into()),
+        BTreeMap::from([
+            ("A".into(), Node::Ref("B".into())),
+            ("B".into(), Node::String),
+        ]),
+    )
+    .expect("valid schema");
     let store = ObjectStore::default();
     let input = Value::from("hello");
-    let root = serialize_value_with_schema(&input, &aliases, &store).unwrap();
+    let root = serialize_value_with_schema(&input, &checked(&aliases), &store).unwrap();
     assert_eq!(root, typed_root(&String::from("hello")));
     assert_eq!(
-        deserialize_value_with_schema(&root, &aliases, &store).unwrap(),
+        deserialize_value_with_schema(&root, &checked(&aliases), &store).unwrap(),
         input
     );
 
-    let mut recursive = schema(Node::Ref("Link".into()));
-    recursive.defs.insert(
-        "Link".into(),
-        Node::Struct(BTreeMap::from([
-            ("value".into(), Node::I32),
-            (
-                "next".into(),
-                Node::Optional(Box::new(Node::Ref("Link".into()))),
-            ),
-        ])),
-    );
+    let recursive = Schema::new(
+        "test".into(),
+        Node::Ref("Link".into()),
+        BTreeMap::from([(
+            "Link".into(),
+            Node::Struct(BTreeMap::from([
+                ("value".into(), Node::I32),
+                (
+                    "next".into(),
+                    Node::Optional(Box::new(Node::Ref("Link".into()))),
+                ),
+            ])),
+        )]),
+    )
+    .expect("valid schema");
     let input = value!({ "value": 1, "next": { "value": 2, "next": null } });
-    let root = serialize_value_with_schema(&input, &recursive, &store).unwrap();
+    let root = serialize_value_with_schema(&input, &checked(&recursive), &store).unwrap();
     assert_eq!(
-        deserialize_value_with_schema(&root, &recursive, &store).unwrap(),
+        deserialize_value_with_schema(&root, &checked(&recursive), &store).unwrap(),
         input
     );
 }
@@ -982,8 +1031,8 @@ fn nested_errors_identify_the_value_path() {
         Node::List(Box::new(Node::U8)),
     )));
     let store = ObjectStore::default();
-    let err =
-        serialize_value_with_schema(&value!({ "items": [1, 300] }), &doc, &store).unwrap_err();
+    let err = serialize_value_with_schema(&value!({ "items": [1, 300] }), &checked(&doc), &store)
+        .unwrap_err();
     assert!(
         matches!(&err, SchemaWriteError::NumberOutOfRange { path, schema: "U8", .. } if path == "$.items[1]"),
         "expected range error at $.items[1], got {err:?}"

@@ -255,8 +255,8 @@ fn map_with_int_keys_is_cbor() {
         "{{ 42: \"x\" }} in core-deterministic CBOR, with no newline"
     );
     assert_eq!(
-        schema_of::<HashMap<u32, String>>().expect("schema").root,
-        Node::Cbor
+        schema_of::<HashMap<u32, String>>().expect("schema").root(),
+        &Node::Cbor
     );
     assert_eq!(
         deserialize::<WithIntMap>(&root_id, &store).expect("deserialize"),
@@ -367,8 +367,10 @@ fn map_with_composite_keys_is_cbor() {
         [0xa1, 0xa2, 0x61, b'x', 0x01, 0x61, b'y', 0x02, 0x61, b'a']
     );
     assert_eq!(
-        schema_of::<HashMap<Coord, String>>().expect("schema").root,
-        Node::Cbor
+        schema_of::<HashMap<Coord, String>>()
+            .expect("schema")
+            .root(),
+        &Node::Cbor
     );
     assert_eq!(
         deserialize::<WithCompositeKeyMap>(&root_id, &store).expect("deserialize"),

@@ -64,10 +64,10 @@ fn expected_schema() -> Schema {
             VariantKind::Tuple(vec![string_map(r("Node"))]),
         ),
     ]);
-    Schema {
-        kind: "Schema".into(),
-        root: r("Schema"),
-        defs: BTreeMap::from([
+    Schema::new(
+        "Schema".into(),
+        r("Schema"),
+        BTreeMap::from([
             (
                 "Schema".into(),
                 Node::Struct(fields(vec![
@@ -79,7 +79,8 @@ fn expected_schema() -> Schema {
             ("Node".into(), Node::Enum(node_variants)),
             ("VariantKind".into(), Node::Enum(variants)),
         ]),
-    }
+    )
+    .expect("valid S0 schema")
 }
 
 #[test]

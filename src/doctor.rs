@@ -342,8 +342,14 @@ mod tests {
 
     #[test]
     fn changed_schema_is_rejected_by_the_frozen_digest() {
-        let mut schema = schema_of::<Schema>().expect("derive S0");
-        schema.kind.push('!');
+        let original = schema_of::<Schema>().expect("derive S0");
+        // A one-character change to the opaque kind label must change the id.
+        let schema = Schema::new(
+            format!("{}!", original.kind()),
+            original.root().clone(),
+            original.defs().clone(),
+        )
+        .expect("valid changed schema");
         for (hash_kind, expected) in [(HashKind::Sha1, S0_SHA1), (HashKind::Sha256, S0_SHA256)] {
             let store = ObjectStore::with_hash_kind(hash_kind);
             let changed = serialize_into(&schema, &store).expect("encode changed schema");

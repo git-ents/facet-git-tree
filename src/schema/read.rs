@@ -10,207 +10,42 @@ use gix_object::{Data, Find, Kind};
 
 use crate::ObjectId;
 use crate::de::{
-    DecodeBudget, EncodedName, Entry, LeafKind, MAX_DECODE_VISITS, find_object_with_budget,
-    sort_by_ordinal, tree_entries_from_data, validate_marker,
+    DecodeBudget, EncodedName, Entry, LeafKind, find_object_with_budget, sort_by_ordinal,
+    tree_entries_from_data, validate_marker,
 };
 use crate::error::{DeserializeError, SchemaReadError};
-use crate::limits::MAX_VALUE_DEPTH;
-use crate::ordinal::{self, MAX_TREE_ENTRIES};
-use crate::schema::{Node, RefError, Schema, VariantKind};
+use crate::ordinal;
+use crate::schema::{CheckedSchema, Node, RefError, Schema, VariantKind, invalid_schema};
 
 /// Deserialize the bare object at `root` according to `doc`.
 ///
-/// The entire schema is checked, including unused definitions and variants,
-/// before any value is read. This does not read a `.schema` envelope. A CBOR
-/// node reads as opaque canonical bytes and rejects invalid or trailing data.
-/// An unwrapped `Value` cannot distinguish `Some(null)` from `None`, so such
-/// an option is rejected rather than returning a value that re-encodes wrongly.
+/// The document reached here has already passed the full well-formedness walk
+/// that produced the [`CheckedSchema`]; it is not re-checked. This does not
+/// read a `.schema` envelope. A CBOR node reads as opaque canonical bytes and
+/// rejects invalid or trailing data. An unwrapped `Value` cannot distinguish
+/// `Some(null)` from `None`, so such an option is rejected rather than
+/// returning a value that re-encodes wrongly.
 pub fn deserialize_value_with_schema<F: Find + ?Sized>(
     root: &ObjectId,
-    doc: &Schema,
+    doc: &CheckedSchema<'_>,
     store: &F,
 ) -> Result<Value, SchemaReadError> {
-    validate_schema(doc)?;
+    let schema = doc.schema();
     Reader {
-        doc,
+        doc: schema,
         store,
         budget: DecodeBudget::new(),
     }
-    .read_node(root, &doc.root, 0, None)
+    .read_node(root, schema.root(), 0, None)
 }
 
 /// Check the bare object at `root` against the entire schema.
 pub fn validate_with_schema<F: Find + ?Sized>(
     root: &ObjectId,
-    doc: &Schema,
+    doc: &CheckedSchema<'_>,
     store: &F,
 ) -> Result<(), SchemaReadError> {
     deserialize_value_with_schema(root, doc, store).map(|_| ())
-}
-
-/// Validate all schema syntax and references, independently of a value walk.
-///
-/// Guards break reference cycles, but their contents are still checked for
-/// dangling references, invalid keys, lengths and depth.
-pub(crate) fn validate_schema(doc: &Schema) -> Result<(), SchemaReadError> {
-    check_schema_len(doc.defs.len(), "definitions")?;
-    let mut pending = vec![(&doc.root, 0usize)];
-    for (name, node) in &doc.defs {
-        check_schema_name(name)?;
-        pending.push((node, 0));
-    }
-
-    let mut visited = 0usize;
-    while let Some((node, depth)) = pending.pop() {
-        if depth > MAX_VALUE_DEPTH {
-            return Err(DeserializeError::MaxDepth(MAX_VALUE_DEPTH).into());
-        }
-        visited += 1;
-        if visited > MAX_DECODE_VISITS {
-            return Err(invalid_schema("schema node limit exceeded"));
-        }
-        let next = depth + 1;
-        match node {
-            Node::Ref(name) => {
-                if !doc.defs.contains_key(name) {
-                    return Err(SchemaReadError::UnknownRef(name.clone()));
-                }
-            }
-            Node::List(elem) | Node::Optional(elem) => pending.push((elem, next)),
-            Node::Array { elem, len } => {
-                check_schema_len(*len, "array length")?;
-                pending.push((elem, next));
-            }
-            Node::Map { key, value } => {
-                if !matches!(key.as_ref(), Node::String) {
-                    return Err(invalid_schema("map key must be literally String"));
-                }
-                pending.push((key, next));
-                pending.push((value, next));
-            }
-            Node::Tuple(elems) => {
-                check_schema_len(elems.len(), "tuple arity")?;
-                pending.extend(elems.iter().map(|elem| (elem, next)));
-            }
-            Node::Struct(fields) => {
-                check_schema_fields(fields, &mut pending, next)?;
-            }
-            Node::Enum(variants) => {
-                check_schema_len(variants.len(), "enum variants")?;
-                for (name, kind) in variants {
-                    check_schema_name(name)?;
-                    match kind {
-                        VariantKind::Unit => {}
-                        VariantKind::Tuple(elems) => {
-                            check_schema_len(elems.len(), "tuple variant arity")?;
-                            pending.extend(elems.iter().map(|elem| (elem, next)));
-                        }
-                        VariantKind::Struct(fields) => {
-                            check_schema_fields(fields, &mut pending, next)?;
-                        }
-                    }
-                }
-            }
-            Node::Unit
-            | Node::Bool
-            | Node::Char
-            | Node::String
-            | Node::I8
-            | Node::I16
-            | Node::I32
-            | Node::I64
-            | Node::I128
-            | Node::ISize
-            | Node::U8
-            | Node::U16
-            | Node::U32
-            | Node::U64
-            | Node::U128
-            | Node::USize
-            | Node::F32
-            | Node::F64
-            | Node::Bytes
-            | Node::Cbor
-            | Node::RawTree
-            | Node::Dynamic => {}
-        }
-    }
-
-    // Only edges through structs, tuples and refs are unguarded. An explicit
-    // DFS handles long alias chains without using the call stack.
-    enum Visit<'a> {
-        Enter(&'a str),
-        Exit(&'a str),
-        Node(&'a Node),
-    }
-    let mut states: BTreeMap<&str, bool> = BTreeMap::new();
-    for name in doc.defs.keys() {
-        let mut stack = vec![Visit::Enter(name)];
-        while let Some(visit) = stack.pop() {
-            match visit {
-                Visit::Enter(name) => match states.get(name) {
-                    Some(true) => {}
-                    Some(false) => {
-                        return Err(invalid_schema(format!(
-                            "unguarded reference cycle involving {name:?}"
-                        )));
-                    }
-                    None => {
-                        let node = doc
-                            .defs
-                            .get(name)
-                            .ok_or_else(|| SchemaReadError::UnknownRef(name.to_owned()))?;
-                        states.insert(name, false);
-                        stack.push(Visit::Exit(name));
-                        stack.push(Visit::Node(node));
-                    }
-                },
-                Visit::Exit(name) => {
-                    states.insert(name, true);
-                }
-                Visit::Node(node) => match node {
-                    Node::Ref(name) => stack.push(Visit::Enter(name)),
-                    Node::Struct(fields) => stack.extend(fields.values().map(Visit::Node)),
-                    Node::Tuple(elems) => stack.extend(elems.iter().map(Visit::Node)),
-                    // Each of these is a guard, or has no outgoing edges.
-                    _ => {}
-                },
-            }
-        }
-    }
-    Ok(())
-}
-
-fn check_schema_fields<'a>(
-    fields: &'a BTreeMap<String, Node>,
-    pending: &mut Vec<(&'a Node, usize)>,
-    depth: usize,
-) -> Result<(), SchemaReadError> {
-    check_schema_len(fields.len(), "struct fields")?;
-    for (name, node) in fields {
-        check_schema_name(name)?;
-        pending.push((node, depth));
-    }
-    Ok(())
-}
-
-fn check_schema_len(len: usize, what: &str) -> Result<(), SchemaReadError> {
-    if len > MAX_TREE_ENTRIES {
-        return Err(invalid_schema(format!(
-            "{what} has {len} entries, exceeding {MAX_TREE_ENTRIES}"
-        )));
-    }
-    Ok(())
-}
-
-fn check_schema_name(name: &str) -> Result<(), SchemaReadError> {
-    crate::name::escape(name)
-        .map(|_| ())
-        .map_err(|error| invalid_schema(format!("invalid name {name:?}: {error}")))
-}
-
-fn invalid_schema(reason: impl std::fmt::Display) -> SchemaReadError {
-    DeserializeError::Reflect(format!("invalid schema: {reason}")).into()
 }
 
 fn invalid_tree(oid: &ObjectId, reason: impl std::fmt::Display) -> SchemaReadError {
@@ -251,7 +86,7 @@ impl<F: Find + ?Sized> Reader<'_, F> {
         // References have no encoded tree level, so a chain of aliases is
         // equivalent to its target.
         let schema = schema
-            .resolve(&self.doc.defs)
+            .resolve(self.doc.defs())
             .map_err(|error| match error {
                 RefError::Dangling { name } => SchemaReadError::UnknownRef(name),
                 RefError::Cycle { name } => {
@@ -681,16 +516,13 @@ mod tests {
     use gix_object::{Kind, Write};
 
     fn schema(root: Node) -> Schema {
-        Schema {
-            kind: "test".into(),
-            root,
-            defs: BTreeMap::new(),
-        }
+        Schema::new("test".into(), root, BTreeMap::new()).expect("valid schema")
     }
 
     #[test]
     fn cbor_roots_are_verbatim_bytes_and_roundtrip() -> anyhow::Result<()> {
         let doc = schema(Node::Cbor);
+        let doc = doc.checked()?;
         let payloads: &[&[u8]] = &[
             &[0x00],
             &[0x0a],
@@ -725,6 +557,7 @@ mod tests {
     #[test]
     fn cbor_reads_reject_invalid_and_trailing_bytes() -> anyhow::Result<()> {
         let doc = schema(Node::Cbor);
+        let doc = doc.checked()?;
         let store = ObjectStore::default();
         let invalid: &[(&[u8], &str)] = &[
             (&[], "truncated"),
@@ -750,7 +583,7 @@ mod tests {
             ));
             assert!(validate_with_schema(&oid, &doc, &store).is_err());
         }
-        let mut too_deep = vec![0x81; MAX_VALUE_DEPTH + 1];
+        let mut too_deep = vec![0x81; crate::limits::MAX_VALUE_DEPTH + 1];
         too_deep.push(0xf6);
         let oid = store
             .write_buf(Kind::Blob, &too_deep)
@@ -763,6 +596,7 @@ mod tests {
     fn cbor_reads_reject_tree_objects_and_mismatched_entry_kinds() -> anyhow::Result<()> {
         let store = ObjectStore::default();
         let doc = schema(Node::Cbor);
+        let doc = doc.checked()?;
         let tree = crate::marker::write_marker_tree(&store)?;
         let error = deserialize_value_with_schema(&tree, &doc, &store).unwrap_err();
         assert!(matches!(
@@ -786,6 +620,7 @@ mod tests {
             "payload".into(),
             Node::Cbor,
         )])));
+        let doc = doc.checked()?;
         let error = deserialize_value_with_schema(&parent, &doc, &store).unwrap_err();
         assert!(matches!(
             error,

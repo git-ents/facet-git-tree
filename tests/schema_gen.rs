@@ -39,11 +39,12 @@ fn re(name: &str) -> Node {
 }
 
 fn doc(kind: &str, root: Node, defs: Vec<(&str, Node)>) -> Schema {
-    Schema {
-        kind: kind.into(),
+    Schema::new(
+        kind.into(),
         root,
-        defs: defs.into_iter().map(|(k, v)| (k.into(), v)).collect(),
-    }
+        defs.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+    )
+    .expect("valid schema")
 }
 
 fn point_def() -> Node {
@@ -210,11 +211,7 @@ fn with_optional_schema() -> anyhow::Result<()> {
 fn byte_seq_schema_is_bytes() -> anyhow::Result<()> {
     assert_eq!(
         schema_of::<Vec<u8>>()?,
-        Schema {
-            kind: "Vec".into(),
-            root: Node::Bytes,
-            defs: BTreeMap::new(),
-        }
+        Schema::new("Vec".into(), Node::Bytes, BTreeMap::new()).expect("valid schema")
     );
     Ok(())
 }
@@ -222,16 +219,19 @@ fn byte_seq_schema_is_bytes() -> anyhow::Result<()> {
 /// Only string keys have a native map schema; other key types are CBOR.
 #[test]
 fn non_string_key_maps_have_opaque_cbor_schema() -> anyhow::Result<()> {
-    assert_eq!(schema_of::<HashMap<i32, String>>()?.root, Node::Cbor);
-    assert_eq!(schema_of::<BTreeMap<(u8, u8), String>>()?.root, Node::Cbor);
+    assert_eq!(schema_of::<HashMap<i32, String>>()?.root(), &Node::Cbor);
+    assert_eq!(
+        schema_of::<BTreeMap<(u8, u8), String>>()?.root(),
+        &Node::Cbor
+    );
     Ok(())
 }
 
 #[test]
 fn array_length_is_bounded_by_the_tree_entry_cap() -> anyhow::Result<()> {
     assert_eq!(
-        schema_of::<[i32; 4096]>()?.root,
-        Node::Array {
+        schema_of::<[i32; 4096]>()?.root(),
+        &Node::Array {
             elem: Box::new(Node::I32),
             len: 4096,
         }
@@ -364,11 +364,11 @@ fn schema_uses_effective_names_without_pre_escaping() -> anyhow::Result<()> {
         }
     }
     let schema = schema_of::<Renamed>()?;
-    assert_eq!(schema.kind, "Renamed");
-    let Node::Ref(root_name) = &schema.root else {
+    assert_eq!(schema.kind(), "Renamed");
+    let Node::Ref(root_name) = schema.root() else {
         panic!("named struct must have a reference root");
     };
-    let Some(Node::Struct(root_fields)) = schema.defs.get(root_name) else {
+    let Some(Node::Struct(root_fields)) = schema.defs().get(root_name) else {
         panic!("root must resolve to struct fields");
     };
     assert_eq!(
@@ -380,7 +380,7 @@ fn schema_uses_effective_names_without_pre_escaping() -> anyhow::Result<()> {
         ])
     );
     assert_eq!(
-        schema.defs.get("RenamedTask"),
+        schema.defs().get("RenamedTask"),
         Some(&Node::Enum(variants(vec![
             ("some", VariantKind::Unit),
             ("long_task", VariantKind::Tuple(vec![Node::String])),
@@ -555,10 +555,10 @@ fn name_collision_disambiguated() -> anyhow::Result<()> {
 fn box_schema_collapses() -> anyhow::Result<()> {
     let boxed = schema_of::<Box<Point>>()?;
     let point = schema_of::<Point>()?;
-    assert_eq!(boxed.kind, "Box");
-    assert_eq!(point.kind, "Point");
-    assert_eq!(boxed.root, point.root);
-    assert_eq!(boxed.defs, point.defs);
+    assert_eq!(boxed.kind(), "Box");
+    assert_eq!(point.kind(), "Point");
+    assert_eq!(boxed.root(), point.root());
+    assert_eq!(boxed.defs(), point.defs());
     Ok(())
 }
 
@@ -570,11 +570,7 @@ fn transparent_newtype_schema_collapses() -> anyhow::Result<()> {
     struct Hex(String);
     assert_eq!(
         schema_of::<Hex>()?,
-        Schema {
-            kind: "Hex".into(),
-            root: Node::String,
-            defs: BTreeMap::new(),
-        }
+        Schema::new("Hex".into(), Node::String, BTreeMap::new()).expect("valid schema")
     );
     Ok(())
 }
@@ -604,7 +600,7 @@ fn excessively_nested_shape_schema_is_rejected() {
     for _ in 0..5 {
         expected = Node::Optional(Box::new(expected));
     }
-    assert_eq!(schema_of::<Nested>().unwrap().root, expected);
+    assert_eq!(schema_of::<Nested>().unwrap().root(), &expected);
 }
 
 /// The explicit-bound entry point at the default bound reproduces

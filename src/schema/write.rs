@@ -26,20 +26,21 @@ use crate::float::{format_f32, format_f64};
 use crate::limits::MAX_VALUE_DEPTH;
 use crate::ordinal::{self, MAX_TREE_ENTRIES};
 use crate::schema::path::Path;
-use crate::schema::{Node, RefError, Schema, VariantKind, value_kind};
+use crate::schema::{CheckedSchema, Node, RefError, Schema, VariantKind, value_kind};
 use crate::ser::{serialize_node, write_binary_blob, write_leaf_blob};
 use crate::{EntryKind, EntryMode, ObjectId, TreeEntry};
 
 /// Serialize the bare value described by `doc` into `store`.
 ///
 /// The returned object may be a tree or a blob; no `.schema` envelope is
-/// added. The full schema is validated before any value objects are written.
-/// A `Cbor` value must be bytes containing exactly one canonical CBOR item;
-/// those bytes are stored verbatim, without a binary or newline wrapper.
-/// An unwrapped null denotes `None`, so `Some(None)` and `Some(())` cannot be
-/// represented through this `Value` API. `store` is any `gix` [`Write`] sink,
-/// as for [`serialize_into`](crate::serialize_into). Value mismatches identify
-/// the offending path.
+/// added. The document reached here has already passed the full
+/// well-formedness walk that produced the [`CheckedSchema`]; it is not
+/// re-checked. A `Cbor` value must be bytes containing exactly one canonical
+/// CBOR item; those bytes are stored verbatim, without a binary or newline
+/// wrapper. An unwrapped null denotes `None`, so `Some(None)` and `Some(())`
+/// cannot be represented through this `Value` API. `store` is any `gix`
+/// [`Write`] sink, as for [`serialize_into`](crate::serialize_into). Value
+/// mismatches identify the offending path.
 ///
 /// ```
 /// use facet::Facet;
@@ -53,8 +54,9 @@ use crate::{EntryKind, EntryMode, ObjectId, TreeEntry};
 /// }
 ///
 /// let doc = schema_of::<Point>()?;
+/// let checked = doc.checked()?;
 /// let store = facet_git_tree::ObjectStore::default();
-/// let via_schema = serialize_value_with_schema(&value!({ "x": 1.0, "y": 2.0 }), &doc, &store)?;
+/// let via_schema = serialize_value_with_schema(&value!({ "x": 1.0, "y": 2.0 }), &checked, &store)?;
 ///
 /// // Identical to the typed encoding, down to the object id.
 /// let (typed, _) = serialize(&Point { x: 1.0, y: 2.0 })?;
@@ -63,11 +65,11 @@ use crate::{EntryKind, EntryMode, ObjectId, TreeEntry};
 /// ```
 pub fn serialize_value_with_schema<W: Write + ?Sized>(
     value: &Value,
-    doc: &Schema,
+    doc: &CheckedSchema<'_>,
     store: &W,
 ) -> Result<ObjectId, SchemaWriteError> {
-    crate::schema::read::validate_schema(doc).map_err(schema_error)?;
-    let (oid, _kind) = write_node(value, &doc.root, doc, store, &Path::ROOT, 0)?;
+    let schema = doc.schema();
+    let (oid, _kind) = write_node(value, schema.root(), schema, store, &Path::ROOT, 0)?;
     Ok(oid)
 }
 
@@ -241,7 +243,7 @@ fn write_node<W: Write + ?Sized>(
             // References are transparent on disk: a chain of aliases is
             // equivalent to its target, and following one must not consume
             // tree-depth budget or recurse on the stack.
-            let target = schema.resolve(&doc.defs).map_err(|error| match error {
+            let target = schema.resolve(doc.defs()).map_err(|error| match error {
                 RefError::Dangling { name } => SchemaWriteError::UnknownRef {
                     path: path.show(),
                     name,
@@ -614,16 +616,6 @@ fn invalid_schema(reason: &str) -> SchemaWriteError {
     SerializeError::Reflect(format!("invalid schema: {reason}")).into()
 }
 
-fn schema_error(error: crate::error::SchemaReadError) -> SchemaWriteError {
-    match error {
-        crate::error::SchemaReadError::UnknownRef(name) => SchemaWriteError::UnknownRef {
-            path: Path::ROOT.show(),
-            name,
-        },
-        other => invalid_schema(&other.to_string()),
-    }
-}
-
 fn expected(path: &Path, expected: &'static str, found: &Value) -> SchemaWriteError {
     SchemaWriteError::Expected {
         path: path.show(),
@@ -674,16 +666,13 @@ mod tests {
     use facet_value::{VObject, value};
 
     fn schema(root: Node) -> Schema {
-        Schema {
-            kind: "test".into(),
-            root,
-            defs: BTreeMap::new(),
-        }
+        Schema::new("test".into(), root, BTreeMap::new()).expect("valid schema")
     }
 
     #[test]
     fn cbor_writes_reject_invalid_bytes_and_other_value_kinds() {
         let doc = schema(Node::Cbor);
+        let doc = doc.checked().expect("valid schema");
         let store = ObjectStore::default();
         for (payload, reason) in [
             (vec![], "truncated"),
@@ -721,30 +710,35 @@ mod tests {
 
     #[test]
     fn cbor_nested_references_and_options_roundtrip() -> anyhow::Result<()> {
-        let mut doc = schema(Node::Ref("Root".into()));
-        doc.defs = BTreeMap::from([
-            (
-                "Root".into(),
-                Node::Struct(BTreeMap::from([
-                    ("direct".into(), Node::Ref("Alias".into())),
-                    (
-                        "items".into(),
-                        Node::List(Box::new(Node::Optional(Box::new(Node::Ref(
-                            "Payload".into(),
-                        ))))),
-                    ),
-                    (
-                        "variant".into(),
-                        Node::Enum(BTreeMap::from([(
-                            "Payload".into(),
-                            VariantKind::Tuple(vec![Node::Ref("Payload".into())]),
-                        )])),
-                    ),
-                ])),
-            ),
-            ("Alias".into(), Node::Ref("Payload".into())),
-            ("Payload".into(), Node::Cbor),
-        ]);
+        let doc = Schema::new(
+            "test".into(),
+            Node::Ref("Root".into()),
+            BTreeMap::from([
+                (
+                    "Root".into(),
+                    Node::Struct(BTreeMap::from([
+                        ("direct".into(), Node::Ref("Alias".into())),
+                        (
+                            "items".into(),
+                            Node::List(Box::new(Node::Optional(Box::new(Node::Ref(
+                                "Payload".into(),
+                            ))))),
+                        ),
+                        (
+                            "variant".into(),
+                            Node::Enum(BTreeMap::from([(
+                                "Payload".into(),
+                                VariantKind::Tuple(vec![Node::Ref("Payload".into())]),
+                            )])),
+                        ),
+                    ])),
+                ),
+                ("Alias".into(), Node::Ref("Payload".into())),
+                ("Payload".into(), Node::Cbor),
+            ]),
+        )
+        .expect("valid schema");
+        let doc = doc.checked()?;
         let direct: &[u8] = &[0x0a];
         let cbor_null: &[u8] = &[0xf6];
         let cbor_bytes: &[u8] = &[0x42, 0x00, 0xff];
@@ -802,37 +796,29 @@ mod tests {
     }
 
     #[test]
-    fn cbor_keeps_full_schema_validation_before_value_walk() -> anyhow::Result<()> {
-        let store = ObjectStore::default();
-        let value = Value::from(vec![0x00]);
-        let oid = store
-            .write_buf(gix_object::Kind::Blob, &[0x00])
-            .map_err(SerializeError::Backend)?;
-        let mut doc = schema(Node::Cbor);
-        doc.defs
-            .insert("unused".into(), Node::Ref("missing".into()));
+    fn cbor_keeps_full_schema_validation_before_value_walk() {
+        let defs = |def: Node| BTreeMap::from([("unused".to_owned(), def)]);
+
+        // A dangling reference in an unused definition is rejected when the
+        // document is validated, not lazily when a value is walked.
         assert!(matches!(
-            serialize_value_with_schema(&value, &doc, &store),
-            Err(SchemaWriteError::UnknownRef { name, .. }) if name == "missing"
-        ));
-        assert!(matches!(
-            deserialize_value_with_schema(&oid, &doc, &store),
+            Schema::new("test".into(), Node::Cbor, defs(Node::Ref("missing".into()))),
             Err(crate::error::SchemaReadError::UnknownRef(name)) if name == "missing"
         ));
 
-        doc.defs.insert("unused".into(), Node::Ref("unused".into()));
-        assert!(serialize_value_with_schema(&value, &doc, &store).is_err());
-        assert!(deserialize_value_with_schema(&oid, &doc, &store).is_err());
-
-        doc.defs.insert(
-            "unused".into(),
-            Node::Map {
-                key: Box::new(Node::Cbor),
-                value: Box::new(Node::Cbor),
-            },
+        // An unguarded self-reference and a non-`String` map key are likewise
+        // rejected up front, before any value write can be attempted.
+        assert!(Schema::new("test".into(), Node::Cbor, defs(Node::Ref("unused".into()))).is_err());
+        assert!(
+            Schema::new(
+                "test".into(),
+                Node::Cbor,
+                defs(Node::Map {
+                    key: Box::new(Node::Cbor),
+                    value: Box::new(Node::Cbor),
+                }),
+            )
+            .is_err()
         );
-        assert!(serialize_value_with_schema(&value, &doc, &store).is_err());
-        assert!(deserialize_value_with_schema(&oid, &doc, &store).is_err());
-        Ok(())
     }
 }

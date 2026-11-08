@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 
 use facet::Facet;
-use facet_git_tree::{EntryKind, ObjectId, ObjectStore, TreeEntry, deserialize, serialize};
+use facet_git_tree::{
+    CheckedSchema, EntryKind, ObjectId, ObjectStore, Schema, TreeEntry, deserialize, serialize,
+};
 
 // --- shared fixtures ---
 
@@ -161,4 +163,9 @@ where
 {
     let (root_id, store) = serialize(&value).expect("serialize should succeed");
     deserialize(&root_id, &store).expect("deserialize should succeed")
+}
+
+/// Validate a document for the schema-directed entry points.
+pub fn checked(schema: &Schema) -> CheckedSchema<'_> {
+    schema.checked().expect("valid schema")
 }

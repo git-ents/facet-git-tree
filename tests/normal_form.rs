@@ -273,7 +273,7 @@ fn struct_field_names_are_escaped_and_overlong_names_are_refused() {
 #[test]
 fn an_identity_shaped_schema_is_in_the_universe() {
     let doc = schema_of::<Identity>().unwrap();
-    check_universe(&doc.root, &doc.defs).unwrap();
+    check_universe(doc.root(), doc.defs()).unwrap();
     check_identity_subtrees(&doc).unwrap();
 }
 
@@ -294,11 +294,11 @@ fn an_enum_leaves_the_universe() {
 #[test]
 fn options_and_dynamic_nodes_are_excluded() {
     let doc = schema_of::<Hints>().unwrap();
-    let excluded = |node: &Node| match check_universe(node, &doc.defs) {
+    let excluded = |node: &Node| match check_universe(node, doc.defs()) {
         Err(UniverseError::Excluded { found, .. }) => found,
         other => panic!("expected an exclusion, got {other:?}"),
     };
-    assert_eq!(excluded(&doc.root), "Optional");
+    assert_eq!(excluded(doc.root()), "Optional");
     assert_eq!(excluded(&Node::Dynamic), "Dynamic");
     assert_eq!(excluded(&Node::RawTree), "RawTree");
     assert_eq!(excluded(&Node::Unit), "Unit");
@@ -330,7 +330,7 @@ fn the_marker_lands_in_the_schema_document() {
     let marked: Vec<&str> = identity_subtrees(&doc).map(|(name, _)| name).collect();
     assert_eq!(marked, [format!("{IDENTITY_DEF_PREFIX}0").as_str()]);
 
-    let Node::Struct(fields) = &doc.defs["Binding"] else {
+    let Node::Struct(fields) = &doc.defs()["Binding"] else {
         panic!("Binding is a named-field struct");
     };
     assert_eq!(
