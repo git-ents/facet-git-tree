@@ -8,15 +8,15 @@ use std::collections::BTreeMap;
 use facet_value::{VArray, VNumber, VObject, Value};
 use gix_object::{Data, Find, Kind};
 
+use crate::ObjectId;
 use crate::de::{
-    DecodeBudget, Entries, MAX_DECODE_VISITS, find_object_with_budget, sort_by_ordinal,
-    tree_entries_from_data, validate_marker,
+    DecodeBudget, EncodedName, Entry, LeafKind, MAX_DECODE_VISITS, find_object_with_budget,
+    sort_by_ordinal, tree_entries_from_data, validate_marker,
 };
 use crate::error::{DeserializeError, SchemaReadError};
 use crate::limits::MAX_VALUE_DEPTH;
 use crate::ordinal::{self, MAX_TREE_ENTRIES};
 use crate::schema::{Node, RefError, Schema, VariantKind};
-use crate::{EntryKind, ObjectId};
 
 /// Deserialize the bare object at `root` according to `doc`.
 ///
@@ -229,7 +229,7 @@ impl<F: Find + ?Sized> Reader<'_, F> {
         oid: &ObjectId,
         buf: &'b mut Vec<u8>,
         depth: usize,
-        entry_kind: Option<EntryKind>,
+        entry_kind: Option<LeafKind>,
     ) -> Result<Data<'b>, SchemaReadError> {
         Ok(find_object_with_budget(
             oid,
@@ -246,7 +246,7 @@ impl<F: Find + ?Sized> Reader<'_, F> {
         oid: &ObjectId,
         schema: &Node,
         depth: usize,
-        entry_kind: Option<EntryKind>,
+        entry_kind: Option<LeafKind>,
     ) -> Result<Value, SchemaReadError> {
         // References have no encoded tree level, so a chain of aliases is
         // equivalent to its target.
@@ -332,7 +332,7 @@ impl<F: Find + ?Sized> Reader<'_, F> {
             }
             Node::Struct(fields) => {
                 let entries = tree_entries(&data, oid)?;
-                Ok(self.read_struct(entries, fields, depth)?.into())
+                Ok(self.read_struct(entries, fields, oid, depth)?.into())
             }
             Node::Tuple(elems) => {
                 let entries = self.sequence(&data, oid, depth)?;
@@ -341,8 +341,8 @@ impl<F: Find + ?Sized> Reader<'_, F> {
             Node::List(elem) => {
                 let entries = self.sequence(&data, oid, depth)?;
                 let mut array = VArray::new();
-                for (_, child, kind) in entries {
-                    array.push(self.read_node(&child, elem, depth + 1, Some(kind))?);
+                for entry in entries {
+                    array.push(self.read_node(&entry.oid, elem, depth + 1, Some(entry.kind))?);
                 }
                 Ok(array.into())
             }
@@ -350,8 +350,8 @@ impl<F: Find + ?Sized> Reader<'_, F> {
                 let entries = self.sequence(&data, oid, depth)?;
                 check_length(*len, entries.len())?;
                 let mut array = VArray::new();
-                for (_, child, kind) in entries {
-                    array.push(self.read_node(&child, elem, depth + 1, Some(kind))?);
+                for entry in entries {
+                    array.push(self.read_node(&entry.oid, elem, depth + 1, Some(entry.kind))?);
                 }
                 Ok(array.into())
             }
@@ -361,10 +361,10 @@ impl<F: Find + ?Sized> Reader<'_, F> {
                     return Ok(VObject::new().into());
                 }
                 let mut object = VObject::new();
-                for (name, child, kind) in entries {
-                    let name = decode_name(&name, oid)?;
-                    let value = self.read_node(&child, value, depth + 1, Some(kind))?;
-                    object.insert(name, value);
+                for entry in entries {
+                    let name = user_name(&entry.name, oid)?;
+                    let value = self.read_node(&entry.oid, value, depth + 1, Some(entry.kind))?;
+                    object.insert(name.to_owned(), value);
                 }
                 Ok(object.into())
             }
@@ -373,16 +373,19 @@ impl<F: Find + ?Sized> Reader<'_, F> {
                 if self.is_marker(&entries, depth)? {
                     return Ok(Value::NULL);
                 }
-                let [(name, child, kind)] = entries.as_slice() else {
+                let [entry] = entries.as_slice() else {
                     return Err(DeserializeError::MalformedOption {
                         found: entries.len(),
                     }
                     .into());
                 };
-                if name != crate::marker::SOME_KEY {
-                    return Err(DeserializeError::MislabeledOption { name: name.clone() }.into());
+                if entry.name.encoded() != crate::marker::SOME_KEY {
+                    return Err(DeserializeError::MislabeledOption {
+                        name: entry.name.encoded().to_owned(),
+                    }
+                    .into());
                 }
-                let value = self.read_node(child, inner, depth + 1, Some(*kind))?;
+                let value = self.read_node(&entry.oid, inner, depth + 1, Some(entry.kind))?;
                 if value.is_null() {
                     return Err(DeserializeError::Unsupported(
                         "Some(null) in schema-directed Value",
@@ -403,7 +406,7 @@ impl<F: Find + ?Sized> Reader<'_, F> {
         }
     }
 
-    fn is_marker(&mut self, entries: &Entries, depth: usize) -> Result<bool, SchemaReadError> {
+    fn is_marker(&mut self, entries: &[Entry], depth: usize) -> Result<bool, SchemaReadError> {
         Ok(validate_marker(
             entries,
             self.store,
@@ -417,7 +420,7 @@ impl<F: Find + ?Sized> Reader<'_, F> {
         data: &Data<'_>,
         oid: &ObjectId,
         depth: usize,
-    ) -> Result<Entries, SchemaReadError> {
+    ) -> Result<Vec<Entry>, SchemaReadError> {
         let entries = tree_entries(data, oid)?;
         if self.is_marker(&entries, depth)? {
             return Ok(Vec::new());
@@ -428,22 +431,23 @@ impl<F: Find + ?Sized> Reader<'_, F> {
 
     fn read_tuple(
         &mut self,
-        entries: Entries,
+        entries: Vec<Entry>,
         elems: &[Node],
         depth: usize,
     ) -> Result<VArray, SchemaReadError> {
         check_length(elems.len(), entries.len())?;
         let mut array = VArray::new();
-        for ((_, child, kind), elem) in entries.into_iter().zip(elems) {
-            array.push(self.read_node(&child, elem, depth + 1, Some(kind))?);
+        for (entry, elem) in entries.into_iter().zip(elems) {
+            array.push(self.read_node(&entry.oid, elem, depth + 1, Some(entry.kind))?);
         }
         Ok(array)
     }
 
     fn read_struct(
         &mut self,
-        entries: Entries,
+        entries: Vec<Entry>,
         fields: &BTreeMap<String, Node>,
+        oid: &ObjectId,
         depth: usize,
     ) -> Result<VObject, SchemaReadError> {
         if self.is_marker(&entries, depth)? {
@@ -455,15 +459,15 @@ impl<F: Find + ?Sized> Reader<'_, F> {
             return Ok(VObject::new());
         }
         let mut object = VObject::new();
-        for (encoded, child, kind) in entries {
-            let name = decode_name(&encoded, &child)?;
+        for entry in entries {
+            let name = user_name(&entry.name, oid)?;
             let field = fields
-                .get(&name)
+                .get(name)
                 .ok_or_else(|| SchemaReadError::UnexpectedEntry {
-                    entry: name.clone(),
+                    entry: name.to_owned(),
                 })?;
-            let value = self.read_node(&child, field, depth + 1, Some(kind))?;
-            object.insert(name, value);
+            let value = self.read_node(&entry.oid, field, depth + 1, Some(entry.kind))?;
+            object.insert(name.to_owned(), value);
         }
         if let Some(name) = fields.keys().find(|name| !object.contains_key(name)) {
             return Err(SchemaReadError::MissingField {
@@ -481,16 +485,19 @@ impl<F: Find + ?Sized> Reader<'_, F> {
         depth: usize,
     ) -> Result<Value, SchemaReadError> {
         let (name, payload) = if data.kind == Kind::Blob {
-            (decode_name(text(data, oid)?, oid)?, None)
+            (decode_blob_name(text(data, oid)?, oid)?, None)
         } else {
             let entries = tree_entries(data, oid)?;
-            let [(name, child, kind)] = entries.as_slice() else {
+            let [entry] = entries.as_slice() else {
                 return Err(DeserializeError::MalformedEnum {
                     found: entries.len(),
                 }
                 .into());
             };
-            (decode_name(name, oid)?, Some((*child, *kind)))
+            (
+                user_name(&entry.name, oid)?.to_owned(),
+                Some((entry.oid, entry.kind)),
+            )
         };
         let kind = variants
             .get(&name)
@@ -519,7 +526,7 @@ impl<F: Find + ?Sized> Reader<'_, F> {
                 let mut buf = Vec::new();
                 let data = self.load(&child, &mut buf, depth + 1, Some(kind))?;
                 let entries = tree_entries(&data, &child)?;
-                self.read_struct(entries, fields, depth + 1)?.into()
+                self.read_struct(entries, fields, &child, depth + 1)?.into()
             }
         };
         let mut object = VObject::new();
@@ -545,30 +552,56 @@ impl<F: Find + ?Sized> Reader<'_, F> {
             // Null and every empty dynamic container share this encoding.
             return Ok(Value::NULL);
         }
-        if ordinal::validate_sequence(entries.iter().map(|(name, _, _)| name)).is_ok() {
+        if ordinal::validate_sequence(entries.iter().map(|entry| entry.name.encoded().as_bytes()))
+            .is_ok()
+        {
             let mut array = VArray::new();
-            for (_, child, kind) in entries {
-                array.push(self.read_node(&child, &Node::Dynamic, depth + 1, Some(kind))?);
+            for entry in entries {
+                array.push(self.read_node(
+                    &entry.oid,
+                    &Node::Dynamic,
+                    depth + 1,
+                    Some(entry.kind),
+                )?);
             }
             return Ok(array.into());
         }
         let mut object = VObject::new();
-        for (encoded, child, kind) in entries {
-            let name = decode_name(&encoded, oid)?;
-            let value = self.read_node(&child, &Node::Dynamic, depth + 1, Some(kind))?;
-            object.insert(name, value);
+        for entry in entries {
+            let name = user_name(&entry.name, oid)?;
+            let value = self.read_node(&entry.oid, &Node::Dynamic, depth + 1, Some(entry.kind))?;
+            object.insert(name.to_owned(), value);
         }
         Ok(object.into())
     }
 }
 
-fn tree_entries(data: &Data<'_>, oid: &ObjectId) -> Result<Entries, SchemaReadError> {
+fn tree_entries(data: &Data<'_>, oid: &ObjectId) -> Result<Vec<Entry>, SchemaReadError> {
     Ok(tree_entries_from_data(data, oid)?)
 }
 
-fn decode_name(name: &str, oid: &ObjectId) -> Result<String, SchemaReadError> {
-    crate::name::unescape(name)
-        .map_err(|error| invalid_tree(oid, format!("invalid name {name:?}: {error}")))
+/// The entry's once-unescaped user name.
+///
+/// A structural marker name (`none`/`some`) is not a user name; reading one
+/// where a user name belongs is refused. The diagnostic names the *containing*
+/// tree `oid`, never a child object.
+fn user_name<'n>(name: &'n EncodedName, oid: &ObjectId) -> Result<&'n str, SchemaReadError> {
+    name.user().ok_or_else(|| {
+        invalid_tree(
+            oid,
+            format!(
+                "invalid name {:?}: a structural name is not a user name",
+                name.encoded()
+            ),
+        )
+    })
+}
+
+/// Validate and unescape an enum tag blob's user name. A blob tag is not a tree
+/// entry name, so it is unescaped here, exactly once.
+fn decode_blob_name(text: &str, oid: &ObjectId) -> Result<String, SchemaReadError> {
+    crate::name::unescape(text)
+        .map_err(|error| invalid_tree(oid, format!("invalid name {text:?}: {error}")))
 }
 
 fn require_blob(data: &Data<'_>, oid: &ObjectId) -> Result<(), SchemaReadError> {
@@ -642,9 +675,9 @@ fn check_length(expected: usize, found: usize) -> Result<(), SchemaReadError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ObjectStore;
     use crate::error::SerializeError;
     use crate::schema::write::serialize_value_with_schema;
+    use crate::{EntryKind, ObjectStore};
     use gix_object::{Kind, Write};
 
     fn schema(root: Node) -> Schema {
