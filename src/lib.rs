@@ -66,3 +66,7 @@ pub use schema::write::serialize_value_with_schema;
 pub use schema::{CheckedSchema, Node, RefError, Schema, VariantKind, schema_of};
 pub use ser::{serialize, serialize_into};
 pub use store::ObjectStore;
+
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
