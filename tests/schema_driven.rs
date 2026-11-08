@@ -15,13 +15,13 @@ use std::sync::Arc;
 
 use facet::Facet;
 use facet_git_tree::{
-    DeserializeError, EntryKind, EntryMode, Node, ObjectId, ObjectStore, RawTree, Schema,
-    SchemaReadError, SchemaWriteError, TreeEntry, VariantKind, deserialize,
+    DeserializeError, EntryKind, EntryMode, Node, ObjectStore, Oid, RawTree, Schema,
+    SchemaReadError, SchemaWriteError, Sha1, Sha256, TreeEntry, VariantKind, deserialize,
     deserialize_value_with_schema, schema_of, serialize, serialize_into,
     serialize_value_with_schema, validate_with_schema,
 };
 use facet_value::{VNumber, Value, value};
-use gix_object::{Kind, Write as _};
+use gix_object::Kind;
 
 mod common;
 use common::{Event, Person, Point, TreeNode, WithDefault, WithMap, WithOptional, checked};
@@ -169,7 +169,7 @@ fn composite_key_map_reads_as_opaque_cbor_and_reencodes() -> anyhow::Result<()> 
         root
     );
     assert_eq!(
-        deserialize::<HashMap<(u8, u8), String>>(&root, &store)?,
+        deserialize::<HashMap<(u8, u8), String>, _, _>(&root, &store)?,
         table
     );
     Ok(())
@@ -258,11 +258,11 @@ fn raw_tree_reads_as_hex_string() -> anyhow::Result<()> {
 /// Wrap a leaf in single-entry trees, from the innermost tree out.
 fn nest_single(
     store: &ObjectStore,
-    oid: ObjectId,
+    oid: Oid<Sha1>,
     wraps: usize,
     leaf_is_blob: bool,
     name: &str,
-) -> ObjectId {
+) -> Oid<Sha1> {
     let mut current = oid;
     let mut current_kind = if leaf_is_blob {
         EntryKind::Blob
@@ -273,7 +273,7 @@ fn nest_single(
         let entries = vec![TreeEntry {
             mode: EntryMode::from(current_kind),
             filename: name.into(),
-            oid: current,
+            oid: current.to_raw(),
         }];
         current = store
             .write(&gix_object::Tree { entries })
@@ -424,7 +424,7 @@ fn omitted_defaulted_field_is_rejected_on_write_and_read() -> anyhow::Result<()>
         matches!(&error, SchemaReadError::MissingField { field } if field == "count"),
         "expected MissingField(count), got {error:?}"
     );
-    let error = deserialize::<WithDefault>(&missing, &store).unwrap_err();
+    let error = deserialize::<WithDefault, _, _>(&missing, &store).unwrap_err();
     assert!(
         matches!(&error, DeserializeError::MissingField { field } if field == "count"),
         "expected typed MissingField(count), got {error:?}"
@@ -514,7 +514,7 @@ fn escaped_fields_and_variants_roundtrip_in_both_hash_formats() -> anyhow::Resul
         task: Task,
     }
 
-    for kind in [gix_hash::Kind::Sha1, gix_hash::Kind::Sha256] {
+    fn fixed_point<F: facet_git_tree::HashFormat>() -> anyhow::Result<()> {
         for task in [
             Task::Wait,
             Task::Note("hi\n".into()),
@@ -534,14 +534,24 @@ fn escaped_fields_and_variants_roundtrip_in_both_hash_formats() -> anyhow::Resul
                 task,
             };
             let doc = schema_of::<Record>()?;
-            let store = ObjectStore::with_hash_kind(kind);
+            let store = ObjectStore::<F>::new();
             let root = serialize_into(&record, &store)?;
             let title = common::find_entry(&store, &root, "%.schema");
-            assert_eq!(store.get_blob(&title.oid)?.as_deref(), Some(&b"T\n\n"[..]));
+            assert_eq!(
+                store
+                    .get_blob(&Oid::new(title.oid).expect("fixture id"))?
+                    .as_deref(),
+                Some(&b"T\n\n"[..])
+            );
             let maybe = common::find_entry(&store, &root, "%some");
             assert_eq!(maybe.mode.kind(), EntryKind::Tree);
             let some = common::find_entry(&store, &maybe.oid, "some");
-            assert_eq!(store.get_blob(&some.oid)?.as_deref(), Some(&b"7\n"[..]));
+            assert_eq!(
+                store
+                    .get_blob(&Oid::new(some.oid).expect("fixture id"))?
+                    .as_deref(),
+                Some(&b"7\n"[..])
+            );
             let labels = common::find_entry(&store, &root, "labels");
             for name in ["%", "%none", "%a%2Fb"] {
                 common::find_entry(&store, &labels.oid, name);
@@ -549,24 +559,38 @@ fn escaped_fields_and_variants_roundtrip_in_both_hash_formats() -> anyhow::Resul
             let numbers = common::find_entry(&store, &root, "numbers");
             let sixteenth = common::find_entry(&store, &numbers.oid, "010");
             assert_eq!(
-                store.get_blob(&sixteenth.oid)?.as_deref(),
+                store
+                    .get_blob(&Oid::new(sixteenth.oid).expect("fixture id"))?
+                    .as_deref(),
                 Some(&b"16\n"[..])
             );
             let bytes = common::find_entry(&store, &root, "bytes");
             assert_eq!(
-                store.get_blob(&bytes.oid)?.as_deref(),
+                store
+                    .get_blob(&Oid::new(bytes.oid).expect("fixture id"))?
+                    .as_deref(),
                 Some(&b"\0\xff\n"[..])
             );
             let task = common::find_entry(&store, &root, "task");
             match &record.task {
                 Task::Wait => {
                     assert_eq!(task.mode.kind(), EntryKind::Blob);
-                    assert_eq!(store.get_blob(&task.oid)?.as_deref(), Some(&b"%none\n"[..]));
+                    assert_eq!(
+                        store
+                            .get_blob(&Oid::new(task.oid).expect("fixture id"))?
+                            .as_deref(),
+                        Some(&b"%none\n"[..])
+                    );
                 }
                 Task::Note(_) => {
                     let note = common::find_entry(&store, &task.oid, "%a%2Fb");
                     assert_eq!(note.mode.kind(), EntryKind::Blob);
-                    assert_eq!(store.get_blob(&note.oid)?.as_deref(), Some(&b"hi\n\n"[..]));
+                    assert_eq!(
+                        store
+                            .get_blob(&Oid::new(note.oid).expect("fixture id"))?
+                            .as_deref(),
+                        Some(&b"hi\n\n"[..])
+                    );
                 }
                 Task::Pair(_, _) => {
                     let pair = common::find_entry(&store, &task.oid, "Pair");
@@ -583,12 +607,15 @@ fn escaped_fields_and_variants_roundtrip_in_both_hash_formats() -> anyhow::Resul
             let value = deserialize_value_with_schema(&root, &checked(&doc), &store)?;
             validate_with_schema(&root, &checked(&doc), &store)?;
             assert_eq!(
-                serialize_value_with_schema(&value, &checked(&doc), &store)?,
-                root
+                serialize_value_with_schema(&value, &checked(&doc), &store)?.to_raw(),
+                root.to_raw()
             );
-            assert_eq!(deserialize::<Record>(&root, &store)?, record);
+            assert_eq!(deserialize::<Record, _, _>(&root, &store)?, record);
         }
+        Ok(())
     }
+    fixed_point::<Sha1>()?;
+    fixed_point::<Sha256>()?;
     Ok(())
 }
 
@@ -614,7 +641,12 @@ fn options_and_empty_containers_roundtrip_via_marker() -> anyhow::Result<()> {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].filename, "none");
         assert_eq!(entries[0].mode.kind(), EntryKind::Blob);
-        assert_eq!(store.get_blob(&entries[0].oid)?.as_deref(), Some(&b""[..]));
+        assert_eq!(
+            store
+                .get_blob(&Oid::new(entries[0].oid).expect("fixture id"))?
+                .as_deref(),
+            Some(&b""[..])
+        );
     }
     let doc = schema_of::<Containers>()?;
     let decoded = deserialize_value_with_schema(&root, &checked(&doc), &store)?;
@@ -626,7 +658,7 @@ fn options_and_empty_containers_roundtrip_via_marker() -> anyhow::Result<()> {
         serialize_value_with_schema(&decoded, &checked(&doc), &store)?,
         root
     );
-    assert_eq!(deserialize::<Containers>(&root, &store)?, original);
+    assert_eq!(deserialize::<Containers, _, _>(&root, &store)?, original);
     Ok(())
 }
 
@@ -897,9 +929,9 @@ fn schema_directed_floats_have_canonical_spelling_and_fixed_points() -> anyhow::
 }
 
 // Raw Git tree entries allow malformed modes, order, and names to reach the reader.
-type ForeignEntry<'a> = (&'a [u8], &'a [u8], ObjectId);
+type ForeignEntry<'a> = (&'a [u8], &'a [u8], Oid<Sha1>);
 
-fn foreign_tree(store: &ObjectStore, entries: &[ForeignEntry<'_>]) -> ObjectId {
+fn foreign_tree(store: &ObjectStore, entries: &[ForeignEntry<'_>]) -> Oid<Sha1> {
     let mut bytes = Vec::new();
     for (mode, name, oid) in entries {
         bytes.extend_from_slice(mode);
@@ -913,7 +945,7 @@ fn foreign_tree(store: &ObjectStore, entries: &[ForeignEntry<'_>]) -> ObjectId {
         .expect("write foreign tree")
 }
 
-fn assert_schema_read_rejects(store: &ObjectStore, root: &ObjectId, node: Node, case: &str) {
+fn assert_schema_read_rejects(store: &ObjectStore, root: &Oid<Sha1>, node: Node, case: &str) {
     let doc = Schema::new("foreign".into(), node, BTreeMap::new()).expect("valid schema");
     assert!(
         deserialize_value_with_schema(root, &checked(&doc), store).is_err(),
@@ -1125,7 +1157,7 @@ fn empty_struct_variant_and_single_tuple_unit_are_distinct() -> anyhow::Result<(
             serialize_value_with_schema(&value, &checked(&doc), &store)?,
             root
         );
-        assert_eq!(deserialize::<Event>(&root, &store)?, event);
+        assert_eq!(deserialize::<Event, _, _>(&root, &store)?, event);
     }
     Ok(())
 }
@@ -1195,7 +1227,7 @@ fn typed_dynamic_missing_newline_must_not_be_accepted() -> anyhow::Result<()> {
     for bytes in [b"unterminated".as_slice(), b"\xff\x00", b""] {
         let root = store.write_buf(Kind::Blob, bytes).expect("blob");
         assert!(deserialize_value_with_schema(&root, &checked(&doc), &store).is_err());
-        let read = deserialize::<Value>(&root, &store);
+        let read = deserialize::<Value, _, _>(&root, &store);
         assert!(
             read.is_err(),
             "accepted dynamic text leaf without newline: {bytes:?}"

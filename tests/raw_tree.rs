@@ -9,7 +9,7 @@ use facet::Facet;
 use facet_git_tree::{
     DeserializeError, EntryKind, ObjectStore, RawTree, deserialize, serialize_into,
 };
-use gix_object::{Kind, Write as _};
+use gix_object::Kind;
 
 mod common;
 use common::get_tree_entry_mode;
@@ -30,7 +30,7 @@ fn raw_tree_passes_through_unchanged() {
         entries: vec![gix_object::tree::Entry {
             mode: gix_object::tree::EntryMode::from(EntryKind::Blob),
             filename: "run".into(),
-            oid: file_oid,
+            oid: file_oid.into_raw(),
         }],
     };
     let bin_oid = store.write(&bin_tree).expect("tree");
@@ -59,7 +59,7 @@ fn raw_tree_roundtrips() {
         entries: vec![gix_object::tree::Entry {
             mode: gix_object::tree::EntryMode::from(EntryKind::Blob),
             filename: "tool".into(),
-            oid: file_oid,
+            oid: file_oid.into_raw(),
         }],
     };
     let bin_oid = store.write(&bin_tree).expect("tree");

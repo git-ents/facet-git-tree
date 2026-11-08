@@ -19,18 +19,18 @@ use facet_git_tree::{
     serialize_value_with_schema,
 };
 use facet_value::{VArray, VObject, Value, value};
-use gix_object::{Kind, Write as _};
+use gix_object::Kind;
 
 mod common;
 use common::{
     Event, Person, Point, TreeNode, WithArray, WithDefault, WithMap, WithOptional, WithVec,
-    checked, find_entry,
+    checked, find_entry, typed,
 };
 
 /// The typed encoding's root oid: the ground truth every schema-directed write
 /// must reproduce.
 fn typed_root<T: for<'a> Facet<'a>>(value: &T) -> facet_git_tree::ObjectId {
-    serialize(value).expect("typed serialize").0
+    serialize(value).expect("typed serialize").0.into_raw()
 }
 
 fn schema(root: Node) -> Schema {
@@ -42,14 +42,17 @@ fn one_field(name: &str, node: Node) -> BTreeMap<String, Node> {
 }
 
 fn assert_marker(store: &ObjectStore, root: &facet_git_tree::ObjectId) {
-    let entries = store.get_tree(root).expect("read marker").expect("tree");
+    let entries = store
+        .get_tree(&typed(root))
+        .expect("read marker")
+        .expect("tree");
     assert_eq!(entries.len(), 1, "marker must have exactly one entry");
     let marker = &entries[0];
     assert_eq!(marker.filename, "none");
     assert_eq!(marker.mode.kind(), EntryKind::Blob);
     assert_eq!(
         store
-            .get_blob(&marker.oid)
+            .get_blob(&typed(&marker.oid))
             .expect("read object")
             .expect("blob"),
         b""
@@ -504,14 +507,14 @@ fn priority_field_change_is_a_visible_blob_diff() {
     );
     assert_eq!(
         low_store
-            .get_blob(&low_entry.oid)
+            .get_blob(&typed(&low_entry.oid))
             .expect("read object")
             .expect("blob"),
         b"Low\n"
     );
     assert_eq!(
         high_store
-            .get_blob(&high_entry.oid)
+            .get_blob(&typed(&high_entry.oid))
             .expect("read object")
             .expect("blob"),
         b"High\n"
@@ -598,7 +601,7 @@ fn underscore_field_is_distinct_from_the_presence_marker() {
         .expect("write underscore field");
     let entry = find_entry(&store, &root, "_");
     assert_eq!(entry.mode.kind(), EntryKind::Blob);
-    assert_eq!(store.get_blob(&entry.oid).unwrap().unwrap(), b"\n");
+    assert_eq!(store.get_blob(&typed(&entry.oid)).unwrap().unwrap(), b"\n");
     assert_ne!(root, typed_root(&()));
     assert_eq!(
         deserialize_value_with_schema(&root, &checked(&doc), &store).unwrap(),
@@ -723,7 +726,7 @@ fn schema_writer_escapes_fields_and_map_keys_and_uses_git_order() {
     );
     let map = entries.last().unwrap();
     assert_eq!(map.mode.kind(), EntryKind::Tree);
-    let children = store.get_tree(&map.oid).unwrap().unwrap();
+    let children = store.get_tree(&typed(&map.oid)).unwrap().unwrap();
     let names: Vec<&[u8]> = children
         .iter()
         .map(|entry| entry.filename.as_ref())
@@ -776,7 +779,10 @@ fn enum_variants_use_escaped_tags_and_frozen_payload_shapes() {
     );
     let entry = find_entry(&store, &root, "%a%2Fb");
     assert_eq!(entry.mode.kind(), EntryKind::Blob);
-    assert_eq!(store.get_blob(&entry.oid).unwrap().unwrap(), b"payload\n");
+    assert_eq!(
+        store.get_blob(&typed(&entry.oid)).unwrap().unwrap(),
+        b"payload\n"
+    );
     assert_eq!(
         deserialize_value_with_schema(&root, &checked(&doc), &store).unwrap(),
         direct
@@ -786,13 +792,16 @@ fn enum_variants_use_escaped_tags_and_frozen_payload_shapes() {
     let root = serialize_value_with_schema(&tuple, &checked(&doc), &store).unwrap();
     let entry = find_entry(&store, &root, "%some");
     assert_eq!(entry.mode.kind(), EntryKind::Tree);
-    let children = store.get_tree(&entry.oid).unwrap().unwrap();
+    let children = store.get_tree(&typed(&entry.oid)).unwrap().unwrap();
     assert_eq!(children.len(), 2);
     assert_eq!(children[0].filename, "000");
     assert_eq!(children[1].filename, "001");
-    assert_eq!(store.get_blob(&children[0].oid).unwrap().unwrap(), b"7\n");
     assert_eq!(
-        store.get_blob(&children[1].oid).unwrap().unwrap(),
+        store.get_blob(&typed(&children[0].oid)).unwrap().unwrap(),
+        b"7\n"
+    );
+    assert_eq!(
+        store.get_blob(&typed(&children[1].oid)).unwrap().unwrap(),
         b"true\n"
     );
     assert_eq!(
@@ -805,7 +814,7 @@ fn enum_variants_use_escaped_tags_and_frozen_payload_shapes() {
     let entry = find_entry(&store, &root, "%.schema");
     assert_eq!(entry.mode.kind(), EntryKind::Tree);
     let child = find_entry(&store, &entry.oid, "%some");
-    assert_eq!(store.get_blob(&child.oid).unwrap().unwrap(), b"x\n");
+    assert_eq!(store.get_blob(&typed(&child.oid)).unwrap().unwrap(), b"x\n");
     assert_eq!(
         deserialize_value_with_schema(&root, &checked(&doc), &store).unwrap(),
         named

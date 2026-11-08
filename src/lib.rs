@@ -28,6 +28,7 @@ mod de;
 pub mod doctor;
 mod error;
 mod float;
+mod hash;
 mod limits;
 mod marker;
 mod name;
@@ -51,6 +52,7 @@ pub use error::{
     DeserializeError, KeyError, NormalFormError, SchemaError, SchemaReadError, SchemaWriteError,
     SerializeError, UniverseError,
 };
+pub use hash::{Backend, HashFormat, HashFormatMismatch, Oid, Sha1, Sha256, Tagged};
 pub use normal_form::{
     IDENTITY_DEF_PREFIX, Key, NormalForm, check_identity_subtrees, check_universe,
     identity_subtrees,

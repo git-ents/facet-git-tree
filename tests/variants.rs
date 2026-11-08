@@ -15,7 +15,7 @@ use facet::Facet;
 use facet_git_tree::{EntryKind, serialize};
 
 mod common;
-use common::{find_entry, roundtrip, tree_entries};
+use common::{find_entry, roundtrip, tree_entries, typed};
 
 // --- test types ---
 
@@ -105,7 +105,7 @@ fn unit_variant_field_is_a_bare_name_blob() {
     );
     assert_eq!(
         store
-            .get_blob(&entry.oid)
+            .get_blob(&typed(&entry.oid))
             .expect("read object")
             .expect("blob"),
         b"High\n",
@@ -138,14 +138,14 @@ fn unit_variant_field_change_changes_the_blob() {
     );
     assert_eq!(
         low_store
-            .get_blob(&low_entry.oid)
+            .get_blob(&typed(&low_entry.oid))
             .expect("read object")
             .expect("blob"),
         b"Low\n"
     );
     assert_eq!(
         high_store
-            .get_blob(&high_entry.oid)
+            .get_blob(&typed(&high_entry.oid))
             .expect("read object")
             .expect("blob"),
         b"High\n"
@@ -174,7 +174,7 @@ fn struct_variant_fields_named_by_field() {
         "`radius` must be a leaf blob"
     );
     assert_eq!(
-        store.get_blob(&radius.oid).expect("read blob"),
+        store.get_blob(&typed(&radius.oid)).expect("read blob"),
         Some(b"2.5\n".to_vec())
     );
 }
@@ -194,7 +194,7 @@ fn tuple_variant_fields_named_by_index() {
         assert_eq!(entry.filename, name);
         assert_eq!(entry.mode.kind(), EntryKind::Blob);
         assert_eq!(
-            store.get_blob(&entry.oid).expect("read object"),
+            store.get_blob(&typed(&entry.oid)).expect("read object"),
             Some(blob.to_vec())
         );
     }
@@ -210,7 +210,7 @@ fn single_tuple_variant_field_is_direct() {
     assert_eq!(entries[0].filename, "Text");
     assert_eq!(entries[0].mode.kind(), EntryKind::Blob);
     assert_eq!(
-        store.get_blob(&entries[0].oid).expect("read text"),
+        store.get_blob(&typed(&entries[0].oid)).expect("read text"),
         Some(b"payload\n\n".to_vec())
     );
     assert_eq!(roundtrip(text), Shape::Text("payload\n".into()));
@@ -230,7 +230,7 @@ fn single_tuple_variant_field_is_direct() {
         assert_eq!(entry.filename, name);
         assert_eq!(entry.mode.kind(), EntryKind::Blob);
         assert_eq!(
-            store.get_blob(&entry.oid).expect("read object"),
+            store.get_blob(&typed(&entry.oid)).expect("read object"),
             Some(blob.to_vec())
         );
     }
@@ -243,7 +243,7 @@ fn single_tuple_variant_field_is_direct() {
     assert_eq!(entries[0].filename, "Bytes");
     assert_eq!(entries[0].mode.kind(), EntryKind::Blob);
     assert_eq!(
-        store.get_blob(&entries[0].oid).expect("read bytes"),
+        store.get_blob(&typed(&entries[0].oid)).expect("read bytes"),
         Some(vec![0, 0xff, b'\n'])
     );
     assert_eq!(roundtrip(bytes), Shape::Bytes(vec![0, 0xff, b'\n']));
@@ -269,7 +269,7 @@ fn variant_and_field_names_are_escaped() {
     assert_eq!(fields[0].filename, "%some");
     assert_eq!(fields[0].mode.kind(), EntryKind::Blob);
     assert_eq!(
-        store.get_blob(&fields[0].oid).expect("read field"),
+        store.get_blob(&typed(&fields[0].oid)).expect("read field"),
         Some(b"42\n".to_vec())
     );
     assert_eq!(roundtrip(value), Shape::Renamed { value: 42 });

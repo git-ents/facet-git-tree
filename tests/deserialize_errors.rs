@@ -10,11 +10,11 @@ use std::fmt::Debug;
 
 use facet::Facet;
 use facet_git_tree::{
-    DeserializeError, EntryKind, EntryMode, ObjectId, ObjectStore, RawTree, TreeEntry, deserialize,
+    DeserializeError, EntryKind, EntryMode, ObjectStore, Oid, RawTree, Sha1, TreeEntry, deserialize,
 };
 #[cfg(feature = "value")]
 use gix_object::{Data, Find};
-use gix_object::{Kind, Tree, Write};
+use gix_object::{Kind, Tree};
 
 #[cfg(feature = "value")]
 use facet_git_tree::{Node, Schema, SchemaReadError, deserialize_value_with_schema};
@@ -41,25 +41,25 @@ struct Strict {
 #[derive(Debug, Facet, PartialEq)]
 struct Empty {}
 
-fn blob(store: &ObjectStore, bytes: &[u8]) -> ObjectId {
+fn blob(store: &ObjectStore, bytes: &[u8]) -> Oid<Sha1> {
     store.write_buf(Kind::Blob, bytes).expect("write blob")
 }
 
 /// Entries must already be in Git tree order.
-fn tree(store: &ObjectStore, entries: &[(&str, EntryKind, ObjectId)]) -> ObjectId {
+fn tree(store: &ObjectStore, entries: &[(&str, EntryKind, Oid<Sha1>)]) -> Oid<Sha1> {
     let entries = entries
         .iter()
         .map(|(name, kind, oid)| TreeEntry {
             mode: EntryMode::from(*kind),
             filename: (*name).into(),
-            oid: *oid,
+            oid: oid.to_raw(),
         })
         .collect();
     store.write(&Tree { entries }).expect("write tree")
 }
 
 /// Bypass tree editors so malformed modes, duplicates, and ordering survive.
-fn raw_tree(store: &ObjectStore, entries: &[(&[u8], &[u8], ObjectId)]) -> ObjectId {
+fn raw_tree(store: &ObjectStore, entries: &[(&[u8], &[u8], Oid<Sha1>)]) -> Oid<Sha1> {
     let mut bytes = Vec::new();
     for (mode, name, oid) in entries {
         bytes.extend_from_slice(mode);
@@ -71,13 +71,16 @@ fn raw_tree(store: &ObjectStore, entries: &[(&[u8], &[u8], ObjectId)]) -> Object
     store.write_buf(Kind::Tree, &bytes).expect("write raw tree")
 }
 
-fn marker(store: &ObjectStore) -> ObjectId {
+fn marker(store: &ObjectStore) -> Oid<Sha1> {
     let empty = blob(store, b"");
     tree(store, &[("none", EntryKind::Blob, empty)])
 }
 
-fn rejected<T: for<'a> Facet<'a> + Debug>(store: &ObjectStore, oid: &ObjectId) -> DeserializeError {
-    deserialize::<T>(oid, store).expect_err("foreign object must be rejected")
+fn rejected<T: for<'a> Facet<'a> + Debug>(
+    store: &ObjectStore,
+    oid: &Oid<Sha1>,
+) -> DeserializeError {
+    deserialize::<T, _, _>(oid, store).expect_err("foreign object must be rejected")
 }
 
 fn assert_reflect(error: &DeserializeError, expected: &str) {
@@ -118,7 +121,10 @@ fn literal_empty_trees_are_rejected_except_for_raw_tree() {
         assert_reflect(&error, "is empty; use the none marker");
     }
     // RawTree is explicitly exempt from the no-empty-tree rule.
-    assert_eq!(deserialize::<RawTree>(&empty, &store).unwrap().oid(), empty);
+    assert_eq!(
+        deserialize::<RawTree, _, _>(&empty, &store).unwrap().oid(),
+        empty
+    );
 }
 
 #[test]
@@ -128,17 +134,23 @@ fn none_and_some_have_distinct_exact_marker_shapes() {
     let five = blob(&store, b"5\n");
     let some = tree(&store, &[("some", EntryKind::Blob, five)]);
     let some_none = tree(&store, &[("some", EntryKind::Tree, none)]);
-    assert_eq!(deserialize::<Option<i32>>(&none, &store).unwrap(), None);
-    assert_eq!(deserialize::<Option<i32>>(&some, &store).unwrap(), Some(5));
     assert_eq!(
-        deserialize::<Option<Option<i32>>>(&some_none, &store).unwrap(),
+        deserialize::<Option<i32>, _, _>(&none, &store).unwrap(),
+        None
+    );
+    assert_eq!(
+        deserialize::<Option<i32>, _, _>(&some, &store).unwrap(),
+        Some(5)
+    );
+    assert_eq!(
+        deserialize::<Option<Option<i32>>, _, _>(&some_none, &store).unwrap(),
         Some(None)
     );
     assert_eq!(
-        deserialize::<Vec<i32>>(&none, &store).unwrap(),
+        deserialize::<Vec<i32>, _, _>(&none, &store).unwrap(),
         Vec::<i32>::new()
     );
-    assert_eq!(deserialize::<Empty>(&none, &store).unwrap(), Empty {});
+    assert_eq!(deserialize::<Empty, _, _>(&none, &store).unwrap(), Empty {});
 
     let nonempty = blob(&store, b"\n");
     let bad_none = tree(&store, &[("none", EntryKind::Blob, nonempty)]);
@@ -191,7 +203,7 @@ fn structural_names_and_noncanonical_escapes_are_rejected() {
     );
     let canonical = tree(&store, &[("%a%2Fb", EntryKind::Blob, value)]);
     assert_eq!(
-        deserialize::<BTreeMap<String, String>>(&canonical, &store).unwrap(),
+        deserialize::<BTreeMap<String, String>, _, _>(&canonical, &store).unwrap(),
         BTreeMap::from([("a/b".into(), "v".into())])
     );
 }
@@ -231,7 +243,7 @@ fn ordinals_require_three_lowercase_hex_digits_without_gaps_or_duplicates() {
         .collect();
     let lower = tree(&store, &refs);
     assert_eq!(
-        deserialize::<Vec<i32>>(&lower, &store).unwrap(),
+        deserialize::<Vec<i32>, _, _>(&lower, &store).unwrap(),
         vec![1; 11]
     );
 
@@ -340,7 +352,9 @@ fn tree_entry_cap_and_fixed_array_length_are_enforced() {
         .collect();
     let at_cap = tree(&store, &entries[..4096]);
     assert_eq!(
-        deserialize::<Vec<i32>>(&at_cap, &store).unwrap().len(),
+        deserialize::<Vec<i32>, _, _>(&at_cap, &store)
+            .unwrap()
+            .len(),
         4096
     );
     // The extra four-digit name sorts before the three-digit names beginning
@@ -439,7 +453,7 @@ fn every_struct_field_is_required_even_if_optional_or_defaulted() {
         ],
     );
     assert_eq!(
-        deserialize::<Strict>(&valid, &store).unwrap(),
+        deserialize::<Strict, _, _>(&valid, &store).unwrap(),
         Strict {
             a: 7,
             defaulted: 0,
@@ -636,7 +650,7 @@ fn typed_recursive_value_enforces_encoded_depth_boundary() {
         children: Vec<DeepNode>,
     }
 
-    fn nested_nodes(store: &ObjectStore, wraps: usize) -> ObjectId {
+    fn nested_nodes(store: &ObjectStore, wraps: usize) -> Oid<Sha1> {
         let empty_list = marker(store);
         let mut node = tree(store, &[("children", EntryKind::Tree, empty_list)]);
         for _ in 0..wraps {
@@ -661,7 +675,7 @@ fn typed_recursive_value_enforces_encoded_depth_boundary() {
 }
 
 #[cfg(feature = "value")]
-fn nested_maps(store: &ObjectStore, levels: usize) -> ObjectId {
+fn nested_maps(store: &ObjectStore, levels: usize) -> Oid<Sha1> {
     let mut current = blob(store, b"leaf\n");
     let mut kind = EntryKind::Blob;
     for _ in 0..levels {
@@ -700,6 +714,9 @@ struct CountingStore<'a> {
 }
 
 #[cfg(feature = "value")]
+impl facet_git_tree::Tagged<Sha1> for CountingStore<'_> {}
+
+#[cfg(feature = "value")]
 impl Find for CountingStore<'_> {
     fn try_find<'a>(
         &self,
@@ -714,15 +731,15 @@ impl Find for CountingStore<'_> {
 #[cfg(feature = "value")]
 fn sequence_of_shared(
     store: &ObjectStore,
-    child: ObjectId,
+    child: Oid<Sha1>,
     kind: EntryKind,
     count: usize,
-) -> ObjectId {
+) -> Oid<Sha1> {
     let entries = (0..count)
         .map(|index| TreeEntry {
             mode: EntryMode::from(kind),
             filename: format!("{index:03x}").into(),
-            oid: child,
+            oid: child.to_raw(),
         })
         .collect();
     store
@@ -785,7 +802,7 @@ fn visit_budget_counts_each_occurrence_of_shared_oids() {
     );
 
     counted.finds.set(0);
-    let error = deserialize::<Vec<Vec<i32>>>(&over_limit, &counted)
+    let error = deserialize::<Vec<Vec<i32>>, _, _>(&over_limit, &counted)
         .expect_err("typed reads must share the visit limit");
     assert_reflect(&error, "maximum decode visits (1048576) exceeded");
     assert_eq!(counted.finds.get(), LIMIT);

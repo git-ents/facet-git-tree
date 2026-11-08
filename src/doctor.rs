@@ -7,6 +7,7 @@
 use gix_hash::Kind as HashKind;
 use gix_object::{Find, Write};
 
+use crate::hash::{HashFormat, Sha1, Sha256, Tagged};
 use crate::{
     DeserializeError, ObjectId, ObjectStore, Schema, SchemaError, SerializeError, deserialize,
     schema_of, serialize_into,
@@ -158,40 +159,47 @@ fn verify(
     hash_kind: HashKind,
     expected: ObjectId,
 ) -> Result<ObjectId, DoctorError> {
-    let store = ObjectStore::with_hash_kind(hash_kind);
-    verify_in(schema, hash_kind, expected, &store)
+    match hash_kind {
+        HashKind::Sha1 => {
+            verify_in::<Sha1, _>(schema, hash_kind, expected, &ObjectStore::<Sha1>::new())
+        }
+        HashKind::Sha256 => {
+            verify_in::<Sha256, _>(schema, hash_kind, expected, &ObjectStore::<Sha256>::new())
+        }
+        other => Err(DoctorError::UnsupportedHash { hash_kind: other }),
+    }
 }
 
-fn verify_in<S>(
+fn verify_in<F: HashFormat, S>(
     schema: &Schema,
     hash_kind: HashKind,
     expected: ObjectId,
     store: &S,
 ) -> Result<ObjectId, DoctorError>
 where
-    S: Find + Write + ?Sized,
+    S: Find + Write + Tagged<F> + ?Sized,
 {
     let initial = serialize_into(schema, store).map_err(|source| DoctorError::Encode {
         hash_kind,
         stage: EncodeStage::Initial,
         source,
     })?;
-    if initial != expected {
+    if initial.to_raw() != expected {
         return Err(DoctorError::DigestMismatch {
             hash_kind,
             expected,
-            actual: initial,
+            actual: initial.to_raw(),
         });
     }
     let decoded: Schema = deserialize(&initial, store).map_err(|source| DoctorError::Decode {
         hash_kind,
-        oid: initial,
+        oid: initial.to_raw(),
         source,
     })?;
     if &decoded != schema {
         return Err(DoctorError::ValueMismatch {
             hash_kind,
-            oid: initial,
+            oid: initial.to_raw(),
         });
     }
     let reencoded = serialize_into(&decoded, store).map_err(|source| DoctorError::Encode {
@@ -199,14 +207,14 @@ where
         stage: EncodeStage::RoundTrip,
         source,
     })?;
-    if reencoded != initial {
+    if reencoded.to_raw() != initial.to_raw() {
         return Err(DoctorError::RoundTripMismatch {
             hash_kind,
-            original: initial,
-            actual: reencoded,
+            original: initial.to_raw(),
+            actual: reencoded.to_raw(),
         });
     }
-    Ok(initial)
+    Ok(initial.to_raw())
 }
 
 #[cfg(test)]
@@ -228,14 +236,14 @@ mod tests {
         AlterReencodedRoot,
     }
 
-    struct FaultyStore {
-        inner: ObjectStore,
+    struct FaultyStore<F: HashFormat> {
+        inner: ObjectStore<F>,
         hash_kind: HashKind,
         fault: Fault,
         root_read: Cell<bool>,
     }
 
-    impl Find for FaultyStore {
+    impl<F: HashFormat> Find for FaultyStore<F> {
         fn try_find<'a>(
             &self,
             id: &gix_hash::oid,
@@ -282,7 +290,7 @@ mod tests {
         }
     }
 
-    impl Write for FaultyStore {
+    impl<F: HashFormat> Write for FaultyStore<F> {
         fn write_stream(
             &self,
             kind: Kind,
@@ -294,7 +302,7 @@ mod tests {
             {
                 return Err("deliberate write failure".into());
             }
-            let oid = self.inner.write_stream(kind, size, from)?;
+            let oid = Write::write_stream(&self.inner, kind, size, from)?;
             let expected = match self.hash_kind {
                 HashKind::Sha1 => S0_SHA1,
                 HashKind::Sha256 => S0_SHA256,
@@ -329,9 +337,15 @@ mod tests {
         }
     }
 
-    fn check_fault(hash_kind: HashKind, expected: ObjectId, fault: Fault) -> DoctorError {
-        let store = FaultyStore {
-            inner: ObjectStore::with_hash_kind(hash_kind),
+    impl<F: HashFormat> Tagged<F> for FaultyStore<F> {}
+
+    fn check_fault<F: HashFormat>(
+        hash_kind: HashKind,
+        expected: ObjectId,
+        fault: Fault,
+    ) -> DoctorError {
+        let store = FaultyStore::<F> {
+            inner: ObjectStore::<F>::new(),
             hash_kind,
             fault,
             root_read: Cell::new(false),
@@ -342,31 +356,33 @@ mod tests {
 
     #[test]
     fn changed_schema_is_rejected_by_the_frozen_digest() {
-        let original = schema_of::<Schema>().expect("derive S0");
-        // A one-character change to the opaque kind label must change the id.
-        let schema = Schema::new(
-            format!("{}!", original.kind()),
-            original.root().clone(),
-            original.defs().clone(),
-        )
-        .expect("valid changed schema");
-        for (hash_kind, expected) in [(HashKind::Sha1, S0_SHA1), (HashKind::Sha256, S0_SHA256)] {
-            let store = ObjectStore::with_hash_kind(hash_kind);
+        fn check<F: HashFormat>(hash_kind: HashKind, expected: ObjectId) {
+            let original = schema_of::<Schema>().expect("derive S0");
+            // A one-character change to the opaque kind label must change the id.
+            let schema = Schema::new(
+                format!("{}!", original.kind()),
+                original.root().clone(),
+                original.defs().clone(),
+            )
+            .expect("valid changed schema");
+            let store = ObjectStore::<F>::new();
             let changed = serialize_into(&schema, &store).expect("encode changed schema");
-            assert_ne!(changed, expected);
+            assert_ne!(changed.to_raw(), expected);
             assert!(matches!(
                 verify_in(&schema, hash_kind, expected, &store),
                 Err(DoctorError::DigestMismatch { hash_kind: found, expected: pin, actual })
-                    if found == hash_kind && pin == expected && actual == changed
+                    if found == hash_kind && pin == expected && actual == changed.to_raw()
             ));
         }
+        check::<Sha1>(HashKind::Sha1, S0_SHA1);
+        check::<Sha256>(HashKind::Sha256, S0_SHA256);
     }
 
     #[test]
     fn reports_backend_and_fixed_point_failures_in_both_formats() {
-        for (hash_kind, expected) in [(HashKind::Sha1, S0_SHA1), (HashKind::Sha256, S0_SHA256)] {
+        fn check<F: HashFormat>(hash_kind: HashKind, expected: ObjectId) {
             assert!(matches!(
-                check_fault(hash_kind, expected, Fault::RejectWrites),
+                check_fault::<F>(hash_kind, expected, Fault::RejectWrites),
                 DoctorError::Encode {
                     hash_kind: found,
                     stage: EncodeStage::Initial,
@@ -374,7 +390,7 @@ mod tests {
                 } if found == hash_kind
             ));
             assert!(matches!(
-                check_fault(hash_kind, expected, Fault::MissingRoot),
+                check_fault::<F>(hash_kind, expected, Fault::MissingRoot),
                 DoctorError::Decode {
                     hash_kind: found,
                     oid,
@@ -382,7 +398,7 @@ mod tests {
                 } if found == hash_kind && oid == expected && missing == expected
             ));
             assert!(matches!(
-                check_fault(hash_kind, expected, Fault::MalformedRoot),
+                check_fault::<F>(hash_kind, expected, Fault::MalformedRoot),
                 DoctorError::Decode {
                     hash_kind: found,
                     oid,
@@ -390,12 +406,12 @@ mod tests {
                 } if found == hash_kind && oid == expected
             ));
             assert!(matches!(
-                check_fault(hash_kind, expected, Fault::WrongSchema),
+                check_fault::<F>(hash_kind, expected, Fault::WrongSchema),
                 DoctorError::ValueMismatch { hash_kind: found, oid }
                     if found == hash_kind && oid == expected
             ));
             assert!(matches!(
-                check_fault(hash_kind, expected, Fault::RejectReencode),
+                check_fault::<F>(hash_kind, expected, Fault::RejectReencode),
                 DoctorError::Encode {
                     hash_kind: found,
                     stage: EncodeStage::RoundTrip,
@@ -403,10 +419,12 @@ mod tests {
                 } if found == hash_kind
             ));
             assert!(matches!(
-                check_fault(hash_kind, expected, Fault::AlterReencodedRoot),
+                check_fault::<F>(hash_kind, expected, Fault::AlterReencodedRoot),
                 DoctorError::RoundTripMismatch { hash_kind: found, original, actual }
                     if found == hash_kind && original == expected && actual == ObjectId::empty_tree(hash_kind)
             ));
         }
+        check::<Sha1>(HashKind::Sha1, S0_SHA1);
+        check::<Sha256>(HashKind::Sha256, S0_SHA256);
     }
 }

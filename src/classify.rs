@@ -1,5 +1,6 @@
 use facet::{Def, Shape, Type, UserType};
 
+use crate::hash::{Sha1, Sha256};
 use crate::{RawBlob, RawTree};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,10 +50,13 @@ pub(crate) fn classify(shape: &'static Shape) -> ShapeClass {
     }
 
     let shape = collapse_shape(shape);
-    if shape.is_type::<RawTree>() {
+    // `RawBlob`/`RawTree` are generic over the hash format, so both
+    // instantiations must be recognized; the format trait is sealed, so these
+    // two cover every case.
+    if shape.is_type::<RawTree<Sha1>>() || shape.is_type::<RawTree<Sha256>>() {
         return ShapeClass::RawTree;
     }
-    if shape.is_type::<RawBlob>() {
+    if shape.is_type::<RawBlob<Sha1>>() || shape.is_type::<RawBlob<Sha256>>() {
         return ShapeClass::RawBlob;
     }
     if matches!(shape.def, Def::DynamicValue(_)) {

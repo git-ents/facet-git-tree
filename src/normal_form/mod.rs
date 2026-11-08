@@ -38,6 +38,7 @@ use std::collections::BTreeMap;
 use gix_object::Write;
 
 use crate::error::{NormalFormError, SerializeError, UniverseError};
+use crate::hash::{HashFormat, Oid, Sha1, Tagged};
 use crate::limits::{MAX_UNIVERSE_DEPTH, MAX_VALUE_DEPTH};
 use crate::ordinal::{self, MAX_TREE_ENTRIES};
 use crate::schema::{Node, Schema};
@@ -134,10 +135,10 @@ impl Key {
 /// schema-free value cannot prove that a struct has every schema field or that
 /// a map is string-keyed when it is empty; use [`check_universe`] alongside
 /// this function when a schema is available. `store` can be a `&dyn Write`.
-pub fn hash_into<W: Write + ?Sized>(
+pub fn hash_into<F: HashFormat, W: Write + Tagged<F> + ?Sized>(
     value: &NormalForm,
     store: &W,
-) -> Result<ObjectId, NormalFormError> {
+) -> Result<Oid<F>, NormalFormError> {
     validate_value(value, 0)?;
     write_node(value, store).map(|(oid, _kind)| oid)
 }
@@ -147,7 +148,7 @@ pub fn hash_into<W: Write + ?Sized>(
 ///
 /// Use [`hash_into`] with a store configured for another Git hash format when
 /// necessary. Object ids are only comparable within the same hash format.
-pub fn hash(value: &NormalForm) -> Result<(ObjectId, ObjectStore), NormalFormError> {
+pub fn hash(value: &NormalForm) -> Result<(Oid<Sha1>, ObjectStore<Sha1>), NormalFormError> {
     let store = ObjectStore::default();
     let root = hash_into(value, &store)?;
     Ok((root, store))
@@ -229,10 +230,10 @@ fn validate_value(value: &NormalForm, depth: usize) -> Result<(), NormalFormErro
     Ok(())
 }
 
-fn write_node<W: Write + ?Sized>(
+fn write_node<F: HashFormat, W: Write + ?Sized>(
     value: &NormalForm,
     store: &W,
-) -> Result<(ObjectId, EntryKind), NormalFormError> {
+) -> Result<(Oid<F>, EntryKind), NormalFormError> {
     match value {
         NormalForm::List(items) => {
             let entries = items
@@ -244,7 +245,7 @@ fn write_node<W: Write + ?Sized>(
                             len: items.len(),
                             max: MAX_TREE_ENTRIES,
                         })?;
-                    entry(name, item, store)
+                    entry::<F, W>(name, item, store)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             write_tree(entries, store)
@@ -258,7 +259,7 @@ fn write_node<W: Write + ?Sized>(
                             field: name.clone(),
                         }
                     })?;
-                    entry(escaped, field, store)
+                    entry::<F, W>(escaped, field, store)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             write_tree(entries, store)
@@ -266,7 +267,7 @@ fn write_node<W: Write + ?Sized>(
         NormalForm::Map(pairs) => {
             let entries = pairs
                 .iter()
-                .map(|(key, item)| entry(key.name()?, item, store))
+                .map(|(key, item)| entry::<F, W>(key.name()?, item, store))
                 .collect::<Result<Vec<_>, _>>()?;
             write_tree(entries, store)
         }
@@ -290,39 +291,39 @@ fn write_node<W: Write + ?Sized>(
     }
 }
 
-fn text_blob<W: Write + ?Sized>(
+fn text_blob<F: HashFormat, W: Write + ?Sized>(
     text: &str,
     store: &W,
-) -> Result<(ObjectId, EntryKind), NormalFormError> {
+) -> Result<(Oid<F>, EntryKind), NormalFormError> {
     let oid = crate::ser::write_leaf_blob(store, text.as_bytes()).map_err(write_error)?;
     Ok((oid, EntryKind::Blob))
 }
 
-fn binary_blob<W: Write + ?Sized>(
+fn binary_blob<F: HashFormat, W: Write + ?Sized>(
     bytes: &[u8],
     store: &W,
-) -> Result<(ObjectId, EntryKind), NormalFormError> {
+) -> Result<(Oid<F>, EntryKind), NormalFormError> {
     let oid = crate::ser::write_binary_blob(store, bytes).map_err(write_error)?;
     Ok((oid, EntryKind::Blob))
 }
 
-fn entry<W: Write + ?Sized>(
+fn entry<F: HashFormat, W: Write + ?Sized>(
     name: String,
     value: &NormalForm,
     store: &W,
 ) -> Result<TreeEntry, NormalFormError> {
-    let (oid, kind) = write_node(value, store)?;
+    let (oid, kind) = write_node::<F, W>(value, store)?;
     Ok(TreeEntry {
         mode: EntryMode::from(kind),
         filename: name.into(),
-        oid,
+        oid: oid.into_raw(),
     })
 }
 
-fn write_tree<W: Write + ?Sized>(
+fn write_tree<F: HashFormat, W: Write + ?Sized>(
     mut entries: Vec<TreeEntry>,
     store: &W,
-) -> Result<(ObjectId, EntryKind), NormalFormError> {
+) -> Result<(Oid<F>, EntryKind), NormalFormError> {
     if entries.is_empty() {
         let oid = crate::marker::write_marker_tree(store).map_err(write_error)?;
         return Ok((oid, EntryKind::Tree));
@@ -330,9 +331,10 @@ fn write_tree<W: Write + ?Sized>(
     // `TreeEntry::Ord` is Git's comparator; unlike string sorting it treats
     // a tree name as ending with `/` when another name shares its prefix.
     entries.sort();
-    let oid = store
+    let raw = store
         .write(&gix_object::Tree { entries })
         .map_err(NormalFormError::Backend)?;
+    let oid = crate::ser::wrap_oid(raw).map_err(write_error)?;
     Ok((oid, EntryKind::Tree))
 }
 
@@ -508,7 +510,6 @@ fn node_name(node: &Node) -> &'static str {
 mod tests {
     use super::*;
     use facet::Facet;
-    use gix_hash::Kind as HashKind;
 
     fn blob(value: NormalForm) -> Vec<u8> {
         let (oid, store) = hash(&value).expect("write normal form");
@@ -530,12 +531,14 @@ mod tests {
     }
 
     fn assert_typed_matches<T: for<'a> Facet<'a>>(value: &T, normal: &NormalForm) {
-        for kind in [HashKind::Sha1, HashKind::Sha256] {
-            let store = ObjectStore::with_hash_kind(kind);
+        fn check<T: for<'a> Facet<'a>, F: HashFormat>(value: &T, normal: &NormalForm) {
+            let store = ObjectStore::<F>::new();
             let typed = crate::serialize_into(value, &store).expect("write typed value");
             let identity = hash_into(normal, &store).expect("write identity value");
-            assert_eq!(typed, identity, "{kind:?}: {normal:?}");
+            assert_eq!(typed.to_raw(), identity.to_raw(), "{normal:?}");
         }
+        check::<T, Sha1>(value, normal);
+        check::<T, crate::hash::Sha256>(value, normal);
     }
 
     #[test]
@@ -663,7 +666,9 @@ mod tests {
         assert_eq!(&entries[0].filename[..], b"none");
         assert_eq!(entries[0].mode, EntryMode::from(EntryKind::Blob));
         assert_eq!(
-            store.get_blob(&entries[0].oid).expect("read marker blob"),
+            store
+                .get_blob(&Oid::<Sha1>::new(entries[0].oid).expect("sha1 id"))
+                .expect("read marker blob"),
             Some(Vec::new())
         );
         assert_eq!(hash(&empty_struct).expect("struct marker").0, marker);

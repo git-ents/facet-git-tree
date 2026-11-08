@@ -8,7 +8,7 @@ pub use facet_git_tree::{
     DeserializeError, ObjectId, ObjectStore, Schema, SchemaError, SerializeError, deserialize,
     schema_of, serialize_into,
 };
-use facet_git_tree::{Node, VariantKind};
+use facet_git_tree::{Node, Oid, Sha1, Sha256, VariantKind};
 use gix_hash::Kind as HashKind;
 
 fn expected_schema() -> Schema {
@@ -110,19 +110,28 @@ fn s0_matches_frozen_schema_and_ids_in_both_hash_formats() {
             doctor::check_against(hash_kind, expected).expect("S0 check"),
             expected
         );
-
-        let store = ObjectStore::with_hash_kind(hash_kind);
-        assert_eq!(
-            serialize_into(&schema, &store).expect("encode S0"),
-            expected
-        );
-        let decoded: Schema = deserialize(&expected, &store).expect("decode S0");
-        assert_eq!(decoded, schema);
-        assert_eq!(
-            serialize_into(&decoded, &store).expect("re-encode S0"),
-            expected
-        );
     }
+    s0_fixed_point::<Sha1>(&schema, doctor::S0_SHA1);
+    s0_fixed_point::<Sha256>(&schema, doctor::S0_SHA256);
+}
+
+/// The S0 schema-of-schemas re-encodes to `expected` and reads back in the hash
+/// format `F` — the frozen-format fixed point, checked for both formats.
+fn s0_fixed_point<F: facet_git_tree::HashFormat>(schema: &Schema, expected: ObjectId) {
+    let store = ObjectStore::<F>::new();
+    let expected = Oid::<F>::new(expected).expect("S0 pin uses F's hash format");
+    assert_eq!(
+        serialize_into(schema, &store).expect("encode S0").to_raw(),
+        expected.to_raw()
+    );
+    let decoded: Schema = deserialize(&expected, &store).expect("decode S0");
+    assert_eq!(&decoded, schema);
+    assert_eq!(
+        serialize_into(&decoded, &store)
+            .expect("re-encode S0")
+            .to_raw(),
+        expected.to_raw()
+    );
 }
 
 #[test]

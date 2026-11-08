@@ -21,7 +21,7 @@ use facet_git_tree::{
 mod common;
 use common::{
     Event, Nested, Person, Point, TreeNode, WithArray, WithDefault, WithMap, WithOptional,
-    WithValue, WithVec,
+    WithValue, WithVec, typed,
 };
 
 // --- helpers ---
@@ -349,7 +349,7 @@ fn schema_uses_effective_names_without_pre_escaping() -> anyhow::Result<()> {
             RenamedTask::LongTask(payload) => {
                 let tag = common::find_entry(&store, &root, "long_task");
                 assert_eq!(
-                    store.get_blob(&tag.oid)?,
+                    store.get_blob(&typed(&tag.oid))?,
                     Some(format!("{payload}\n").into_bytes())
                 );
             }
@@ -357,7 +357,7 @@ fn schema_uses_effective_names_without_pre_escaping() -> anyhow::Result<()> {
                 let tag = common::find_entry(&store, &root, "named");
                 let field = common::find_entry(&store, &tag.oid, "%a%2Fb");
                 assert_eq!(
-                    store.get_blob(&field.oid)?,
+                    store.get_blob(&typed(&field.oid))?,
                     Some(format!("{label}\n").into_bytes())
                 );
             }
@@ -423,19 +423,25 @@ fn frozen_schema_wire_golden_and_roundtrip() -> anyhow::Result<()> {
         .collect();
     assert_eq!(names, [b"defs".as_slice(), b"kind", b"root"]);
     let kind = common::find_entry(&store, &root, "kind");
-    assert_eq!(store.get_blob(&kind.oid)?.as_deref(), Some(&b"Demo\n"[..]));
+    assert_eq!(
+        store.get_blob(&typed(&kind.oid))?.as_deref(),
+        Some(&b"Demo\n"[..])
+    );
     let defs = common::find_entry(&store, &root, "defs");
     let root_def = common::find_entry(&store, &defs.oid, "Root");
     let structure = common::find_entry(&store, &root_def.oid, "struct");
     let count = common::find_entry(&store, &structure.oid, "count");
-    assert_eq!(store.get_blob(&count.oid)?.as_deref(), Some(&b"u32\n"[..]));
+    assert_eq!(
+        store.get_blob(&typed(&count.oid))?.as_deref(),
+        Some(&b"u32\n"[..])
+    );
     let event = common::find_entry(&store, &structure.oid, "event");
     let enum_payload = common::find_entry(&store, &event.oid, "enum");
     let message = common::find_entry(&store, &enum_payload.oid, "Message");
     let tuple = common::find_entry(&store, &message.oid, "tuple");
     let first = common::find_entry(&store, &tuple.oid, "000");
     assert_eq!(
-        store.get_blob(&first.oid)?.as_deref(),
+        store.get_blob(&typed(&first.oid))?.as_deref(),
         Some(&b"string\n"[..])
     );
     let decoded: Schema = deserialize(&root, &store)?;

@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use facet::Facet;
 use facet_git_tree::normal_form::{self, Key, NormalForm};
 use facet_git_tree::{
-    IDENTITY_DEF_PREFIX, Node, ObjectId, UniverseError, check_identity_subtrees, check_universe,
-    identity_subtrees, schema_of, serialize,
+    IDENTITY_DEF_PREFIX, Node, ObjectId, Oid, UniverseError, check_identity_subtrees,
+    check_universe, identity_subtrees, schema_of, serialize,
 };
 
 /// An anchor identity: the three non-derivable coordinates, all in the
@@ -159,7 +159,13 @@ fn leaf_blobs_hold_exactly_the_frozen_bytes() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].filename.to_string(), "none");
     assert_eq!(entries[0].mode.kind(), facet_git_tree::EntryKind::Blob);
-    assert!(store.get_blob(&entries[0].oid).unwrap().unwrap().is_empty());
+    assert!(
+        store
+            .get_blob(&Oid::new(entries[0].oid).expect("fixtures use sha1"))
+            .unwrap()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 /// Lists use three-digit lowercase hexadecimal ordinals; map keys are escaped.

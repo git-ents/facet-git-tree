@@ -14,7 +14,7 @@ use facet_git_tree::{
     DeserializeError, EntryKind, EntryMode, ObjectStore, TreeEntry, deserialize, serialize,
 };
 use facet_value::{Value, value};
-use gix_object::{Kind, Write as _};
+use gix_object::Kind;
 
 mod common;
 use common::{Person, WithMap};
@@ -158,12 +158,12 @@ fn depth_beyond_max_is_rejected() -> anyhow::Result<()> {
                 entries: vec![TreeEntry {
                     mode: EntryMode::from(EntryKind::Tree),
                     filename: "000".into(),
-                    oid: root,
+                    oid: root.to_raw(),
                 }],
             })
             .expect("write nesting tree");
     }
-    let err = deserialize::<Value>(&root, &store).unwrap_err();
+    let err = deserialize::<Value, _, _>(&root, &store).unwrap_err();
     assert!(matches!(err, DeserializeError::MaxDepth(_)), "got {err:?}");
     Ok(())
 }

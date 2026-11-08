@@ -14,6 +14,7 @@ use crate::de::{
     tree_entries_from_data, validate_marker,
 };
 use crate::error::{DeserializeError, SchemaReadError};
+use crate::hash::{HashFormat, Oid, Tagged};
 use crate::ordinal;
 use crate::schema::{CheckedSchema, Node, RefError, Schema, VariantKind, invalid_schema};
 
@@ -25,25 +26,26 @@ use crate::schema::{CheckedSchema, Node, RefError, Schema, VariantKind, invalid_
 /// rejects invalid or trailing data. An unwrapped `Value` cannot distinguish
 /// `Some(null)` from `None`, so such an option is rejected rather than
 /// returning a value that re-encodes wrongly.
-pub fn deserialize_value_with_schema<F: Find + ?Sized>(
-    root: &ObjectId,
+pub fn deserialize_value_with_schema<F: HashFormat, S: Find + Tagged<F> + ?Sized>(
+    root: &Oid<F>,
     doc: &CheckedSchema<'_>,
-    store: &F,
+    store: &S,
 ) -> Result<Value, SchemaReadError> {
     let schema = doc.schema();
     Reader {
         doc: schema,
         store,
         budget: DecodeBudget::new(),
+        _format: std::marker::PhantomData,
     }
     .read_node(root, schema.root(), 0, None)
 }
 
 /// Check the bare object at `root` against the entire schema.
-pub fn validate_with_schema<F: Find + ?Sized>(
-    root: &ObjectId,
+pub fn validate_with_schema<F: HashFormat, S: Find + Tagged<F> + ?Sized>(
+    root: &Oid<F>,
     doc: &CheckedSchema<'_>,
-    store: &F,
+    store: &S,
 ) -> Result<(), SchemaReadError> {
     deserialize_value_with_schema(root, doc, store).map(|_| ())
 }
@@ -52,16 +54,19 @@ fn invalid_tree(oid: &ObjectId, reason: impl std::fmt::Display) -> SchemaReadErr
     DeserializeError::Reflect(format!("invalid tree {oid}: {reason}")).into()
 }
 
-struct Reader<'a, F: Find + ?Sized> {
+struct Reader<'a, F: HashFormat, S: Find + Tagged<F> + ?Sized> {
     doc: &'a Schema,
-    store: &'a F,
+    store: &'a S,
     budget: DecodeBudget,
+    // `F` is pinned by the `Tagged<F>` bound on `S`, but a bound does not make
+    // a struct's type parameter "used", so record it explicitly.
+    _format: std::marker::PhantomData<F>,
 }
 
-impl<F: Find + ?Sized> Reader<'_, F> {
+impl<F: HashFormat, S: Find + Tagged<F> + ?Sized> Reader<'_, F, S> {
     fn load<'b>(
         &mut self,
-        oid: &ObjectId,
+        oid: &Oid<F>,
         buf: &'b mut Vec<u8>,
         depth: usize,
         entry_kind: Option<LeafKind>,
@@ -78,7 +83,7 @@ impl<F: Find + ?Sized> Reader<'_, F> {
 
     fn read_node(
         &mut self,
-        oid: &ObjectId,
+        oid: &Oid<F>,
         schema: &Node,
         depth: usize,
         entry_kind: Option<LeafKind>,
@@ -120,22 +125,22 @@ impl<F: Find + ?Sized> Reader<'_, F> {
                 }
             }
             Node::String => Ok(Value::from(text(&data, oid)?.to_owned())),
-            Node::I8 => signed::<i8>(&data, oid, "I8"),
-            Node::I16 => signed::<i16>(&data, oid, "I16"),
-            Node::I32 => signed::<i32>(&data, oid, "I32"),
-            Node::I64 => signed::<i64>(&data, oid, "I64"),
-            Node::I128 => signed::<i128>(&data, oid, "I128"),
+            Node::I8 => signed::<i8, _>(&data, oid, "I8"),
+            Node::I16 => signed::<i16, _>(&data, oid, "I16"),
+            Node::I32 => signed::<i32, _>(&data, oid, "I32"),
+            Node::I64 => signed::<i64, _>(&data, oid, "I64"),
+            Node::I128 => signed::<i128, _>(&data, oid, "I128"),
             Node::ISize => {
                 let text = text(&data, oid)?;
                 let value: i64 = canonical_integer(text, "ISize")?;
                 isize::try_from(value).map_err(|_| invalid_scalar("ISize", text))?;
                 Ok(VNumber::from_i128(i128::from(value)).into())
             }
-            Node::U8 => unsigned::<u8>(&data, oid, "U8"),
-            Node::U16 => unsigned::<u16>(&data, oid, "U16"),
-            Node::U32 => unsigned::<u32>(&data, oid, "U32"),
-            Node::U64 => unsigned::<u64>(&data, oid, "U64"),
-            Node::U128 => unsigned::<u128>(&data, oid, "U128"),
+            Node::U8 => unsigned::<u8, _>(&data, oid, "U8"),
+            Node::U16 => unsigned::<u16, _>(&data, oid, "U16"),
+            Node::U32 => unsigned::<u32, _>(&data, oid, "U32"),
+            Node::U64 => unsigned::<u64, _>(&data, oid, "U64"),
+            Node::U128 => unsigned::<u128, _>(&data, oid, "U128"),
             Node::USize => {
                 let text = text(&data, oid)?;
                 let value: u64 = canonical_integer(text, "USize")?;
@@ -232,7 +237,7 @@ impl<F: Find + ?Sized> Reader<'_, F> {
             Node::Enum(variants) => self.read_enum(&data, oid, variants, depth),
             Node::RawTree => {
                 if data.kind != Kind::Tree {
-                    return Err(DeserializeError::NotATree(*oid).into());
+                    return Err(DeserializeError::NotATree(oid.to_raw()).into());
                 }
                 Ok(Value::from(oid.to_string()))
             }
@@ -241,7 +246,7 @@ impl<F: Find + ?Sized> Reader<'_, F> {
         }
     }
 
-    fn is_marker(&mut self, entries: &[Entry], depth: usize) -> Result<bool, SchemaReadError> {
+    fn is_marker(&mut self, entries: &[Entry<F>], depth: usize) -> Result<bool, SchemaReadError> {
         Ok(validate_marker(
             entries,
             self.store,
@@ -253,9 +258,9 @@ impl<F: Find + ?Sized> Reader<'_, F> {
     fn sequence(
         &mut self,
         data: &Data<'_>,
-        oid: &ObjectId,
+        oid: &Oid<F>,
         depth: usize,
-    ) -> Result<Vec<Entry>, SchemaReadError> {
+    ) -> Result<Vec<Entry<F>>, SchemaReadError> {
         let entries = tree_entries(data, oid)?;
         if self.is_marker(&entries, depth)? {
             return Ok(Vec::new());
@@ -266,7 +271,7 @@ impl<F: Find + ?Sized> Reader<'_, F> {
 
     fn read_tuple(
         &mut self,
-        entries: Vec<Entry>,
+        entries: Vec<Entry<F>>,
         elems: &[Node],
         depth: usize,
     ) -> Result<VArray, SchemaReadError> {
@@ -280,9 +285,9 @@ impl<F: Find + ?Sized> Reader<'_, F> {
 
     fn read_struct(
         &mut self,
-        entries: Vec<Entry>,
+        entries: Vec<Entry<F>>,
         fields: &BTreeMap<String, Node>,
-        oid: &ObjectId,
+        oid: &Oid<F>,
         depth: usize,
     ) -> Result<VObject, SchemaReadError> {
         if self.is_marker(&entries, depth)? {
@@ -315,7 +320,7 @@ impl<F: Find + ?Sized> Reader<'_, F> {
     fn read_enum(
         &mut self,
         data: &Data<'_>,
-        oid: &ObjectId,
+        oid: &Oid<F>,
         variants: &BTreeMap<String, VariantKind>,
         depth: usize,
     ) -> Result<Value, SchemaReadError> {
@@ -372,7 +377,7 @@ impl<F: Find + ?Sized> Reader<'_, F> {
     fn read_dynamic(
         &mut self,
         data: &Data<'_>,
-        oid: &ObjectId,
+        oid: &Oid<F>,
         depth: usize,
     ) -> Result<Value, SchemaReadError> {
         if data.kind == Kind::Blob {
@@ -411,7 +416,10 @@ impl<F: Find + ?Sized> Reader<'_, F> {
     }
 }
 
-fn tree_entries(data: &Data<'_>, oid: &ObjectId) -> Result<Vec<Entry>, SchemaReadError> {
+fn tree_entries<F: HashFormat>(
+    data: &Data<'_>,
+    oid: &Oid<F>,
+) -> Result<Vec<Entry<F>>, SchemaReadError> {
     Ok(tree_entries_from_data(data, oid)?)
 }
 
@@ -420,10 +428,13 @@ fn tree_entries(data: &Data<'_>, oid: &ObjectId) -> Result<Vec<Entry>, SchemaRea
 /// A structural marker name (`none`/`some`) is not a user name; reading one
 /// where a user name belongs is refused. The diagnostic names the *containing*
 /// tree `oid`, never a child object.
-fn user_name<'n>(name: &'n EncodedName, oid: &ObjectId) -> Result<&'n str, SchemaReadError> {
+fn user_name<'n, F: HashFormat>(
+    name: &'n EncodedName,
+    oid: &Oid<F>,
+) -> Result<&'n str, SchemaReadError> {
     name.user().ok_or_else(|| {
         invalid_tree(
-            oid,
+            &oid.to_raw(),
             format!(
                 "invalid name {:?}: a structural name is not a user name",
                 name.encoded()
@@ -434,28 +445,31 @@ fn user_name<'n>(name: &'n EncodedName, oid: &ObjectId) -> Result<&'n str, Schem
 
 /// Validate and unescape an enum tag blob's user name. A blob tag is not a tree
 /// entry name, so it is unescaped here, exactly once.
-fn decode_blob_name(text: &str, oid: &ObjectId) -> Result<String, SchemaReadError> {
+fn decode_blob_name<F: HashFormat>(text: &str, oid: &Oid<F>) -> Result<String, SchemaReadError> {
     crate::name::unescape(text)
-        .map_err(|error| invalid_tree(oid, format!("invalid name {text:?}: {error}")))
+        .map_err(|error| invalid_tree(&oid.to_raw(), format!("invalid name {text:?}: {error}")))
 }
 
-fn require_blob(data: &Data<'_>, oid: &ObjectId) -> Result<(), SchemaReadError> {
+fn require_blob<F: HashFormat>(data: &Data<'_>, oid: &Oid<F>) -> Result<(), SchemaReadError> {
     if data.kind != Kind::Blob {
-        return Err(DeserializeError::NotABlob(*oid).into());
+        return Err(DeserializeError::NotABlob(oid.to_raw()).into());
     }
     Ok(())
 }
 
-fn text_bytes<'a>(data: &Data<'a>, oid: &ObjectId) -> Result<&'a [u8], SchemaReadError> {
+fn text_bytes<'a, F: HashFormat>(
+    data: &Data<'a>,
+    oid: &Oid<F>,
+) -> Result<&'a [u8], SchemaReadError> {
     require_blob(data, oid)?;
     data.data
         .strip_suffix(b"\n")
-        .ok_or_else(|| DeserializeError::MissingLeafNewline(*oid).into())
+        .ok_or_else(|| DeserializeError::MissingLeafNewline(oid.to_raw()).into())
 }
 
-fn text<'a>(data: &Data<'a>, oid: &ObjectId) -> Result<&'a str, SchemaReadError> {
+fn text<'a, F: HashFormat>(data: &Data<'a>, oid: &Oid<F>) -> Result<&'a str, SchemaReadError> {
     std::str::from_utf8(text_bytes(data, oid)?)
-        .map_err(|_| DeserializeError::NonUtf8Blob(*oid).into())
+        .map_err(|_| DeserializeError::NonUtf8Blob(oid.to_raw()).into())
 }
 
 fn canonical_integer<T: std::str::FromStr + std::fmt::Display>(
@@ -469,9 +483,9 @@ fn canonical_integer<T: std::str::FromStr + std::fmt::Display>(
     Ok(value)
 }
 
-fn signed<T>(
+fn signed<T, F: HashFormat>(
     data: &Data<'_>,
-    oid: &ObjectId,
+    oid: &Oid<F>,
     schema: &'static str,
 ) -> Result<Value, SchemaReadError>
 where
@@ -481,9 +495,9 @@ where
     Ok(VNumber::from_i128(value.into()).into())
 }
 
-fn unsigned<T>(
+fn unsigned<T, F: HashFormat>(
     data: &Data<'_>,
-    oid: &ObjectId,
+    oid: &Oid<F>,
     schema: &'static str,
 ) -> Result<Value, SchemaReadError>
 where
@@ -510,10 +524,9 @@ fn check_length(expected: usize, found: usize) -> Result<(), SchemaReadError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::error::SerializeError;
     use crate::schema::write::serialize_value_with_schema;
     use crate::{EntryKind, ObjectStore};
-    use gix_object::{Kind, Write};
+    use gix_object::Kind;
 
     fn schema(root: Node) -> Schema {
         Schema::new("test".into(), root, BTreeMap::new()).expect("valid schema")
@@ -521,25 +534,23 @@ mod tests {
 
     #[test]
     fn cbor_roots_are_verbatim_bytes_and_roundtrip() -> anyhow::Result<()> {
-        let doc = schema(Node::Cbor);
-        let doc = doc.checked()?;
-        let payloads: &[&[u8]] = &[
-            &[0x00],
-            &[0x0a],
-            &[0xf6],
-            &[0x42, 0x00, 0xff],
-            &[0x62, b'h', b'i'],
-            &[0xa2, 0x01, 0xf5, 0x61, b'a', 0x82, 0xf6, 0x0a],
-            &[0xf9, 0x7e, 0x00],
-            &[0xd8, 0x20, 0x61, b'a'],
-        ];
-        for hash in [gix_hash::Kind::Sha1, gix_hash::Kind::Sha256] {
-            let store = ObjectStore::with_hash_kind(hash);
-            let output = ObjectStore::with_hash_kind(hash);
+        fn roundtrip<F: HashFormat>() -> anyhow::Result<()> {
+            let doc = schema(Node::Cbor);
+            let doc = doc.checked()?;
+            let payloads: &[&[u8]] = &[
+                &[0x00],
+                &[0x0a],
+                &[0xf6],
+                &[0x42, 0x00, 0xff],
+                &[0x62, b'h', b'i'],
+                &[0xa2, 0x01, 0xf5, 0x61, b'a', 0x82, 0xf6, 0x0a],
+                &[0xf9, 0x7e, 0x00],
+                &[0xd8, 0x20, 0x61, b'a'],
+            ];
+            let store = ObjectStore::<F>::new();
+            let output = ObjectStore::<F>::new();
             for payload in payloads {
-                let oid = store
-                    .write_buf(Kind::Blob, payload)
-                    .map_err(SerializeError::Backend)?;
+                let oid = store.write_buf(Kind::Blob, payload)?;
                 let value = deserialize_value_with_schema(&oid, &doc, &store)?;
                 assert_eq!(
                     value.as_bytes().map(|bytes| bytes.as_slice()),
@@ -547,10 +558,13 @@ mod tests {
                 );
                 validate_with_schema(&oid, &doc, &store)?;
                 let reencoded = serialize_value_with_schema(&value, &doc, &output)?;
-                assert_eq!(reencoded, oid, "CBOR {payload:02x?}");
+                assert_eq!(reencoded.to_raw(), oid.to_raw(), "CBOR {payload:02x?}");
                 assert_eq!(output.get_blob(&reencoded)?.as_deref(), Some(*payload));
             }
+            Ok(())
         }
+        roundtrip::<crate::hash::Sha1>()?;
+        roundtrip::<crate::hash::Sha256>()?;
         Ok(())
     }
 
@@ -572,9 +586,7 @@ mod tests {
             (&[0xfa, 0x3f, 0xc0, 0x00, 0x00], "non-canonical"),
         ];
         for (payload, reason) in invalid {
-            let oid = store
-                .write_buf(Kind::Blob, payload)
-                .map_err(SerializeError::Backend)?;
+            let oid = store.write_buf(Kind::Blob, payload)?;
             let error = deserialize_value_with_schema(&oid, &doc, &store).unwrap_err();
             assert!(matches!(
                 &error,
@@ -585,9 +597,7 @@ mod tests {
         }
         let mut too_deep = vec![0x81; crate::limits::MAX_VALUE_DEPTH + 1];
         too_deep.push(0xf6);
-        let oid = store
-            .write_buf(Kind::Blob, &too_deep)
-            .map_err(SerializeError::Backend)?;
+        let oid = store.write_buf(Kind::Blob, &too_deep)?;
         assert!(deserialize_value_with_schema(&oid, &doc, &store).is_err());
         Ok(())
     }
@@ -601,21 +611,17 @@ mod tests {
         let error = deserialize_value_with_schema(&tree, &doc, &store).unwrap_err();
         assert!(matches!(
             error,
-            SchemaReadError::Deserialize(DeserializeError::NotABlob(oid)) if oid == tree
+            SchemaReadError::Deserialize(DeserializeError::NotABlob(oid)) if oid == tree.to_raw()
         ));
 
-        let blob = store
-            .write_buf(Kind::Blob, &[0x00])
-            .map_err(SerializeError::Backend)?;
-        let parent = store
-            .write(&gix_object::Tree {
-                entries: vec![crate::TreeEntry {
-                    mode: crate::EntryMode::from(EntryKind::Tree),
-                    filename: "payload".into(),
-                    oid: blob,
-                }],
-            })
-            .map_err(SerializeError::Backend)?;
+        let blob = store.write_buf(Kind::Blob, &[0x00])?;
+        let parent = store.write(&gix_object::Tree {
+            entries: vec![crate::TreeEntry {
+                mode: crate::EntryMode::from(EntryKind::Tree),
+                filename: "payload".into(),
+                oid: blob.into_raw(),
+            }],
+        })?;
         let doc = schema(Node::Struct(BTreeMap::from([(
             "payload".into(),
             Node::Cbor,
@@ -624,7 +630,7 @@ mod tests {
         let error = deserialize_value_with_schema(&parent, &doc, &store).unwrap_err();
         assert!(matches!(
             error,
-            SchemaReadError::Deserialize(DeserializeError::NotATree(oid)) if oid == blob
+            SchemaReadError::Deserialize(DeserializeError::NotATree(oid)) if oid == blob.to_raw()
         ));
         Ok(())
     }

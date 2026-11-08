@@ -10,7 +10,8 @@ use std::fmt::Debug;
 
 use facet::Facet;
 use facet_git_tree::{
-    CheckedSchema, EntryKind, ObjectId, ObjectStore, Schema, TreeEntry, deserialize, serialize,
+    CheckedSchema, EntryKind, HashFormat, ObjectId, ObjectStore, Oid, Schema, Sha1, TreeEntry,
+    deserialize, serialize,
 };
 
 // --- shared fixtures ---
@@ -121,12 +122,23 @@ pub const HELLO_LEAF_BLOB_OID: [u8; 20] = [
     0xa3, 0x94, 0x46, 0x4a,
 ];
 
+// --- object ids ---
+
+/// Wrap a bare object id as the SHA-1 id the fixtures use.
+pub fn typed(oid: &ObjectId) -> Oid<Sha1> {
+    Oid::new(*oid).expect("test fixtures use sha1")
+}
+
 // --- tree accessors ---
 
 /// Find a named entry in a tree, panicking with a helpful message if absent.
-pub fn find_entry(store: &ObjectStore, tree_id: &ObjectId, name: &str) -> TreeEntry {
+pub fn find_entry<F: HashFormat>(
+    store: &ObjectStore<F>,
+    tree_id: &ObjectId,
+    name: &str,
+) -> TreeEntry {
     let entries = store
-        .get_tree(tree_id)
+        .get_tree(&Oid::new(*tree_id).expect("test fixtures use the store's hash format"))
         .expect("read object")
         .unwrap_or_else(|| panic!("expected tree at {tree_id:?}"));
     entries
@@ -149,7 +161,7 @@ pub fn get_tree_entry_mode(
 /// is data — a struct field, a collection element, a map entry, or a variant tag.
 pub fn tree_entries(store: &ObjectStore, tree_id: &ObjectId) -> Vec<TreeEntry> {
     store
-        .get_tree(tree_id)
+        .get_tree(&typed(tree_id))
         .expect("read object")
         .unwrap_or_else(|| panic!("expected tree at {tree_id:?}"))
 }
