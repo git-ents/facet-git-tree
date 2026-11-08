@@ -30,14 +30,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `serialize` returns the root object ID and a fresh in-memory `ObjectStore`.
-To use an existing store, call `serialize_into(&value, &store)`; it accepts a `gix_object::Write` sink.
-`deserialize(&oid, &store)` accepts a `gix_object::Find` source, including a suitable `gix` object database.
-`ObjectStore` defaults to SHA-1; `ObjectStore::with_hash_kind` selects a hash format.
+To use an existing store, call `serialize_into(&value, &store)`; it accepts a format-tagged `gix_object::Write` sink.
+`deserialize(&oid, &store)` accepts a format-tagged `gix_object::Find` source, including a suitable `gix` object database.
+`ObjectStore` defaults to SHA-1; `ObjectStore::<Sha256>::new()` selects SHA-256, and `Backend::<F, _>::new(odb)` tags an arbitrary backend with its format.
+Object IDs are typed: an `Oid<F>` fixes its Git hash format in the type, so an id and a store of different formats cannot be paired.
 Object IDs are comparable only within the same hash format.
 
 These APIs write and read **bare values**, not bound documents: a root can be a blob or a tree, and no `.schema` or `.value` envelope is added.
 They do not publish refs or commits.
-`RawTree::new(oid)` and `RawBlob::new(oid)` reference already-stored objects by ID without re-encoding them; the objects must exist in the same store and use its hash format.
+`RawTree::new(oid)` and `RawBlob::new(oid)` reference already-stored objects by ID without re-encoding them; the id's `Oid<F>` type ties it to the store's hash format, so a mismatched format is a compile error.
 
 `check_key(&str)` checks whether a user name can be encoded within the entry-name limit.
 The `normal_form` module provides `hash`/`hash_into` for the restricted identity representation; `check_universe`, `identity_subtrees`, and `check_identity_subtrees` inspect its schema constraints.
@@ -45,16 +46,18 @@ The `normal_form` module provides `hash`/`hash_into` for the restricted identity
 
 ## Schemas and dynamic values
 
-`schema_of::<T>()` (or `Schema::from_shape`) derives a self-hosted `Schema { kind, root, defs }`.
-`kind` is an opaque label; named definitions are referenced by `Node::Ref`.
+`schema_of::<T>()` (or `Schema::from_shape`) derives a self-hosted `Schema`.
+`kind()` is an opaque label; named definitions are referenced by `Node::Ref`.
+A `Schema` is well-formed by construction: build one from a derived shape, or from parts with the fallible `Schema::new(kind, root, defs)`, which validates every ref, key, name, and bound.
 Derive an entity schema when authoring it, then store and reuse that exact schema rather than re-deriving it for each read or write.
 A schema is itself a `Facet` value and can be serialized as a bare value.
 
-Enable the `value` feature to use the schema-directed APIs with `facet_value::Value`:
+Enable the `value` feature to use the schema-directed APIs with `facet_value::Value`.
+A schema-directed read or write takes a `CheckedSchema`, obtained from a validated `Schema` via `Schema::checked()`, so validity is a property of the argument rather than a re-checked precondition:
 
-- `deserialize_value_with_schema(&oid, &schema, &store)` reads a bare value without its original Rust type.
-- `validate_with_schema(&oid, &schema, &store)` checks a value against the schema.
-- `serialize_value_with_schema(&value, &schema, &store)` writes a bare value, validating it against the schema; mismatches report a path.
+- `deserialize_value_with_schema(&oid, &checked_schema, &store)` reads a bare value without its original Rust type.
+- `validate_with_schema(&oid, &checked_schema, &store)` checks a value against the schema.
+- `serialize_value_with_schema(&value, &checked_schema, &store)` writes a bare value, validating it against the schema; mismatches report a path.
 
 The schema-directed and typed encodings are intended to produce the same objects for equivalent representable values.
 An unwrapped `Value::NULL` represents `None`, so the value API cannot distinguish it from `Some(None)` or `Some(())`; the schema-directed reader rejects such ambiguous `Some` values.
