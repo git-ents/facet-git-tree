@@ -182,10 +182,10 @@ fn composite_entry_names_are_frozen() {
     );
 
     let (oid, store) = normal_form::hash(&NormalForm::Map(BTreeMap::from([
-        (Key::Str("7".to_owned()), NormalForm::U8(0)),
-        (Key::Str("11".to_owned()), NormalForm::U8(1)),
-        (Key::Str("some".to_owned()), NormalForm::U8(2)),
-        (Key::Str("a/b".to_owned()), NormalForm::U8(3)),
+        (Key::new("7"), NormalForm::U8(0)),
+        (Key::new("11"), NormalForm::U8(1)),
+        (Key::new("some"), NormalForm::U8(2)),
+        (Key::new("a/b"), NormalForm::U8(3)),
     ])))
     .unwrap();
     let names: Vec<String> = store
@@ -214,22 +214,16 @@ fn map_key_names_are_escaped_and_invalid_keys_are_refused() {
         ("\0", "%%00"),
         ("naïve", "%na%C3%AFve"),
     ] {
-        let value = NormalForm::Map(BTreeMap::from([(
-            Key::Str(name.to_owned()),
-            NormalForm::U8(0),
-        )]));
+        let value = NormalForm::Map(BTreeMap::from([(Key::new(name), NormalForm::U8(0))]));
         let (oid, store) = normal_form::hash(&value).unwrap();
         let entries = store.get_tree(&oid).expect("read object").unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].filename.to_string(), expected);
     }
 
-    for key in [
-        Key::U16(7),
-        Key::Bool(true),
-        Key::Str("a".repeat(256)),
-        Key::Str("é".repeat(43)),
-    ] {
+    // Only string keys are representable, so the rejections that remain are
+    // names whose escaped encoding exceeds the frozen 255-byte limit.
+    for key in [Key::new("a".repeat(256)), Key::new("é".repeat(43))] {
         let value = NormalForm::Map(BTreeMap::from([(key, NormalForm::U8(0))]));
         assert!(matches!(
             normal_form::hash(&value),
