@@ -15,10 +15,15 @@
 //! Reads are strict: a struct emits every field, so a missing field and an
 //! unknown entry are both errors ([`DeserializeError::MissingField`],
 //! [`DeserializeError::UnexpectedEntry`]); tree entries must be correctly
-//! ordered and sized; and leaf text must be canonical. This crate writes and
-//! reads bare values only; the `.schema` document envelope is a `git-store`
-//! concern. A document's schema root must be a struct, so its fields sit at the
-//! document root beside `.schema`.
+//! ordered and sized; and leaf text must be canonical.
+//!
+//! Beyond bare values the crate owns the `.schema` *document envelope*
+//! ([`document`]): a document is a value's own entries beside one reserved
+//! `.schema` entry naming the unbound schema it conforms to. A document's
+//! schema root must be a struct, so its fields sit at the document root beside
+//! `.schema`. Refs, commits, placement, and policy are the store layer's
+//! ([`git-store`](https://github.com/git-ents/git-store)), which builds on this
+//! crate.
 #![forbid(unsafe_code)]
 
 pub mod attr;
@@ -26,6 +31,7 @@ mod cbor;
 mod classify;
 mod de;
 pub mod doctor;
+pub mod document;
 mod error;
 mod float;
 mod hash;
@@ -49,8 +55,8 @@ pub use doctor::{
     DoctorError, DoctorReport, EncodeStage, S0_SHA1, S0_SHA256, check, check_against,
 };
 pub use error::{
-    DeserializeError, KeyError, NormalFormError, SchemaError, SchemaReadError, SchemaWriteError,
-    SerializeError, UniverseError,
+    DeserializeError, DocumentError, KeyError, NormalFormError, SchemaError, SchemaReadError,
+    SchemaWriteError, SerializeError, Subtree, UniverseError,
 };
 pub use hash::{Backend, HashFormat, HashFormatMismatch, Oid, Sha1, Sha256, Tagged};
 pub use normal_form::{
