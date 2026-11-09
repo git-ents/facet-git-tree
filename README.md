@@ -64,6 +64,24 @@ An unwrapped `Value::NULL` represents `None`, so the value API cannot distinguis
 A `Node::Dynamic` value has no on-disk kind tag and its heuristic read is lossy; it is not a substitute for a schema when type fidelity matters.
 Canonical CBOR is specified by the format; implementation support is evolving, so check the crate's API documentation for current limitations.
 
+## Documents
+
+A *document* binds a value to the unbound schema it conforms to, so it can be read back without the original Rust type.
+It is the value's own tree entries beside one reserved `.schema` entry:
+
+```text
+{ <value's own entries>..., .schema -> <unbound schema> }
+```
+
+The `document` module owns this envelope:
+
+- `split(root, objects)` validates a document root and returns it with its embedded schema tree.
+- `ensure_struct_root(schema)` refuses a schema whose resolved root is not a struct, since only a struct has named fields to sit beside `.schema`.
+- `UnboundValue::new(root, objects)` presents a document root to the bare-value codec with `.schema` hidden; `read_value` wires that view to a schema-directed read.
+
+The envelope is a pure tree-in, tree-out codec: it reads no refs and writes no commits.
+Binding values under refs, commit trailers, and schema publication are the store layer's job.
+
 ## Wire format at a glance
 
 A bound document is a tree containing its reachable schema in `.schema`.
