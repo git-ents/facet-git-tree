@@ -2,6 +2,124 @@
 
 use gix_hash::ObjectId;
 
+use crate::schema::RefError;
+
+/// One of a document's two logical halves: the schema entry or the value it
+/// describes.
+///
+/// A document root stores the value's own entries directly, so the value half
+/// has no entry of its own to name; [`Subtree::Value`] carries that half's
+/// reserved name, which this format never writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Subtree {
+    /// The value half: the entries beside `.schema`.
+    Value,
+    /// The `.schema` entry: the unbound schema the value conforms to.
+    Schema,
+}
+
+impl Subtree {
+    /// The reserved tree entry name: `".schema"`, or `".value"` for the value
+    /// half, which this format reserves but never writes.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Subtree::Value => ".value",
+            Subtree::Schema => ".schema",
+        }
+    }
+}
+
+impl std::fmt::Display for Subtree {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// An error produced by the `.schema` document envelope.
+///
+/// A document is a value tree carrying one reserved root entry, so these are
+/// the ways a tree fails to be one, or a document's schema fails to serve as a
+/// document root. See [`document`](crate::document).
+#[derive(Debug, thiserror::Error)]
+pub enum DocumentError {
+    /// A tree is not a bound document.
+    ///
+    /// It carries no `.schema` entry holding a tree, or has no entry of the
+    /// value's own beside that entry. A struct emits at least one entry (the
+    /// `none` marker for an empty one), so `.schema` is never a document root's
+    /// only entry; a bare value tree thus fails here rather than being
+    /// half-matched.
+    #[error("tree {root} is not a bound document (found [{found}])")]
+    NotSubtreeBound {
+        /// The tree that failed to split.
+        root: ObjectId,
+        /// The entry names actually found, comma-separated, for diagnosis.
+        found: String,
+    },
+    /// A document's `.schema` entry names an object that is not present.
+    #[error("document {root} references a missing {subtree} object {oid}")]
+    SubtreeMissing {
+        /// Which half of the split is absent.
+        subtree: Subtree,
+        /// The absent object.
+        oid: ObjectId,
+        /// The document root naming it.
+        root: ObjectId,
+    },
+    /// An object a read needed is not present.
+    #[error("object {oid} is not present")]
+    MissingObject {
+        /// The absent object.
+        oid: ObjectId,
+    },
+    /// An object a read needed is present but is not a tree.
+    #[error("object {oid} is not a tree")]
+    NotATree {
+        /// The object of the wrong kind.
+        oid: ObjectId,
+    },
+    /// A document's schema root does not resolve to a struct.
+    ///
+    /// Only a struct root has named entries that can sit beside `.schema`, so
+    /// any other resolved root describes a bare value and cannot be bound as a
+    /// document.
+    #[error(
+        "schema root for kind \"{kind}\" is {node}, not a struct; only struct schemas form documents"
+    )]
+    DocumentRootNotStruct {
+        /// The schema's opaque kind label.
+        kind: String,
+        /// The keyword of the node the schema root resolved to, e.g. `list`.
+        node: &'static str,
+    },
+    /// A document's schema root cannot be resolved at all.
+    ///
+    /// The root is a `ref` naming a definition absent from `defs`, or a chain
+    /// of them cycling without reaching a concrete node. Because the root never
+    /// resolves, no struct's fields could sit beside `.schema`, so the schema
+    /// is refused rather than accepted and failing every later read.
+    #[error("schema root for kind \"{kind}\" does not resolve: {source}")]
+    SchemaRootUnresolved {
+        /// The schema's opaque kind label.
+        kind: String,
+        /// Why the root did not resolve: a dangling `ref` or a ref cycle.
+        #[source]
+        source: RefError,
+    },
+    /// An error from the underlying `gix` object backend.
+    #[error("git object backend error")]
+    Backend(#[source] gix_object::find::Error),
+    /// An object's bytes could not be decoded as a Git tree.
+    #[error("failed to decode tree {oid}")]
+    Decode {
+        /// The id of the undecodable object.
+        oid: ObjectId,
+        /// The underlying `gix` decode error.
+        #[source]
+        source: gix_object::decode::Error,
+    },
+}
+
 /// A user-supplied key has no representable encoded Git tree-entry name.
 ///
 /// User names are escaped as needed — including the empty string and names
