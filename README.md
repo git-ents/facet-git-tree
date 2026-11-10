@@ -104,6 +104,7 @@ The commit's `Schema-Version:` identifies the format major; a bare tree has no v
 - Readers must reject non-canonical or malformed input, including bad names, ordinals, modes, scalar encodings and schemas.
   The format limits nesting to 32 and decode visits to 2^20.
   A `RawTree` is opaque and exempt from the ordinary tree-content rules.
+  A `RawBlob` is likewise opaque: it references an existing blob by id without re-encoding it, so binary content travels as an object rather than as bytes.
 
 See the format document for the complete rules, including the lossy dynamic-value encoding and its exceptions.
 Implementation work is ongoing; the specification is not a claim that every feature is already available in every build.

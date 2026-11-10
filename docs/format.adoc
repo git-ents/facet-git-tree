@@ -41,8 +41,8 @@ encoding, plus a single reserved entry named `.schema`:
 
 * A document's schema root MUST resolve (following `ref` nodes into `defs`) to
   a `struct`. A schema whose resolved root is any other node — scalar, unit,
-  enum, option, sequence, map, `cbor`, `rawtree`, `dynamic` — describes a bare
-  value, not a document, and MUST be refused. There is no wrapper variant: a
+  enum, option, sequence, map, `cbor`, `rawtree`, `rawblob`, `dynamic` —
+  describes a bare value, not a document, and MUST be refused. There is no wrapper variant: a
   top-level sequence or scalar is stored inside a struct field, not as a
   document root.
 * For a struct root the value's own entries are its fields. An *empty* struct
@@ -260,6 +260,7 @@ pub enum Node {
     F32, F64, Bytes,
     Cbor,      // opaque canonical-CBOR payload
     RawTree,   // verbatim subtree reference
+    RawBlob,   // verbatim blob reference
     Dynamic,   // runtime-shaped value
 
     List(Box<Node>),
@@ -283,7 +284,8 @@ pub enum VariantKind {
 
 A `Node` leaf variant is a bare blob holding its keyword (`unit`, `bool`,
 `char`, `string`, `i8` … `u128`, `isize`, `usize`, `f32`, `f64`, `bytes`,
-`cbor`, `rawtree`, `dynamic`); a composite variant is a single-entry tree
+`cbor`, `rawtree`, `rawblob`, `dynamic`); a composite variant is a single-entry
+tree
 `{ keyword -> payload }` (`list`, `array`, `map`, `optional`, `tuple`,
 `struct`, `enum`, `ref`). Keywords are exactly the lowercase variant names.
 
@@ -297,6 +299,10 @@ A `Node` leaf variant is a bare blob holding its keyword (`unit`, `bool`,
 * `RawTree` (keyword `rawtree`) points at an existing tree oid without
   re-encoding it: an opaque, arbitrarily-shaped subtree. It is exempt from the
   no-empty-tree and mode rules, and MAY contain anything.
+* `RawBlob` (keyword `rawblob`) points at an existing blob oid without
+  re-encoding it, so binary content is carried as a referenced object rather
+  than as bytes inside the encoding. Both nodes carry the referenced object id
+  verbatim; neither writes the object it names.
 
 [NOTE]
 ====
