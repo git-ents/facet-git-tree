@@ -301,6 +301,7 @@ fn options_and_dynamic_nodes_are_excluded() {
     assert_eq!(excluded(doc.root()), "Optional");
     assert_eq!(excluded(&Node::Dynamic), "Dynamic");
     assert_eq!(excluded(&Node::RawTree), "RawTree");
+    assert_eq!(excluded(&Node::RawBlob), "RawBlob");
     assert_eq!(excluded(&Node::Unit), "Unit");
     assert_eq!(excluded(&Node::USize), "USize");
     assert_eq!(

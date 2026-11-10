@@ -466,6 +466,7 @@ fn walk(
         Node::Optional(_) => Err(excluded("Optional")),
         Node::Enum(_) => Err(excluded("Enum")),
         Node::RawTree => Err(excluded("RawTree")),
+        Node::RawBlob => Err(excluded("RawBlob")),
         Node::Dynamic => Err(excluded("Dynamic")),
     }
 }
@@ -501,6 +502,7 @@ fn node_name(node: &Node) -> &'static str {
         Node::Optional(_) => "Optional",
         Node::Enum(_) => "Enum",
         Node::RawTree => "RawTree",
+        Node::RawBlob => "RawBlob",
         Node::Dynamic => "Dynamic",
         Node::Ref(_) => "Ref",
     }

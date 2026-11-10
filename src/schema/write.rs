@@ -239,6 +239,21 @@ fn write_node<F: HashFormat, W: Write + Tagged<F> + ?Sized>(
             let oid = Oid::<F>::new(raw).map_err(|_error| invalid())?;
             Ok((oid, EntryKind::Tree))
         }
+        // A raw blob is opaque: the value is the referenced object id in hex,
+        // handed straight back as a blob reference with no write — mirroring
+        // the typed `RawBlob` encoding, which likewise emits no object. The
+        // parsed id must also use the store's hash format, so a wrong-format
+        // reference is refused here rather than embedded.
+        Node::RawBlob => {
+            let s = value_str(value).ok_or_else(|| expected(path, "object-id string", value))?;
+            let invalid = || SchemaWriteError::InvalidRawBlob {
+                path: path.show(),
+                text: s.to_owned(),
+            };
+            let raw = ObjectId::from_hex(s.as_bytes()).map_err(|_error| invalid())?;
+            let oid = Oid::<F>::new(raw).map_err(|_error| invalid())?;
+            Ok((oid, EntryKind::Blob))
+        }
         // A dynamic node carries no schema, so the bare heuristic write — the
         // same one `serialize` applies to a `Value` field — is exactly right.
         Node::Dynamic => Ok(serialize_node(Peek::new(value), store, depth)?),

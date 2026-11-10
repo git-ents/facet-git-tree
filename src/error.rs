@@ -547,6 +547,14 @@ pub enum SchemaWriteError {
         /// The offending text.
         text: String,
     },
+    /// A `RawBlob` value is not a 40-character lowercase-hex object id.
+    #[error("at {path}: invalid raw blob object id {text:?}")]
+    InvalidRawBlob {
+        /// The location of the value.
+        path: String,
+        /// The offending text.
+        text: String,
+    },
     /// A `Ref` names a definition absent from the document's `defs` table.
     #[error("at {path}: schema ref {name:?} has no definition in the document")]
     UnknownRef {

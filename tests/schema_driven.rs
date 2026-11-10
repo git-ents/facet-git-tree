@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use facet::Facet;
 use facet_git_tree::{
-    DeserializeError, EntryKind, EntryMode, Node, ObjectStore, Oid, RawTree, Schema,
+    DeserializeError, EntryKind, EntryMode, Node, ObjectStore, Oid, RawBlob, RawTree, Schema,
     SchemaReadError, SchemaWriteError, Sha1, Sha256, TreeEntry, VariantKind, deserialize,
     deserialize_value_with_schema, schema_of, serialize, serialize_into,
     serialize_value_with_schema, validate_with_schema,
@@ -252,6 +252,56 @@ fn raw_tree_reads_as_hex_string() -> anyhow::Result<()> {
     let doc = schema_of::<WithRaw>()?;
     let v = deserialize_value_with_schema(&root, &checked(&doc), &store)?;
     assert_eq!(v, value!({ "raw": (inner.to_string()) }));
+    Ok(())
+}
+
+/// A `RawBlob` node reads as the referenced object id in lowercase hex.
+#[test]
+fn raw_blob_reads_as_hex_string() -> anyhow::Result<()> {
+    #[derive(Facet)]
+    struct WithRaw {
+        raw: RawBlob,
+    }
+    let store = ObjectStore::default();
+    let blob = store.write_buf(Kind::Blob, b"payload")?;
+    let root = serialize_into(
+        &WithRaw {
+            raw: RawBlob::new(blob),
+        },
+        &store,
+    )?;
+    let doc = schema_of::<WithRaw>()?;
+    let v = deserialize_value_with_schema(&root, &checked(&doc), &store)?;
+    assert_eq!(v, value!({ "raw": (blob.to_string()) }));
+    Ok(())
+}
+
+/// A `RawBlob` node pointing at a tree, rather than a blob, is rejected as
+/// `NotABlob`.
+#[test]
+fn raw_blob_over_a_tree_is_not_a_blob() -> anyhow::Result<()> {
+    #[derive(Facet)]
+    struct WithRaw {
+        raw: RawBlob,
+    }
+    let store = ObjectStore::default();
+    let tree = store.write(&gix_object::Tree { entries: vec![] })?;
+    let root = serialize_into(
+        &WithRaw {
+            raw: RawBlob::new(tree),
+        },
+        &store,
+    )?;
+    let doc = schema_of::<WithRaw>()?;
+    let result = deserialize_value_with_schema(&root, &checked(&doc), &store);
+    assert!(
+        matches!(
+            result,
+            Err(SchemaReadError::Deserialize(DeserializeError::NotABlob(oid)))
+                if oid == tree.to_raw()
+        ),
+        "RawBlob over a tree must be NotABlob, got {result:?}"
+    );
     Ok(())
 }
 

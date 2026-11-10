@@ -241,6 +241,12 @@ impl<F: HashFormat, S: Find + Tagged<F> + ?Sized> Reader<'_, F, S> {
                 }
                 Ok(Value::from(oid.to_string()))
             }
+            Node::RawBlob => {
+                if data.kind != Kind::Blob {
+                    return Err(DeserializeError::NotABlob(oid.to_raw()).into());
+                }
+                Ok(Value::from(oid.to_string()))
+            }
             Node::Dynamic => self.read_dynamic(&data, oid, depth),
             Node::Ref(_) => Err(invalid_schema("unresolved reference")),
         }

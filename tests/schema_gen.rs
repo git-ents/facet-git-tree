@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use facet::Facet;
 use facet_git_tree::{
-    Node, RawTree, Schema, SchemaError, VariantKind, deserialize, schema_of, serialize,
+    Node, RawBlob, RawTree, Schema, SchemaError, VariantKind, deserialize, schema_of, serialize,
 };
 
 mod common;
@@ -467,6 +467,27 @@ fn raw_tree_field_schema() -> anyhow::Result<()> {
             vec![(
                 "WithRaw",
                 Node::Struct(fields(vec![("raw", Node::RawTree)]))
+            )]
+        )
+    );
+    Ok(())
+}
+
+/// A `RawBlob` field is the `RawBlob` schema node.
+#[test]
+fn raw_blob_field_schema() -> anyhow::Result<()> {
+    #[derive(Facet)]
+    struct WithRaw {
+        raw: RawBlob,
+    }
+    assert_eq!(
+        schema_of::<WithRaw>()?,
+        doc(
+            "WithRaw",
+            re("WithRaw"),
+            vec![(
+                "WithRaw",
+                Node::Struct(fields(vec![("raw", Node::RawBlob)]))
             )]
         )
     );

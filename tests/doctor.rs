@@ -26,7 +26,8 @@ fn expected_schema() -> Schema {
     let mut node_variants = BTreeMap::new();
     for name in [
         "unit", "bool", "char", "string", "i8", "i16", "i32", "i64", "i128", "isize", "u8", "u16",
-        "u32", "u64", "u128", "usize", "f32", "f64", "bytes", "cbor", "rawtree", "dynamic",
+        "u32", "u64", "u128", "usize", "f32", "f64", "bytes", "cbor", "rawblob", "rawtree",
+        "dynamic",
     ] {
         node_variants.insert(name.to_owned(), VariantKind::Unit);
     }
@@ -91,12 +92,12 @@ fn s0_matches_frozen_schema_and_ids_in_both_hash_formats() {
         (
             HashKind::Sha1,
             doctor::S0_SHA1,
-            "b8b61390b23a8ddcd72ab6171c676e89fbf67fad",
+            "8c32dad326c6570a4b41d01edc7891119fcd2022",
         ),
         (
             HashKind::Sha256,
             doctor::S0_SHA256,
-            "e490630b57486d68a19d90bcd9a9def27ba9f58760cccf06e7eb083039fdc5e8",
+            "11482543ce825b9f11e114158c86cb1ffade0fd4c70e70c606aa31905b96b8ef",
         ),
     ];
     let report = doctor::check().expect("both S0 checks");

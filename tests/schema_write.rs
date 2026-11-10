@@ -14,8 +14,8 @@ use std::fmt::Debug;
 
 use facet::Facet;
 use facet_git_tree::{
-    EntryKind, Node, ObjectStore, RawTree, Schema, SchemaReadError, SchemaWriteError, VariantKind,
-    deserialize_value_with_schema, schema_of, serialize, serialize_into,
+    EntryKind, Node, ObjectStore, RawBlob, RawTree, Schema, SchemaReadError, SchemaWriteError,
+    VariantKind, deserialize_value_with_schema, schema_of, serialize, serialize_into,
     serialize_value_with_schema,
 };
 use facet_value::{VArray, VObject, Value, value};
@@ -267,6 +267,35 @@ fn raw_tree_reference_matches_typed() {
     let doc = schema_of::<WithRaw>().unwrap();
     let written = serialize_value_with_schema(
         &value!({ "raw": (inner.to_string()) }),
+        &checked(&doc),
+        &store,
+    )
+    .unwrap();
+    assert_eq!(written, typed);
+}
+
+/// A `RawBlob` node accepts the referenced object id as hex and embeds it as a
+/// blob reference, writing no object — matching the typed `RawBlob` encoding.
+#[test]
+fn raw_blob_reference_matches_typed() {
+    #[derive(Facet)]
+    struct WithRaw {
+        raw: RawBlob,
+    }
+    // A pre-written blob both encodings will reference.
+    let store = ObjectStore::default();
+    let blob = store.write_buf(Kind::Blob, b"already written").unwrap();
+    let typed = serialize_into(
+        &WithRaw {
+            raw: RawBlob::new(blob),
+        },
+        &store,
+    )
+    .unwrap();
+
+    let doc = schema_of::<WithRaw>().unwrap();
+    let written = serialize_value_with_schema(
+        &value!({ "raw": (blob.to_string()) }),
         &checked(&doc),
         &store,
     )

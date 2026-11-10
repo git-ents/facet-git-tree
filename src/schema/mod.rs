@@ -174,6 +174,7 @@ fn validate_well_formed(doc: &Schema) -> Result<(), SchemaReadError> {
             | Node::Bytes
             | Node::Cbor
             | Node::RawTree
+            | Node::RawBlob
             | Node::Dynamic => {}
         }
     }
@@ -351,6 +352,8 @@ pub enum Node {
     Cbor,
     /// A [`RawTree`](crate::RawTree): a verbatim tree reference.
     RawTree,
+    /// A [`RawBlob`](crate::RawBlob): a verbatim blob reference.
+    RawBlob,
     /// A dynamic value (`facet_value::Value`): shape decided at runtime.
     Dynamic,
     /// A variable-length sequence (`Vec<T>`, `[T]`): an ordinal-named tree.
@@ -440,6 +443,7 @@ impl Node {
             Self::Bytes => "bytes",
             Self::Cbor => "cbor",
             Self::RawTree => "rawtree",
+            Self::RawBlob => "rawblob",
             Self::Dynamic => "dynamic",
             Self::List(_) => "list",
             Self::Array { .. } => "array",
@@ -741,6 +745,11 @@ impl Walker {
         // RawTree → a verbatim tree reference.
         if matches!(classify(shape), ShapeClass::RawTree) {
             return Ok(Node::RawTree);
+        }
+
+        // RawBlob → a verbatim blob reference.
+        if matches!(classify(shape), ShapeClass::RawBlob) {
+            return Ok(Node::RawBlob);
         }
 
         // Dynamic value → shape decided at runtime, not describable further.
