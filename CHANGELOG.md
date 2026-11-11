@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.2.0-alpha.3](https://github.com/git-ents/facet-git-tree/compare/facet-git-tree-v0.1.0-alpha.3...facet-git-tree-v0.2.0-alpha.3) (2026-11-11)
+
+
+### Features
+
+* Add a dynamic RawBlob schema node ([6eeea4f](https://github.com/git-ents/facet-git-tree/commit/6eeea4f5b7fcc0f8ab90fb4c4463cae3e8292cba))
+* Add the .schema document envelope ([47ab29a](https://github.com/git-ents/facet-git-tree/commit/47ab29a7c824cd0e067d953eac8c915988d675ef))
+* Add the schema-of-schemas fixed-point check ([9347d59](https://github.com/git-ents/facet-git-tree/commit/9347d59ea7f4bcf89df97458cf6e1e5783d6eaf5))
+* Add typed document storage ([ef7d52c](https://github.com/git-ents/facet-git-tree/commit/ef7d52c52353e9f4bd1d2c55704c8695d6565a16))
+* Implement the frozen git-tree wire format ([cdc1989](https://github.com/git-ents/facet-git-tree/commit/cdc19891f0e71af5ed2abc34bbdde7d6e9bc8f27))
+
+
+### Bug Fixes
+
+* **de:** Reconcile the tree entry pre-scan count with the decoded entries ([d59852d](https://github.com/git-ents/facet-git-tree/commit/d59852d54ca7c6c843ba5e2ef5f9bb8cec6f7b5e))
+* Keep CBOR validation lint-clean without the value feature ([a3b4bd9](https://github.com/git-ents/facet-git-tree/commit/a3b4bd90916c2a65f8ae7dc3194c0297f2960c7c))
+
+
+### Documentation
+
+* Add the wire-format implementation dev plan ([9a39890](https://github.com/git-ents/facet-git-tree/commit/9a398909bfc4e6ca0845dd1d453dbdd281779397))
+* Correct the escaping example for a non-ASCII name ([a86b58b](https://github.com/git-ents/facet-git-tree/commit/a86b58bda80839cb71f45e30581c8ebfc602a684))
+* Describe the document envelope in the readme ([98c943e](https://github.com/git-ents/facet-git-tree/commit/98c943e4ebbfdb7e33edf5e7414f4dbaebd3ee7e))
+* Describe the typed object ids and checked schemas ([25c5c59](https://github.com/git-ents/facet-git-tree/commit/25c5c597f34ef8c239560306276926ac7c296346))
+* Document the frozen wire format ([1484a88](https://github.com/git-ents/facet-git-tree/commit/1484a88e392e83df99c305093f4efbb8060b72ea))
+* Document the RawBlob schema node ([1599a11](https://github.com/git-ents/facet-git-tree/commit/1599a119771612a9ee304ac1fcca6ae7c5d42ed4))
+* Drop pre-freeze names from the shared fixtures ([0d07456](https://github.com/git-ents/facet-git-tree/commit/0d07456dfdc3e470f2c05953ae476927cf8abe4f))
+* Freeze the git-tree wire format ([1c10368](https://github.com/git-ents/facet-git-tree/commit/1c10368d34fd248f55dda962a43ed5a8e24dcdce))
+* Record the `.schema` envelope ownership issue ([250dd9d](https://github.com/git-ents/facet-git-tree/commit/250dd9d954238d20dbe8f01f793f63ec76a89d40))
+* Require a struct document root ([7dad00e](https://github.com/git-ents/facet-git-tree/commit/7dad00e4224935f157f0f415c5e2e02ed82f3a10))
+* Store non-finite floats instead of rejecting them ([cfed1d5](https://github.com/git-ents/facet-git-tree/commit/cfed1d5ee8c0bbc8a2f21af4790b481ac74a3847))
+
+
+### Code Refactoring
+
+* Apply code simplifications ([f15a790](https://github.com/git-ents/facet-git-tree/commit/f15a7909ab8b044a59a3b17705fcd7f7626d25dd))
+* Carry a validated schema through the schema-directed entry points ([5422dda](https://github.com/git-ents/facet-git-tree/commit/5422dda6d22e4f4d27cac93f323ef286dc18517f))
+* Carry validated tree entries through the decode path ([8b10146](https://github.com/git-ents/facet-git-tree/commit/8b10146bb37174a3b23a9d9b5e757cbb66457ebb))
+* Centralize schema ref resolution ([458547b](https://github.com/git-ents/facet-git-tree/commit/458547b4ffb6f408dc97b022187c76208b9ff56c))
+* Give normal-form limits and map keys representable types ([466d92d](https://github.com/git-ents/facet-git-tree/commit/466d92da5e97e20cfd9c4abbb64177c3c1645301))
+* Parameterize object ids by hash format and migrate tests ([9a925d7](https://github.com/git-ents/facet-git-tree/commit/9a925d7b1323e9244d29ffde2e768d81995a4b4d))
+
+
+### Tests
+
+* Compile the README example as a doctest ([93837b4](https://github.com/git-ents/facet-git-tree/commit/93837b4910a588c06fa3474edd52d5d364e5cfd1))
+
 ## [0.1.0-alpha.3](https://github.com/git-ents/facet-git-tree/compare/facet-git-tree-v0.1.0-alpha.1...facet-git-tree-v0.1.0-alpha.3) (2026-10-22)
 
 Note that `v0.1.0-alpha.2` was published accidentally, and was therefore yanked.
